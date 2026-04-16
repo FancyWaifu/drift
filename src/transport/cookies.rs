@@ -150,6 +150,7 @@ impl Inner {
     /// timestamp)` with the current rotating secret and ships it.
     pub(crate) async fn send_challenge(
         &self,
+        iface_idx: usize,
         client_peer_id: PeerId,
         src: SocketAddr,
         client_static_pub: &[u8; STATIC_KEY_LEN],
@@ -180,7 +181,7 @@ impl Inner {
         wire.extend_from_slice(&timestamp.to_be_bytes());
         wire.extend_from_slice(&mac);
 
-        self.ifaces.send_for(0, &wire, src).await?;
+        self.ifaces.send_for(iface_idx, &wire, src).await?;
         self.metrics.challenges_issued.fetch_add(1, Ordering::Relaxed);
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
@@ -297,7 +298,8 @@ impl Inner {
         };
 
         if let Some((wire, target)) = retry {
-            self.ifaces.send_for(0, &wire, target).await?;
+            let iface = self.iface_for(&server_peer_id).await;
+            self.ifaces.send_for(iface, &wire, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_sent
