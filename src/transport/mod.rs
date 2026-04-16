@@ -312,7 +312,7 @@ pub struct Metrics {
 /// `impl Inner { ... }` blocks, so fields are visible to every
 /// file in the `transport` module tree.
 pub(crate) struct Inner {
-    pub(crate) io: Arc<dyn crate::io::PacketIO>,
+    pub(crate) ifaces: crate::io::InterfaceSet,
     pub(crate) identity: Arc<Identity>,
     pub(crate) local_peer_id: PeerId,
     pub(crate) peers: Arc<PeerShards>,
@@ -399,7 +399,6 @@ impl Transport {
         let rtt_probe_interval_ms = config.rtt_probe_interval_ms;
         let recv_channel_capacity = config.recv_channel_capacity;
         let local_peer_id = identity.peer_id();
-        // Open qlog writer BEFORE moving config into Inner.
         let qlog_writer = config.qlog_path.as_deref().and_then(|p| {
             match qlog::QlogWriter::open(p) {
                 Ok(w) => Some(w),
@@ -409,10 +408,9 @@ impl Transport {
                 }
             }
         });
-        let enable_ecn = config.enable_ecn;
 
         let inner = Arc::new(Inner {
-            io,
+            ifaces: crate::io::InterfaceSet::single("default", io),
             identity: Arc::new(identity),
             local_peer_id,
             peers: Arc::new(PeerShards::default()),
@@ -431,8 +429,18 @@ impl Transport {
         // bind_inner, if the IO adapter is UDP.
 
         let (tx, rx) = mpsc::channel(recv_channel_capacity);
-        let bg = inner.clone();
-        tokio::spawn(async move { bg.run_recv_loop(tx).await });
+        // Spawn one recv loop per interface so all adapters
+        // feed into the same processing pipeline. When a
+        // second interface is added later via add_interface,
+        // it gets its own recv loop spawned at that time.
+        let num_ifaces = inner.ifaces.len();
+        for iface_idx in 0..num_ifaces {
+            let bg = inner.clone();
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                bg.run_recv_loop_for(tx_clone, iface_idx).await
+            });
+        }
 
         let beacon_bg = inner.clone();
         tokio::spawn(async move { beacon_bg.run_beacon_loop().await });
@@ -484,7 +492,7 @@ impl Transport {
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.inner.io.local_addr()?)
+        Ok(self.inner.ifaces.local_addr()?)
     }
 
     pub fn local_peer_id(&self) -> PeerId {
@@ -501,11 +509,9 @@ impl Transport {
     /// platforms or kernels that don't honor the socket option,
     /// this returns false even when ECN was requested.
     pub fn is_ecn_enabled(&self) -> bool {
-        // ECN readback needs the concrete UdpSocket. If the
-        // transport uses a non-UDP PacketIO, ECN is N/A.
         #[cfg(unix)]
         {
-            if let Some(fd) = self.inner.io.as_raw_fd() {
+            if let Some(fd) = self.inner.ifaces.as_raw_fd() {
                 // Create a temporary reference to peek at
                 // IP_TOS. This is safe because the fd is
                 // owned by the Arc'd UdpPacketIO and won't
@@ -924,7 +930,7 @@ impl Inner {
             (wire, peer.addr, new_key_bytes)
         };
 
-        self.io.send_to(&wire, addr).await?;
+        self.ifaces.send_default(&wire, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1023,7 +1029,7 @@ impl Inner {
             (ack_wire, peer.addr, new_key_bytes_val)
         };
 
-        self.io.send_to(&ack_wire, ack_addr).await?;
+        self.ifaces.send_default(&ack_wire, ack_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1106,7 +1112,7 @@ impl Inner {
             (wire, addr)
         };
 
-        self.io.send_to(&bytes, addr).await?;
+        self.ifaces.send_default(&bytes, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1329,7 +1335,7 @@ impl Inner {
             // the trait. batch::send_batch needs a UdpSocket ref.
             let mut n = 0usize;
             for (bytes, addr) in &batch {
-                self.io.send_to(bytes, *addr).await?;
+                self.ifaces.send_default(bytes, *addr).await?;
                 n += 1;
             }
             self.metrics
@@ -1347,7 +1353,7 @@ impl Inner {
         let sent = {
             let mut sent = 0;
             for (bytes, addr) in &batch {
-                self.io.send_to(bytes, *addr).await?;
+                self.ifaces.send_default(bytes, *addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics
                     .bytes_sent
@@ -1393,7 +1399,7 @@ impl Inner {
     async fn dispatch(&self, action: SendAction) -> Result<()> {
         match action {
             SendAction::Data(bytes, addr) => {
-                self.io.send_to(&bytes, addr).await?;
+                self.ifaces.send_default(&bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 if let Some(q) = &self.qlog {
@@ -1401,7 +1407,7 @@ impl Inner {
                 }
             }
             SendAction::Hello(bytes, addr) => {
-                self.io.send_to(&bytes, addr).await?;
+                self.ifaces.send_default(&bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 debug!("sent HELLO to {:?}", addr);
@@ -1414,20 +1420,18 @@ impl Inner {
         Ok(())
     }
 
-    async fn run_recv_loop(self: Arc<Self>, tx: mpsc::Sender<Received>) {
+    async fn run_recv_loop_for(
+        self: Arc<Self>,
+        tx: mpsc::Sender<Received>,
+        iface_idx: usize,
+    ) {
+        let iface = match self.ifaces.get(iface_idx) {
+            Some(io) => io.clone(),
+            None => return,
+        };
         let mut buf = vec![0u8; MAX_PACKET];
         loop {
-            // ECN: when enabled and the platform supports cmsg
-            // delivery (Linux), use the recvmsg-based path so we
-            // can read the CE codepoint off each packet. Falls
-            // back to plain recv_from on every other platform
-            // and when ECN is disabled.
-            // ECN recv path: only works on UDP-backed IO where
-            // we can access the raw fd for recvmsg with cmsgs.
-            // For all other IO adapters (TCP, serial, etc.),
-            // fall back to the trait's recv_from and report
-            // ecn_ce = false.
-            let (n, src, ecn_ce) = match self.io.recv_from(&mut buf).await {
+            let (n, src, ecn_ce) = match iface.recv_from(&mut buf).await {
                 Ok((n, src)) => (n, src, false),
                 Err(e) => {
                     warn!(error = %e, "recv_from failed");
@@ -1603,7 +1607,7 @@ impl Inner {
         };
 
         if let Some((bytes, addr)) = probe {
-            if let Err(e) = self.io.send_to(&bytes, addr).await {
+            if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
                 debug!(error = %e, "PathChallenge send failed (short hdr)");
             } else {
                 self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
@@ -1771,7 +1775,7 @@ impl Inner {
                 out
             };
             for (bytes, addr) in to_retransmit {
-                if let Err(e) = self.io.send_to(&bytes, addr).await {
+                if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
                     warn!(error = %e, "HELLO retransmit failed");
                 } else {
                     self.metrics.handshake_retries.fetch_add(1, Ordering::Relaxed);
@@ -2021,7 +2025,7 @@ impl Inner {
             return Ok(());
         }
 
-        self.io.send_to(&ack_bytes, ack_addr).await?;
+        self.ifaces.send_default(&ack_bytes, ack_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics.bytes_sent.fetch_add(ack_bytes.len() as u64, Ordering::Relaxed);
         debug!("sent HELLO_ACK to {:?}", ack_addr);
@@ -2153,7 +2157,7 @@ impl Inner {
         }
 
         for (bytes, target) in to_send {
-            self.io.send_to(&bytes, target).await?;
+            self.ifaces.send_default(&bytes, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
@@ -2441,7 +2445,7 @@ impl Inner {
         // the responder-side establishment path, outside the
         // peer lock.
         for (bytes, addr) in flushed_pending {
-            if let Err(e) = self.io.send_to(&bytes, addr).await {
+            if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
                 debug!(error = %e, "flushed DATA send failed");
             } else {
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
@@ -2467,7 +2471,7 @@ impl Inner {
         }
 
         if let Some((bytes, addr)) = probe_to_send {
-            if let Err(e) = self.io.send_to(&bytes, addr).await {
+            if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
                 debug!(error = %e, "PathChallenge send failed");
             } else {
                 self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);

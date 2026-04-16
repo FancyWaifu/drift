@@ -182,6 +182,89 @@ impl PacketIO for TcpPacketIO {
     }
 }
 
+/// A set of named packet I/O interfaces that a single DRIFT
+/// transport listens on simultaneously. Incoming packets
+/// from ANY interface are multiplexed into a single recv
+/// stream; outgoing packets are routed to the interface
+/// tagged on the destination peer.
+///
+/// Example: a node with `interfaces[0] = UdpPacketIO` and
+/// `interfaces[1] = TcpPacketIO` can talk to UDP peers via
+/// index 0 and TCP peers via index 1 without any manual
+/// bridging — the mesh routing layer forwards between them
+/// automatically because both interfaces feed the same
+/// DRIFT transport.
+pub struct InterfaceSet {
+    interfaces: Vec<(String, Arc<dyn PacketIO>)>,
+}
+
+impl InterfaceSet {
+    /// Create an interface set with a single adapter (the
+    /// common case for backward compatibility).
+    pub fn single(name: impl Into<String>, io: Arc<dyn PacketIO>) -> Self {
+        Self {
+            interfaces: vec![(name.into(), io)],
+        }
+    }
+
+    /// Add a new interface. Returns its index (used as the
+    /// `interface_id` on peers reached through it).
+    pub fn add(&mut self, name: impl Into<String>, io: Arc<dyn PacketIO>) -> usize {
+        let idx = self.interfaces.len();
+        self.interfaces.push((name.into(), io));
+        idx
+    }
+
+    /// Number of interfaces.
+    pub fn len(&self) -> usize {
+        self.interfaces.len()
+    }
+
+    /// Send a packet via a specific interface by index.
+    pub async fn send_via(
+        &self,
+        interface_id: usize,
+        buf: &[u8],
+        dest: SocketAddr,
+    ) -> io::Result<usize> {
+        let (_, io) = self
+            .interfaces
+            .get(interface_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "interface index out of range"))?;
+        io.send_to(buf, dest).await
+    }
+
+    /// Send via interface 0 (default). Convenience for code
+    /// paths that don't (yet) track per-peer interfaces.
+    pub async fn send_default(
+        &self,
+        buf: &[u8],
+        dest: SocketAddr,
+    ) -> io::Result<usize> {
+        self.send_via(0, buf, dest).await
+    }
+
+    /// Access a specific interface by index.
+    pub fn get(&self, idx: usize) -> Option<&Arc<dyn PacketIO>> {
+        self.interfaces.get(idx).map(|(_, io)| io)
+    }
+
+    /// The local address of the first (default) interface.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.interfaces
+            .first()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
+            .1
+            .local_addr()
+    }
+
+    /// Raw fd of the first interface (for ECN etc).
+    #[cfg(unix)]
+    pub fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.interfaces.first().and_then(|(_, io)| io.as_raw_fd())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

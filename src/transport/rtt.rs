@@ -98,7 +98,7 @@ impl Inner {
                 tx.seal_into(seq, PacketType::Ping as u8, &aad, &nonce, &mut wire)?;
                 wire
             };
-            self.io.send_to(&wire, addr).await?;
+            self.ifaces.send_default(&wire, addr).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_sent
@@ -186,7 +186,7 @@ impl Inner {
             wire
         };
 
-        self.io.send_to(&pong_wire, src).await?;
+        self.ifaces.send_default(&pong_wire, src).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
