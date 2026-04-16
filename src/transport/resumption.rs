@@ -741,7 +741,7 @@ impl Inner {
         let tag = &body[tag_start..tag_start + AUTH_TAG_LEN];
 
         let server_id = header.src_id;
-        let pending_built: Vec<(Vec<u8>, SocketAddr)>;
+        let pending_built: Vec<(Vec<u8>, SocketAddr, usize)>;
         {
             let mut peers = self.peers.lock_for(&server_id).await;
             let peer = peers.get_mut(&server_id).ok_or(DriftError::UnknownPeer)?;
@@ -818,7 +818,7 @@ impl Inner {
             let pending = std::mem::take(&mut peer.pending);
             let mut built = Vec::with_capacity(pending.len());
             for ps in pending {
-                if let Ok(super::SendAction::Data(bytes, target)) = super::build_data_packet(
+                if let Ok(super::SendAction::Data(bytes, target, iface)) = super::build_data_packet(
                     self.local_peer_id,
                     peer,
                     &ps.payload,
@@ -826,14 +826,14 @@ impl Inner {
                     ps.coalesce_group,
                     None,
                 ) {
-                    built.push((bytes, target));
+                    built.push((bytes, target, iface));
                 }
             }
             pending_built = built;
         }
 
-        for (bytes, target) in pending_built {
-            self.ifaces.send_for(0, &bytes, target).await?;
+        for (bytes, target, iface) in pending_built {
+            self.ifaces.send_for(iface, &bytes, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_sent

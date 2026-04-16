@@ -1067,7 +1067,7 @@ impl Inner {
             (ack_wire, peer.addr, new_key_bytes_val)
         };
 
-        self.ifaces.send_for(0, &ack_wire, ack_addr).await?;
+        self.ifaces.send_for(self.iface_for(&peer_id).await, &ack_wire, ack_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1150,7 +1150,7 @@ impl Inner {
             (wire, addr)
         };
 
-        self.ifaces.send_for(0, &bytes, addr).await?;
+        self.ifaces.send_for(self.iface_for(dst).await, &bytes, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1330,7 +1330,7 @@ impl Inner {
         // We group items by shard to amortize lock
         // acquisition, but for simplicity fall back to
         // per-item lock_for — good enough for v1.
-        let mut batch: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(items.len());
+        let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(items.len());
         for (dst, payload) in items {
             if payload.len() > MAX_PAYLOAD {
                 continue;
@@ -1345,7 +1345,7 @@ impl Inner {
                 // queueing.
                 continue;
             }
-            if let Ok(SendAction::Data(bytes, target)) = build_data_packet(
+            if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
                 self.local_peer_id,
                 peer,
                 payload,
@@ -1353,7 +1353,7 @@ impl Inner {
                 0,
                 None,
             ) {
-                batch.push((bytes, target));
+                batch.push((bytes, target, iface));
             }
         }
 
@@ -1364,41 +1364,18 @@ impl Inner {
         // Hand the built batch to the platform-specific
         // sender. On Linux this is one `sendmmsg`; elsewhere
         // it's a loop of `send_to`.
-        #[cfg(unix)]
         let sent = {
-            let total_bytes: u64 =
-                batch.iter().map(|(b, _)| b.len() as u64).sum();
-            // Batch send via the concrete UDP socket if available;
-            // otherwise fall back to per-packet send_to through
-            // the trait. batch::send_batch needs a UdpSocket ref.
             let mut n = 0usize;
-            for (bytes, addr) in &batch {
-                self.ifaces.send_for(0, bytes, *addr).await?;
-                n += 1;
-            }
-            self.metrics
-                .packets_sent
-                .fetch_add(n as u64, Ordering::Relaxed);
-            self.metrics
-                .bytes_sent
-                .fetch_add(total_bytes, Ordering::Relaxed);
-            self.metrics
-                .batched_sends
-                .fetch_add(1, Ordering::Relaxed);
-            n
-        };
-        #[cfg(not(unix))]
-        let sent = {
-            let mut sent = 0;
-            for (bytes, addr) in &batch {
-                self.ifaces.send_for(0, bytes, *addr).await?;
+            for (bytes, addr, iface) in &batch {
+                self.ifaces.send_for(*iface, bytes, *addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics
                     .bytes_sent
                     .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                sent += 1;
+                n += 1;
             }
-            sent
+            self.metrics.batched_sends.fetch_add(1, Ordering::Relaxed);
+            n
         };
         Ok(sent)
     }
@@ -1443,16 +1420,16 @@ impl Inner {
 
     async fn dispatch(&self, action: SendAction) -> Result<()> {
         match action {
-            SendAction::Data(bytes, addr) => {
-                self.ifaces.send_for(0, &bytes, addr).await?;
+            SendAction::Data(bytes, addr, iface) => {
+                self.ifaces.send_for(iface, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 if let Some(q) = &self.qlog {
                     q.log_packet_sent("Data", &addr.to_string(), bytes.len(), 0);
                 }
             }
-            SendAction::Hello(bytes, addr) => {
-                self.ifaces.send_for(0, &bytes, addr).await?;
+            SendAction::Hello(bytes, addr, iface) => {
+                self.ifaces.send_for(iface, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 debug!("sent HELLO to {:?}", addr);
@@ -1652,7 +1629,7 @@ impl Inner {
         };
 
         if let Some((bytes, addr)) = probe {
-            if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
+            if let Err(e) = self.ifaces.send_for(self.iface_for(&peer_id).await, &bytes, addr).await {
                 debug!(error = %e, "PathChallenge send failed (short hdr)");
             } else {
                 self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
@@ -1778,7 +1755,7 @@ impl Inner {
         ));
         loop {
             ticker.tick().await;
-            let to_retransmit: Vec<(Vec<u8>, SocketAddr)> = {
+            let to_retransmit: Vec<(Vec<u8>, SocketAddr, usize)> = {
                 let routes = self.routes.lock().await;
                 let mut peers = self.peers.lock_all().await;
                 let mut out = Vec::new();
@@ -1815,13 +1792,13 @@ impl Inner {
                             cookie.as_ref(),
                         );
                         let target = mesh.unwrap_or(peer.addr);
-                        out.push((wire, target));
+                        out.push((wire, target, peer.interface_id));
                     }
                 }
                 out
             };
-            for (bytes, addr) in to_retransmit {
-                if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
+            for (bytes, addr, iface) in to_retransmit {
+                if let Err(e) = self.ifaces.send_for(iface, &bytes, addr).await {
                     warn!(error = %e, "HELLO retransmit failed");
                 } else {
                     self.metrics.handshake_retries.fetch_add(1, Ordering::Relaxed);
@@ -1884,7 +1861,7 @@ impl Inner {
         let has_cookie_tail = body.len() >= HELLO_WITH_COOKIE_LEN;
         if cookie_required {
             if !has_cookie_tail {
-                self.send_challenge(
+                self.send_challenge(iface_idx,
                     header.src_id,
                     src,
                     &client_static_pub,
@@ -1908,7 +1885,7 @@ impl Inner {
                 self.metrics.cookies_rejected.fetch_add(1, Ordering::Relaxed);
                 // Reply with a fresh challenge so a legitimate client
                 // whose cookie expired can recover without restarting.
-                self.send_challenge(
+                self.send_challenge(iface_idx,
                     header.src_id,
                     src,
                     &client_static_pub,
@@ -2100,7 +2077,7 @@ impl Inner {
 
         // Client looks up the peer by src_id = the server's identity.
         let peer_id = header.src_id;
-        let to_send: Vec<(Vec<u8>, SocketAddr)>;
+        let to_send: Vec<(Vec<u8>, SocketAddr, usize)>;
         let mut cid_key_for_install: Option<[u8; 32]> = None;
         let mesh_next_hop = self.routes.lock().await.lookup(&peer_id);
         {
@@ -2188,7 +2165,7 @@ impl Inner {
             let pending = std::mem::take(&mut peer.pending);
             let mut built = Vec::with_capacity(pending.len());
             for ps in pending {
-                if let SendAction::Data(bytes, target) = build_data_packet(
+                if let SendAction::Data(bytes, target, iface) = build_data_packet(
                     self.local_peer_id,
                     peer,
                     &ps.payload,
@@ -2196,7 +2173,7 @@ impl Inner {
                     ps.coalesce_group,
                     mesh_next_hop,
                 )? {
-                    built.push((bytes, target));
+                    built.push((bytes, target, iface));
                 }
             }
             to_send = built;
@@ -2208,8 +2185,8 @@ impl Inner {
             self.install_cids(peer_id, key, true).await;
         }
 
-        for (bytes, target) in to_send {
-            self.ifaces.send_for(0, &bytes, target).await?;
+        for (bytes, target, iface) in to_send {
+            self.ifaces.send_for(iface, &bytes, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
@@ -2308,7 +2285,7 @@ impl Inner {
             Option<Received>,
             Option<(Vec<u8>, SocketAddr)>,
             bool,
-            Vec<(Vec<u8>, SocketAddr)>,
+            Vec<(Vec<u8>, SocketAddr, usize)>,
             Option<[u8; 32]>,
         ) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
@@ -2380,7 +2357,7 @@ impl Inner {
 
             let mut just_established = false;
             let mut just_established_key: Option<[u8; 32]> = None;
-            let mut flushed: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
+            let mut flushed: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::new();
             if matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
                 if let HandshakeState::AwaitingData {
                     tx,
@@ -2423,7 +2400,7 @@ impl Inner {
                     // in `handle_hello_ack`.
                     let pending = std::mem::take(&mut peer.pending);
                     for ps in pending {
-                        if let Ok(SendAction::Data(bytes, target)) = build_data_packet(
+                        if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
                             self.local_peer_id,
                             peer,
                             &ps.payload,
@@ -2431,7 +2408,7 @@ impl Inner {
                             ps.coalesce_group,
                             None,
                         ) {
-                            flushed.push((bytes, target));
+                            flushed.push((bytes, target, iface));
                         }
                     }
                 }
@@ -2496,8 +2473,8 @@ impl Inner {
         // Emit any DATA we flushed from the pending queue on
         // the responder-side establishment path, outside the
         // peer lock.
-        for (bytes, addr) in flushed_pending {
-            if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
+        for (bytes, addr, iface) in flushed_pending {
+            if let Err(e) = self.ifaces.send_for(iface, &bytes, addr).await {
                 debug!(error = %e, "flushed DATA send failed");
             } else {
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
@@ -2523,7 +2500,7 @@ impl Inner {
         }
 
         if let Some((bytes, addr)) = probe_to_send {
-            if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
+            if let Err(e) = self.ifaces.send_for(self.iface_for(&peer_id).await, &bytes, addr).await {
                 debug!(error = %e, "PathChallenge send failed");
             } else {
                 self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
@@ -2648,7 +2625,7 @@ fn build_data_packet_with_cid(
         if mesh_next_hop.is_none() && deadline_ms == 0 && coalesce_group == 0 {
             let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let wire = crate::short_header::encode_short(cid, seq, tx, payload)?;
-            return Ok(SendAction::Data(wire, peer.addr));
+            return Ok(SendAction::Data(wire, peer.addr, peer.interface_id));
         }
     }
 
@@ -2676,7 +2653,7 @@ fn build_data_packet_with_cid(
     tx.seal_into(seq, PacketType::Data as u8, &aad, payload, &mut wire)?;
 
     let target = mesh_next_hop.unwrap_or(peer.addr);
-    Ok(SendAction::Data(wire, target))
+    Ok(SendAction::Data(wire, target, peer.interface_id))
 }
 
 /// Run the server-side half of the handshake: derive session key
@@ -2830,11 +2807,11 @@ fn build_hello(
         cookie: None,
     };
     let target = mesh_next_hop.unwrap_or(peer.addr);
-    SendAction::Hello(wire, target)
+    SendAction::Hello(wire, target, peer.interface_id)
 }
 
 enum SendAction {
-    Data(Vec<u8>, SocketAddr),
-    Hello(Vec<u8>, SocketAddr),
+    Data(Vec<u8>, SocketAddr, usize),
+    Hello(Vec<u8>, SocketAddr, usize),
     Queued,
 }
