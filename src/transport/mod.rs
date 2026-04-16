@@ -1739,7 +1739,7 @@ impl Inner {
                 Ok(None)
             }
             PacketType::Beacon => {
-                self.handle_beacon(&header, data, body, src).await?;
+                self.handle_beacon(&header, data, body, src, iface_idx).await?;
                 Ok(None)
             }
             PacketType::ResumeHello => {
