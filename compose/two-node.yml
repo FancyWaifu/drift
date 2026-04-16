@@ -1,0 +1,24 @@
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-two-bob
+    command: drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.10.0.6
+  alice:
+    image: drift:latest
+    container_name: drift-two-alice
+    depends_on:
+      - bob
+    command: sh -c "sleep 2 && drift-send 10.10.0.6:9000"
+    networks:
+      testnet:
+        ipv4_address: 10.10.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24

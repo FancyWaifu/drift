@@ -1,0 +1,40 @@
+# Geostationary satellite link: ~300ms one-way delay (600ms RTT),
+# small jitter, 0.5% loss. Drift-send uses a 2000ms deadline to
+# accommodate the round-trip time.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-sat-bob
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem delay 300ms 30ms loss 0.5%
+        echo "[bob] satellite qdisc applied (300ms+-30ms, 0.5% loss)"
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.61.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-sat-alice
+    cap_add: [NET_ADMIN]
+    depends_on: [bob]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem delay 300ms 30ms loss 0.5%
+        sleep 3
+        exec drift-send 10.61.0.6:9000 --deadline 2000
+    networks:
+      testnet:
+        ipv4_address: 10.61.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.61.0.0/24

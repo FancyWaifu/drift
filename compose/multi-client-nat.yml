@@ -1,0 +1,81 @@
+# 10 scale-clients behind a single NAT, all hitting one server.
+# Tests that nat-a's conntrack can handle many concurrent UDP flows
+# from the same source network.
+
+services:
+  server:
+    image: drift:latest
+    container_name: drift-mcn-server
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        exec scale-server 0.0.0.0:9000 10
+    networks:
+      public-net:
+        ipv4_address: 203.0.113.50
+
+  nat-a:
+    image: drift:latest
+    container_name: drift-mcn-router
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -P FORWARD DROP
+        iptables -A FORWARD -s 10.70.0.0/24 -d 203.0.113.0/24 -j ACCEPT
+        iptables -A FORWARD -s 203.0.113.0/24 -d 10.70.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -t nat -A POSTROUTING -s 10.70.0.0/24 -o eth1 -j MASQUERADE
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        echo "[nat-a] ready for multi-client NAT"
+        exec sleep infinity
+    networks:
+      private-a:
+        ipv4_address: 10.70.0.254
+      public-net:
+        ipv4_address: 203.0.113.10
+
+  clients:
+    image: drift:latest
+    container_name: drift-mcn-clients
+    cap_add: [NET_ADMIN]
+    depends_on: [nat-a, server]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        sleep 3
+        echo "launching 10 concurrent clients..."
+        for i in 0 1 2 3 4 5 6 7 8 9; do
+          scale-client 203.0.113.50:9000 $$i --count 30 --interval_ms 10 &
+        done
+        wait
+        echo "all clients done"
+        sleep 2
+    networks:
+      private-a:
+        ipv4_address: 10.70.0.5
+
+networks:
+  private-a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.70.0.0/24
+          gateway: 10.70.0.1
+  public-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+          gateway: 203.0.113.1

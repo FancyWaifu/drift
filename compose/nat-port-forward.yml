@@ -1,0 +1,116 @@
+# Realistic "home server behind router with port forward" scenario.
+# Bob is behind nat-b, but nat-b has a DNAT PREROUTING rule mapping
+# public 203.0.113.20:9000 -> internal 10.2.0.5:9000 (bob's DRIFT port).
+# Alice behind nat-a connects to 203.0.113.20:9000 and reaches bob.
+# This is what home users configure manually for game servers.
+
+services:
+  alice:
+    image: drift:latest
+    container_name: drift-natpf-alice
+    cap_add: [NET_ADMIN]
+    depends_on: [nat-a, nat-b]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.1.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.2.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.1.0.254
+        sleep 3
+        exec drift-send 203.0.113.20:9000
+    networks:
+      private-a:
+        ipv4_address: 10.1.0.5
+
+  nat-a:
+    image: drift:latest
+    container_name: drift-natpf-router-a
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -P FORWARD DROP
+        iptables -A FORWARD -s 10.1.0.0/24 -d 203.0.113.0/24 -j ACCEPT
+        iptables -A FORWARD -s 203.0.113.0/24 -d 10.1.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -t nat -A POSTROUTING -s 10.1.0.0/24 -o eth1 -j MASQUERADE
+        iptables -A OUTPUT -d 10.1.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        exec sleep infinity
+    networks:
+      private-a:
+        ipv4_address: 10.1.0.254
+      public-net:
+        ipv4_address: 203.0.113.10
+
+  nat-b:
+    image: drift:latest
+    container_name: drift-natpf-router-b
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Allow FORWARD for conntrack-tracked flows AND for the explicitly
+        # port-forwarded UDP traffic.
+        iptables -P FORWARD DROP
+        iptables -A FORWARD -s 10.2.0.0/24 -d 203.0.113.0/24 -j ACCEPT
+        iptables -A FORWARD -s 203.0.113.0/24 -d 10.2.0.0/24 -p udp --dport 9000 -j ACCEPT
+        iptables -A FORWARD -s 203.0.113.0/24 -d 10.2.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -t nat -A POSTROUTING -s 10.2.0.0/24 -o eth1 -j MASQUERADE
+        # Port forward: anything hitting 203.0.113.20:9000 from outside
+        # goes to bob at 10.2.0.5:9000.
+        iptables -t nat -A PREROUTING -i eth1 -p udp --dport 9000 -j DNAT --to-destination 10.2.0.5:9000
+        iptables -A OUTPUT -d 10.2.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        echo "[nat-b] port forward installed and sealed"
+        exec sleep infinity
+    networks:
+      private-b:
+        ipv4_address: 10.2.0.254
+      public-net:
+        ipv4_address: 203.0.113.20
+
+  bob:
+    image: drift:latest
+    container_name: drift-natpf-bob
+    cap_add: [NET_ADMIN]
+    depends_on: [nat-b]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.2.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.1.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.2.0.254
+        exec drift-recv
+    networks:
+      private-b:
+        ipv4_address: 10.2.0.5
+
+networks:
+  private-a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.1.0.0/24
+          gateway: 10.1.0.1
+  private-b:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.2.0.0/24
+          gateway: 10.2.0.1
+  public-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+          gateway: 203.0.113.1

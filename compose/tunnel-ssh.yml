@@ -1,0 +1,97 @@
+# Real SSH over DRIFT.
+#
+# Long-lived interactive-shaped TCP session through the DRIFT tunnel.
+# Same four-container layout:
+#
+#   sshd-server  — drift:latest running a real openssh sshd on :22 with
+#                  a throwaway test account (drifttest / drifttest).
+#   drift-listen — drift-tun listen forwarding to sshd-server:22
+#   drift-dial   — drift-tun dial exposing 127.0.0.1:2222
+#   ssh-client   — drift:latest running sshpass + ssh against drift-dial
+#
+# Success criterion: `uname -a` executed on the server arrives back at
+# the client over the DRIFT tunnel and contains the server's hostname.
+
+services:
+  sshd-server:
+    image: drift:latest
+    container_name: drift-ssh-sshd
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # One-time sshd setup: host keys, test user, permit password.
+        mkdir -p /run/sshd
+        ssh-keygen -A > /dev/null
+        useradd -m -s /bin/bash drifttest
+        echo 'drifttest:drifttest' | chpasswd
+        sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sed -i 's/#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+        echo "[sshd-server] starting sshd on :22"
+        exec /usr/sbin/sshd -D -e
+    networks:
+      testnet:
+        ipv4_address: 10.93.0.20
+
+  drift-listen:
+    image: drift:latest
+    container_name: drift-ssh-listen
+    depends_on: [sshd-server]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 2
+        exec drift-tun listen --name server --drift-port 9000 \
+          --forward 10.93.0.20:22
+    networks:
+      testnet:
+        ipv4_address: 10.93.0.10
+
+  drift-dial:
+    image: drift:latest
+    container_name: drift-ssh-dial
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec drift-tun dial --name client \
+          --peer server@10.93.0.10:9000 --listen-port 2222
+    networks:
+      testnet:
+        ipv4_address: 10.93.0.11
+
+  ssh-client:
+    image: drift:latest
+    container_name: drift-ssh-client
+    depends_on: [drift-dial]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Wait for the DRIFT tunnel to come up.
+        sleep 6
+        echo "[client] running 'uname -a; id; echo DRIFT-SSH-OK' on server via DRIFT"
+        OUT=$$(sshpass -p drifttest ssh \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o LogLevel=ERROR \
+          -p 2222 \
+          drifttest@10.93.0.11 \
+          'uname -a; id; echo DRIFT-SSH-OK')
+        echo "[client] ---- remote output ----"
+        echo "$$OUT"
+        echo "[client] ---- end output ----"
+        if echo "$$OUT" | grep -q "DRIFT-SSH-OK"; then
+          echo "[client] SSH-OVER-DRIFT: PASS"
+        else
+          echo "[client] SSH-OVER-DRIFT: FAIL"
+          exit 1
+        fi
+    networks:
+      testnet:
+        ipv4_address: 10.93.0.12
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.93.0.0/24

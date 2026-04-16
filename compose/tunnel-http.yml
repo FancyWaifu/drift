@@ -1,0 +1,88 @@
+# Real HTTP over DRIFT.
+#
+# Topology:
+#
+#   http-server (nginx:alpine, listens on :80 inside its own container)
+#      │
+#      │ plain TCP on the docker network
+#      ▼
+#   drift-listen (drift:latest, drift-tun listen --forward http-server:80)
+#      │
+#      │ DRIFT UDP datagrams on 10.91.0.0/24
+#      ▼
+#   drift-dial   (drift:latest, drift-tun dial  --listen-port 8080)
+#      │
+#      │ plain TCP on the docker network
+#      ▼
+#   http-client  (drift:latest, curl http://drift-dial:8080/)
+#
+# Success criterion: curl exits 0 and prints the nginx welcome page to
+# the client container's stdout. That proves a real HTTP request and
+# response completed through a DRIFT stream.
+
+services:
+  http-server:
+    image: nginx:alpine
+    container_name: drift-http-server
+    networks:
+      testnet:
+        ipv4_address: 10.91.0.20
+
+  drift-listen:
+    image: drift:latest
+    container_name: drift-http-listen
+    depends_on: [http-server]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 1
+        exec drift-tun listen --name server --drift-port 9000 \
+          --forward 10.91.0.20:80
+    networks:
+      testnet:
+        ipv4_address: 10.91.0.10
+
+  drift-dial:
+    image: drift:latest
+    container_name: drift-http-dial
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec drift-tun dial --name client \
+          --peer server@10.91.0.10:9000 --listen-port 8080
+    networks:
+      testnet:
+        ipv4_address: 10.91.0.11
+
+  http-client:
+    image: drift:latest
+    container_name: drift-http-client
+    depends_on: [drift-dial]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Give the dial side time to handshake and bind its TCP listener.
+        sleep 5
+        echo "[client] GET http://drift-dial:8080/ via DRIFT tunnel"
+        curl -sS -v --max-time 15 http://10.91.0.11:8080/ \
+          -o /tmp/response.html
+        echo "[client] ---- response body ----"
+        cat /tmp/response.html
+        echo "[client] ---- end body ----"
+        if grep -qi "welcome to nginx" /tmp/response.html; then
+          echo "[client] HTTP-OVER-DRIFT: PASS"
+        else
+          echo "[client] HTTP-OVER-DRIFT: FAIL"
+          exit 1
+        fi
+    networks:
+      testnet:
+        ipv4_address: 10.91.0.12
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.91.0.0/24

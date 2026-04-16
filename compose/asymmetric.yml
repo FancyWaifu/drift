@@ -1,0 +1,41 @@
+# Asymmetric link: alice's uplink is lossy (like cellular, 5% loss)
+# but bob's uplink is clean (0.5% loss). This simulates a mobile client
+# talking to a wired server.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-asym-bob
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem delay 30ms loss 0.5%
+        echo "[bob] wired (0.5% loss)"
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.63.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-asym-alice
+    cap_add: [NET_ADMIN]
+    depends_on: [bob]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem delay 80ms 30ms loss 5%
+        echo "[alice] cellular-like (5% loss + jitter)"
+        sleep 3
+        exec drift-send 10.63.0.6:9000 --deadline 500
+    networks:
+      testnet:
+        ipv4_address: 10.63.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.63.0.0/24

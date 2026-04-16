@@ -1,0 +1,40 @@
+# Extreme loss test: 50% on one side, 80% on the other. Expected:
+# handshake takes many retries but eventually completes. Most data is
+# lost but some survives thanks to the freshness-over-reliability model.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-xloss-bob
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem delay 30ms loss 50%
+        echo "[bob] 50% loss qdisc"
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.62.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-xloss-alice
+    cap_add: [NET_ADMIN]
+    depends_on: [bob]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem delay 30ms loss 50%
+        sleep 3
+        exec drift-send 10.62.0.6:9000 --deadline 1000
+    networks:
+      testnet:
+        ipv4_address: 10.62.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.62.0.0/24

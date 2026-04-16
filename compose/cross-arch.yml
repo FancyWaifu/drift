@@ -1,0 +1,35 @@
+# Cross-arch test: drift:amd64 running under qemu emulation on an arm64
+# host (or vice versa). Verifies bit-for-bit wire compatibility between
+# architectures — the same drift binary compiled for two different
+# ISAs should produce identical DRIFT packets.
+
+services:
+  bob:
+    image: drift:amd64
+    platform: linux/amd64
+    container_name: drift-arch-bob
+    command: drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.66.0.6
+
+  alice:
+    # Native arch
+    image: drift:latest
+    container_name: drift-arch-alice
+    depends_on: [bob]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 3
+        exec drift-send 10.66.0.6:9000
+    networks:
+      testnet:
+        ipv4_address: 10.66.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.0.0/24

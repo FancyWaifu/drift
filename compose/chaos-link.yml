@@ -1,0 +1,51 @@
+# Chaos link: aggressive tc netem config with every disruption at once.
+# 15% loss, 5% duplication, 8% reorder, 150ms+100ms delay jitter, 0.5% corrupt.
+# If DRIFT survives this, it'll survive the real internet.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-chaos-bob
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem \
+          delay 40ms 20ms distribution normal \
+          loss 15% \
+          duplicate 5% \
+          reorder 8% 30% \
+          corrupt 0.5%
+        echo "[bob] chaos qdisc applied"
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-chaos-alice
+    cap_add: [NET_ADMIN]
+    depends_on: [bob]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tc qdisc add dev eth0 root netem \
+          delay 40ms 20ms distribution normal \
+          loss 15% \
+          duplicate 5% \
+          reorder 8% 30% \
+          corrupt 0.5%
+        echo "[alice] chaos qdisc applied"
+        sleep 3
+        exec drift-send 10.60.0.6:9000
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.60.0.0/24

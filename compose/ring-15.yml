@@ -1,0 +1,316 @@
+# 15-node DRIFT ring. Each node N has a DRIFT session to its +1 neighbor
+# (as Initiator) and accepts a session from its -1 neighbor (as Responder).
+# Tokens injected by node 0 traverse the entire ring, then node 0 logs
+# each completion.
+#
+# Topology: 10.80.0.10, 10.80.0.11, ..., 10.80.0.24  (15 nodes)
+# Ring:  0 -> 1 -> 2 -> ... -> 14 -> 0
+
+services:
+  node0:
+    image: drift:latest
+    container_name: drift-ring-0
+    command:
+      - drift-ring
+      - --index
+      - "0"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.11:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.10
+  node1:
+    image: drift:latest
+    container_name: drift-ring-1
+    command:
+      - drift-ring
+      - --index
+      - "1"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.12:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.11
+  node2:
+    image: drift:latest
+    container_name: drift-ring-2
+    command:
+      - drift-ring
+      - --index
+      - "2"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.13:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.12
+  node3:
+    image: drift:latest
+    container_name: drift-ring-3
+    command:
+      - drift-ring
+      - --index
+      - "3"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.14:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.13
+  node4:
+    image: drift:latest
+    container_name: drift-ring-4
+    command:
+      - drift-ring
+      - --index
+      - "4"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.15:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.14
+  node5:
+    image: drift:latest
+    container_name: drift-ring-5
+    command:
+      - drift-ring
+      - --index
+      - "5"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.16:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.15
+  node6:
+    image: drift:latest
+    container_name: drift-ring-6
+    command:
+      - drift-ring
+      - --index
+      - "6"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.17:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.16
+  node7:
+    image: drift:latest
+    container_name: drift-ring-7
+    command:
+      - drift-ring
+      - --index
+      - "7"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.18:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.17
+  node8:
+    image: drift:latest
+    container_name: drift-ring-8
+    command:
+      - drift-ring
+      - --index
+      - "8"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.19:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.18
+  node9:
+    image: drift:latest
+    container_name: drift-ring-9
+    command:
+      - drift-ring
+      - --index
+      - "9"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.20:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.19
+  node10:
+    image: drift:latest
+    container_name: drift-ring-10
+    command:
+      - drift-ring
+      - --index
+      - "10"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.21:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.20
+  node11:
+    image: drift:latest
+    container_name: drift-ring-11
+    command:
+      - drift-ring
+      - --index
+      - "11"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.22:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.21
+  node12:
+    image: drift:latest
+    container_name: drift-ring-12
+    command:
+      - drift-ring
+      - --index
+      - "12"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.23:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.22
+  node13:
+    image: drift:latest
+    container_name: drift-ring-13
+    command:
+      - drift-ring
+      - --index
+      - "13"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.24:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.23
+  node14:
+    image: drift:latest
+    container_name: drift-ring-14
+    command:
+      - drift-ring
+      - --index
+      - "14"
+      - --total
+      - "15"
+      - --listen
+      - 0.0.0.0:9000
+      - --next-addr
+      - 10.80.0.10:9000
+      - --tokens
+      - "10"
+      - --interval-ms
+      - "200"
+    networks:
+      testnet:
+        ipv4_address: 10.80.0.24
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.80.0.0/24

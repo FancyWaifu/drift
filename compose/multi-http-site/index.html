@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>DRIFT multi-client demo</title>
+<meta charset="utf-8">
+<style>
+body { font-family: sans-serif; max-width: 44em; margin: 3em auto; line-height: 1.5; color: #222; }
+code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+h1 { border-bottom: 2px solid #888; padding-bottom: .25em; }
+</style>
+</head>
+<body>
+<h1>You reached the nginx backend via DRIFT</h1>
+<p>
+This page is served by an <code>nginx:alpine</code> container that is
+<strong>not directly exposed to the docker network</strong>. Every byte of
+this HTML crossed a DRIFT tunnel on its way to you.
+</p>
+<p>Each of the client containers in this compose topology:</p>
+<ol>
+<li>stood up its own <code>drift-tun dial</code> to the listen side,</li>
+<li>completed a DRIFT handshake (X25519 + ChaCha20-Poly1305),</li>
+<li>then ran <code>curl</code> through the tunnel, opening a fresh DRIFT stream per request.</li>
+</ol>
+<p>
+Magic number for this request: <strong>DRIFT-TUNNEL-OK-9F37</strong>
+</p>
+</body>
+</html>

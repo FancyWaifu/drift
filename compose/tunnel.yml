@@ -1,0 +1,67 @@
+# DRIFT TCP tunnel end-to-end test.
+#
+# Server side:
+#   - A local TCP target (nc listener) bound to 127.0.0.1:12345
+#   - drift-tun listen that accepts DRIFT streams and forwards each
+#     one to 127.0.0.1:12345
+#
+# Client side:
+#   - drift-tun dial that connects DRIFT to the server and accepts
+#     local TCP on 127.0.0.1:2222
+#   - A one-shot nc that connects to 127.0.0.1:2222 and sends a
+#     known test string
+#
+# Expected result: the server's nc receives the test string via
+# the DRIFT tunnel, proving that the stream layer, the tunnel logic,
+# and the DRIFT transport all cooperate correctly.
+
+services:
+  server:
+    image: drift:latest
+    container_name: drift-tun-server
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # TCP target: write everything it receives to /tmp/received.txt
+        # then exit. `nc -l` will close when the client closes.
+        (nc -l -p 12345 > /tmp/received.txt) &
+        echo "[server] nc target listening on 127.0.0.1:12345"
+        # Small delay so nc is ready before drift-tun starts forwarding
+        sleep 0.5
+        exec drift-tun listen --name server --drift-port 9000 \
+          --forward 127.0.0.1:12345
+    networks:
+      testnet:
+        ipv4_address: 10.90.0.10
+
+  client:
+    image: drift:latest
+    container_name: drift-tun-client
+    depends_on: [server]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Start the tunnel dial side in background
+        drift-tun dial --name client --peer server@10.90.0.10:9000 \
+          --listen-port 2222 &
+        TUN_PID=$$!
+        echo "[client] drift-tun dial started pid=$$TUN_PID"
+        # Wait for the tunnel to complete its DRIFT handshake and the
+        # local TCP listener to come up.
+        sleep 4
+        echo "[client] sending test string through tunnel"
+        TEST_STRING="hello-from-drift-tunnel-$$(date +%s)"
+        echo "$$TEST_STRING" | nc -q 1 127.0.0.1 2222
+        echo "[client] send complete, sleeping to let server process"
+        sleep 2
+        echo "[client] DONE"
+    networks:
+      testnet:
+        ipv4_address: 10.90.0.11
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.90.0.0/24

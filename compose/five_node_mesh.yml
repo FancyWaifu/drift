@@ -1,0 +1,69 @@
+services:
+  node0:
+    image: drift:latest
+    container_name: drift-mesh-node0
+    environment:
+      NODE_ID: "0"
+      # Each entry is node i's address; the local node's own
+      # slot is a placeholder.
+      PEER_ADDRS: "0.0.0.0:0,10.50.0.11:9300,10.50.0.12:9300,10.50.0.13:9300,10.50.0.14:9300"
+      RUST_LOG: "drift=info,drift_mesh_node_v2=info"
+    command: ["drift-mesh-node-v2"]
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.10
+
+  node1:
+    image: drift:latest
+    container_name: drift-mesh-node1
+    environment:
+      NODE_ID: "1"
+      PEER_ADDRS: "10.50.0.10:9300,0.0.0.0:0,10.50.0.12:9300,10.50.0.13:9300,10.50.0.14:9300"
+      RUST_LOG: "drift=info,drift_mesh_node_v2=info"
+    command: ["drift-mesh-node-v2"]
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.11
+
+  node2:
+    image: drift:latest
+    container_name: drift-mesh-node2
+    environment:
+      NODE_ID: "2"
+      PEER_ADDRS: "10.50.0.10:9300,10.50.0.11:9300,0.0.0.0:0,10.50.0.13:9300,10.50.0.14:9300"
+      RUST_LOG: "drift=info,drift_mesh_node_v2=info"
+    command: ["drift-mesh-node-v2"]
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.12
+
+  node3:
+    image: drift:latest
+    container_name: drift-mesh-node3
+    environment:
+      NODE_ID: "3"
+      PEER_ADDRS: "10.50.0.10:9300,10.50.0.11:9300,10.50.0.12:9300,0.0.0.0:0,10.50.0.14:9300"
+      RUST_LOG: "drift=info,drift_mesh_node_v2=info"
+    command: ["drift-mesh-node-v2"]
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.13
+
+  node4:
+    image: drift:latest
+    container_name: drift-mesh-node4
+    environment:
+      NODE_ID: "4"
+      PEER_ADDRS: "10.50.0.10:9300,10.50.0.11:9300,10.50.0.12:9300,10.50.0.13:9300,0.0.0.0:0"
+      RUST_LOG: "drift=info,drift_mesh_node_v2=info"
+    command: ["drift-mesh-node-v2"]
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.14
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.50.0.0/16
