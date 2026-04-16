@@ -35,14 +35,18 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
     let bob_pub = bob_id.public_bytes();
 
     // ---- Bridge node: UDP + TCP interfaces ----
+    // Fast beacons so routes converge quickly in the test.
+    let fast_cfg = TransportConfig {
+        accept_any_peer: true,
+        beacon_interval_ms: 200,
+        ..TransportConfig::default()
+    };
+
     let bridge = Arc::new(
         Transport::bind_with_config(
             "127.0.0.1:0".parse().unwrap(),
             bridge_id,
-            TransportConfig {
-                accept_any_peer: true,
-                ..TransportConfig::default()
-            },
+            fast_cfg.clone(),
         )
         .await
         .unwrap(),
@@ -55,8 +59,12 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
 
     // ---- Alice: UDP-only peer ----
     let alice = Arc::new(
-        Transport::bind("127.0.0.1:0".parse().unwrap(), alice_id)
-            .await
+        Transport::bind_with_config(
+            "127.0.0.1:0".parse().unwrap(),
+            alice_id,
+            fast_cfg.clone(),
+        )
+        .await
             .unwrap(),
     );
     // Alice knows the bridge and Bob. She'll handshake with
@@ -90,16 +98,9 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
     let bob_tcp_io: Arc<dyn drift::io::PacketIO> =
         Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
     let bob = Arc::new(
-        Transport::bind_with_io(
-            bob_tcp_io,
-            bob_id,
-            TransportConfig {
-                accept_any_peer: true,
-                ..TransportConfig::default()
-            },
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_io(bob_tcp_io, bob_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     // Bob knows the bridge (reachable via TCP).
     let bridge_peer_on_bob = bob
@@ -132,7 +133,9 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
     // After a beacon interval, Alice will learn a route to Bob
     // via the bridge, and Bob will learn a route to Alice via
     // the bridge.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // With beacon_interval_ms=200, routes converge in
+    // ~1-2 beacon cycles. Wait 1.5s to be safe.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // ---- Cross-interface send: Alice → Bob ----
     // Alice sends to Bob's peer_id. She has no direct path to

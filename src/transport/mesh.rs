@@ -91,6 +91,10 @@ pub struct RouteEntry {
     /// to keep the routing table from oscillating under
     /// dynamic metrics.
     pub updated_at: std::time::Instant,
+    /// Which PacketIO interface this route was learned
+    /// through. Used by `forward_packet` to send via the
+    /// correct adapter when bridging across mediums.
+    pub interface_id: usize,
 }
 
 /// Mesh routing table: destination peer id → (next-hop address, metric).
@@ -120,6 +124,7 @@ impl RoutingTable {
                 metric: 1,
                 cost_us: 0, // static routes are free at the routing layer
                 updated_at: std::time::Instant::now(),
+                interface_id: 0,
             },
         );
     }
@@ -143,6 +148,7 @@ impl RoutingTable {
         next_hop: SocketAddr,
         metric: u16,
         cost_us: u32,
+        iface: usize,
     ) -> bool {
         if cost_us >= COST_INFINITY_US {
             return false;
@@ -172,6 +178,7 @@ impl RoutingTable {
                         metric,
                         cost_us,
                         updated_at: now,
+                        interface_id: iface,
                     },
                 );
                 true
@@ -187,6 +194,7 @@ impl RoutingTable {
                         metric,
                         cost_us,
                         updated_at: now,
+                        interface_id: 0,
                     },
                 );
                 true
@@ -332,6 +340,7 @@ impl Inner {
         full_packet: &[u8],
         body: &[u8],
         src: SocketAddr,
+        iface_idx: usize,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
             return Err(DriftError::UnknownPeer);
@@ -409,7 +418,7 @@ impl Inner {
             // cost.
             let new_cost = effective_neighbor_rtt.saturating_add(advertised_cost);
             let new_metric = metric.saturating_add(1);
-            if routes.update_if_better(id, src, new_metric, new_cost) {
+            if routes.update_if_better(id, src, new_metric, new_cost, iface_idx) {
                 updated += 1;
             }
         }
@@ -444,17 +453,21 @@ impl Inner {
     /// ciphertext — end-to-end crypto is preserved because hop_ttl is
     /// zeroed in the canonical AAD.
     pub(crate) async fn forward_packet(&self, data: &[u8], header: &Header) -> Result<()> {
-        let routes = self.routes.lock().await;
-        let Some(next_hop) = routes.lookup(&header.dst_id) else {
-            debug!(dst = ?header.dst_id, "no route for destination");
-            return Ok(());
+        let (next_hop, fwd_iface) = {
+            let routes = self.routes.lock().await;
+            match routes.lookup_entry(&header.dst_id) {
+                Some(entry) => (entry.next_hop, entry.interface_id),
+                None => {
+                    debug!(dst = ?header.dst_id, "no route for destination");
+                    return Ok(());
+                }
+            }
         };
-        drop(routes);
 
         let mut forwarded = data.to_vec();
         // hop_ttl lives at byte 28 of the header.
         forwarded[28] = header.hop_ttl.saturating_sub(1);
-        self.ifaces.send_for(0, &forwarded, next_hop).await?;
+        self.ifaces.send_for(fwd_iface, &forwarded, next_hop).await?;
         self.metrics.forwarded.fetch_add(1, Ordering::Relaxed);
         debug!(
             dst = ?header.dst_id,
@@ -480,7 +493,7 @@ mod tests {
         let mut rt = RoutingTable::default();
         let dst = [1u8; 8];
         // First advertisement: 2 hops but fast.
-        assert!(rt.update_if_better(dst, hop(1), 2, 1_000));
+        assert!(rt.update_if_better(dst, hop(1), 2, 1_000, 0));
         // Competing advertisement: 1 hop but slow.
         // Used to win under hop-count routing. Must LOSE
         // under RTT-weighted routing.
@@ -490,7 +503,7 @@ mod tests {
         // unless the new cost beats the hysteresis threshold.
         // 5_000 is > 1_000 so the new-cost check rejects it
         // regardless.
-        assert!(!rt.update_if_better(dst, hop(2), 1, 5_000));
+        assert!(!rt.update_if_better(dst, hop(2), 1, 5_000, 0));
         let e = rt.lookup_entry(&dst).unwrap();
         assert_eq!(e.next_hop, hop(1));
         assert_eq!(e.cost_us, 1_000);
@@ -500,8 +513,8 @@ mod tests {
     fn infinity_cost_always_rejected() {
         let mut rt = RoutingTable::default();
         let dst = [2u8; 8];
-        assert!(!rt.update_if_better(dst, hop(1), 1, COST_INFINITY_US));
-        assert!(!rt.update_if_better(dst, hop(1), 1, COST_INFINITY_US + 1));
+        assert!(!rt.update_if_better(dst, hop(1), 1, COST_INFINITY_US, 0));
+        assert!(!rt.update_if_better(dst, hop(1), 1, COST_INFINITY_US + 1, 0));
         assert!(rt.lookup(&dst).is_none());
     }
 
@@ -509,11 +522,11 @@ mod tests {
     fn hold_down_rejects_marginal_improvements() {
         let mut rt = RoutingTable::default();
         let dst = [3u8; 8];
-        assert!(rt.update_if_better(dst, hop(1), 1, 10_000));
+        assert!(rt.update_if_better(dst, hop(1), 1, 10_000, 0));
         // A new path that's only 5% better must be refused
         // during the hold-down window (needs ≥20% to
         // preempt). This protects against oscillation.
-        assert!(!rt.update_if_better(dst, hop(2), 1, 9_500));
+        assert!(!rt.update_if_better(dst, hop(2), 1, 9_500, 0));
         let e = rt.lookup_entry(&dst).unwrap();
         assert_eq!(e.next_hop, hop(1));
     }
@@ -522,11 +535,11 @@ mod tests {
     fn hysteresis_accepts_big_improvements_during_holddown() {
         let mut rt = RoutingTable::default();
         let dst = [4u8; 8];
-        assert!(rt.update_if_better(dst, hop(1), 1, 10_000));
+        assert!(rt.update_if_better(dst, hop(1), 1, 10_000, 0));
         // 70% of 10_000 = 7_000, which IS ≤ hysteresis
         // threshold (80% * 10_000 = 8_000). Should win
         // even during hold-down.
-        assert!(rt.update_if_better(dst, hop(2), 1, 7_000));
+        assert!(rt.update_if_better(dst, hop(2), 1, 7_000, 0));
         let e = rt.lookup_entry(&dst).unwrap();
         assert_eq!(e.next_hop, hop(2));
     }
@@ -538,7 +551,7 @@ mod tests {
         // assert the sweep catches it.
         let mut rt = RoutingTable::default();
         let dst = [5u8; 8];
-        assert!(rt.update_if_better(dst, hop(1), 1, 1_000));
+        assert!(rt.update_if_better(dst, hop(1), 1, 1_000, 0));
         // Manually reach in and backdate the entry.
         if let Some(e) = rt.routes.get_mut(&dst) {
             e.updated_at = std::time::Instant::now()
@@ -559,7 +572,7 @@ mod tests {
         for i in 0..(MAX_ROUTES + 1000) {
             let mut dst = [0u8; 8];
             dst[..4].copy_from_slice(&(i as u32).to_be_bytes());
-            rt.update_if_better(dst, hop(1), 1, 1000 + i as u32);
+            rt.update_if_better(dst, hop(1), 1, 1000 + i as u32, 0);
         }
         assert_eq!(rt.len(), MAX_ROUTES);
     }

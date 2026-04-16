@@ -142,7 +142,7 @@ fn routing_table_caps_at_max_routes() {
     for i in 0..flood {
         let mut dst = [0u8; 8];
         dst[..4].copy_from_slice(&(i as u32).to_be_bytes());
-        rt.update_if_better(dst, fake_hop, 1, 1_000 + i as u32);
+        rt.update_if_better(dst, fake_hop, 1, 1_000 + i as u32, 0);
     }
     assert!(
         rt.len() <= MAX_ROUTES,
