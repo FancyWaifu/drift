@@ -195,7 +195,7 @@ impl PacketIO for TcpPacketIO {
 /// automatically because both interfaces feed the same
 /// DRIFT transport.
 pub struct InterfaceSet {
-    interfaces: Vec<(String, Arc<dyn PacketIO>)>,
+    interfaces: std::sync::RwLock<Vec<(String, Arc<dyn PacketIO>)>>,
 }
 
 impl InterfaceSet {
@@ -203,34 +203,46 @@ impl InterfaceSet {
     /// common case for backward compatibility).
     pub fn single(name: impl Into<String>, io: Arc<dyn PacketIO>) -> Self {
         Self {
-            interfaces: vec![(name.into(), io)],
+            interfaces: std::sync::RwLock::new(vec![(name.into(), io)]),
         }
     }
 
     /// Add a new interface. Returns its index (used as the
-    /// `interface_id` on peers reached through it).
-    pub fn add(&mut self, name: impl Into<String>, io: Arc<dyn PacketIO>) -> usize {
-        let idx = self.interfaces.len();
-        self.interfaces.push((name.into(), io));
+    /// `interface_id` on peers reached through it). Safe
+    /// to call while recv loops are running — the RwLock
+    /// ensures concurrent reads aren't interrupted.
+    pub fn add(&self, name: impl Into<String>, io: Arc<dyn PacketIO>) -> usize {
+        let mut ifaces = self.interfaces.write().unwrap();
+        let idx = ifaces.len();
+        ifaces.push((name.into(), io));
         idx
     }
 
     /// Number of interfaces.
     pub fn len(&self) -> usize {
-        self.interfaces.len()
+        self.interfaces.read().unwrap().len()
     }
 
     /// Send a packet via a specific interface by index.
+    /// Clones the Arc under the read lock, releases the
+    /// lock, then awaits the send — the lock is never
+    /// held across an async boundary.
     pub async fn send_via(
         &self,
         interface_id: usize,
         buf: &[u8],
         dest: SocketAddr,
     ) -> io::Result<usize> {
-        let (_, io) = self
-            .interfaces
-            .get(interface_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "interface index out of range"))?;
+        let io = {
+            let ifaces = self.interfaces.read().unwrap();
+            ifaces
+                .get(interface_id)
+                .map(|(_, io)| io.clone())
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "interface index out of range",
+                ))?
+        };
         io.send_to(buf, dest).await
     }
 
@@ -244,14 +256,16 @@ impl InterfaceSet {
         self.send_via(0, buf, dest).await
     }
 
-    /// Access a specific interface by index.
-    pub fn get(&self, idx: usize) -> Option<&Arc<dyn PacketIO>> {
-        self.interfaces.get(idx).map(|(_, io)| io)
+    /// Get a cloned Arc to a specific interface by index.
+    pub fn get(&self, idx: usize) -> Option<Arc<dyn PacketIO>> {
+        let ifaces = self.interfaces.read().unwrap();
+        ifaces.get(idx).map(|(_, io)| io.clone())
     }
 
     /// The local address of the first (default) interface.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.interfaces
+        let ifaces = self.interfaces.read().unwrap();
+        ifaces
             .first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
             .1
@@ -261,7 +275,8 @@ impl InterfaceSet {
     /// Raw fd of the first interface (for ECN etc).
     #[cfg(unix)]
     pub fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
-        self.interfaces.first().and_then(|(_, io)| io.as_raw_fd())
+        let ifaces = self.interfaces.read().unwrap();
+        ifaces.first().and_then(|(_, io)| io.as_raw_fd())
     }
 }
 

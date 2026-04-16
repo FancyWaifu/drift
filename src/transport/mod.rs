@@ -349,6 +349,9 @@ pub(crate) struct Inner {
 pub struct Transport {
     inner: Arc<Inner>,
     rx: Mutex<mpsc::Receiver<Received>>,
+    /// Kept so `add_interface` can clone it for new recv
+    /// loops spawned after bind.
+    recv_tx: mpsc::Sender<Received>,
 }
 
 impl Transport {
@@ -488,7 +491,41 @@ impl Transport {
         Ok(Self {
             inner,
             rx: Mutex::new(rx),
+            recv_tx: tx,
         })
+    }
+
+    /// Attach a new packet I/O interface to this transport
+    /// at runtime. Returns the interface index that will be
+    /// used for any peers that handshake through this adapter.
+    /// A recv loop is spawned immediately so incoming packets
+    /// on the new interface are processed alongside existing
+    /// ones.
+    ///
+    /// Use this to make a single DRIFT node bridge between
+    /// UDP and TCP (or any other medium):
+    ///
+    /// ```ignore
+    /// let transport = Transport::bind(...).await?;  // UDP on :9000
+    /// let tcp = TcpStream::connect("10.0.0.5:443").await?;
+    /// let tcp_io = Arc::new(TcpPacketIO::new(tcp)?);
+    /// let tcp_idx = transport.add_interface("tcp", tcp_io);
+    /// // Now peers can reach us via UDP OR TCP.
+    /// ```
+    pub fn add_interface(
+        &self,
+        name: impl Into<String>,
+        io: Arc<dyn crate::io::PacketIO>,
+    ) -> usize {
+        let idx = self.inner.ifaces.add(name, io);
+        // Spawn a recv loop for the new interface, feeding
+        // into the same mpsc channel as the original.
+        let bg = self.inner.clone();
+        let tx = self.recv_tx.clone();
+        tokio::spawn(async move {
+            bg.run_recv_loop_for(tx, idx).await;
+        });
+        idx
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -1488,7 +1525,7 @@ impl Inner {
                 continue;
             }
 
-            match self.process_incoming(data, src, received_at, ecn_ce).await {
+            match self.process_incoming(data, src, received_at, ecn_ce, iface_idx).await {
                 Ok(Some(r)) => {
                     if tx.send(r).await.is_err() {
                         debug!("recv channel closed");
@@ -1631,6 +1668,7 @@ impl Inner {
         src: SocketAddr,
         received_at: Instant,
         ecn_ce: bool,
+        iface_idx: usize,
     ) -> Result<Option<Received>> {
         if data.len() < HEADER_LEN {
             return Err(DriftError::PacketTooShort {
@@ -1661,7 +1699,7 @@ impl Inner {
 
         match header.packet_type {
             PacketType::Hello => {
-                self.handle_hello(&header, body, src).await?;
+                self.handle_hello(&header, body, src, iface_idx).await?;
                 Ok(None)
             }
             PacketType::HelloAck => {
@@ -1793,6 +1831,7 @@ impl Inner {
         header: &Header,
         body: &[u8],
         src: SocketAddr,
+        iface_idx: usize,
     ) -> Result<()> {
         if body.len() < HELLO_PAYLOAD_LEN {
             return Err(DriftError::PacketTooShort {
@@ -1905,8 +1944,9 @@ impl Inner {
                         Direction::Responder,
                     );
                     new_peer.auto_registered = true;
+                    new_peer.interface_id = iface_idx;
                     peers.insert(new_peer);
-                    debug!("auto-registered new peer {:?}", client_peer_id);
+                    debug!("auto-registered new peer {:?} on iface {}", client_peer_id, iface_idx);
                 } else {
                     return Err(DriftError::UnknownPeer);
                 }
@@ -2025,10 +2065,14 @@ impl Inner {
             return Ok(());
         }
 
-        self.ifaces.send_default(&ack_bytes, ack_addr).await?;
+        // Reply via the same interface the HELLO arrived on.
+        // This is critical for multi-interface nodes: if the
+        // HELLO came in on TCP (iface 1), the ACK must go
+        // out on TCP, not the default UDP (iface 0).
+        self.ifaces.send_via(iface_idx, &ack_bytes, ack_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics.bytes_sent.fetch_add(ack_bytes.len() as u64, Ordering::Relaxed);
-        debug!("sent HELLO_ACK to {:?}", ack_addr);
+        debug!("sent HELLO_ACK to {:?} via iface {}", ack_addr, iface_idx);
         Ok(())
     }
 
