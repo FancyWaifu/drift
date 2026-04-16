@@ -278,6 +278,29 @@ impl InterfaceSet {
         let ifaces = self.interfaces.read().unwrap();
         ifaces.first().and_then(|(_, io)| io.as_raw_fd())
     }
+
+    /// Send via a specific interface, falling back to
+    /// interface 0 if the index is out of range. This is
+    /// the safe version that doesn't error on bad indices
+    /// — it just degrades to the default path.
+    pub async fn send_for(
+        &self,
+        iface: usize,
+        buf: &[u8],
+        dest: SocketAddr,
+    ) -> io::Result<usize> {
+        let io = {
+            let ifaces = self.interfaces.read().unwrap();
+            ifaces
+                .get(iface)
+                .or_else(|| ifaces.first())
+                .map(|(_, io)| io.clone())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "no interfaces")
+                })?
+        };
+        io.send_to(buf, dest).await
+    }
 }
 
 #[cfg(test)]

@@ -317,7 +317,7 @@ impl Inner {
                 wire.extend_from_slice(&sealed);
                 wire
             };
-            self.ifaces.send_default(&bytes, addr).await?;
+            self.ifaces.send_for(self.iface_for(&dst_id).await, &bytes, addr).await?;
             self.metrics.beacons_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -454,7 +454,7 @@ impl Inner {
         let mut forwarded = data.to_vec();
         // hop_ttl lives at byte 28 of the header.
         forwarded[28] = header.hop_ttl.saturating_sub(1);
-        self.ifaces.send_default(&forwarded, next_hop).await?;
+        self.ifaces.send_for(0, &forwarded, next_hop).await?;
         self.metrics.forwarded.fetch_add(1, Ordering::Relaxed);
         debug!(
             dst = ?header.dst_id,
