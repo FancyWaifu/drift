@@ -180,7 +180,7 @@ impl Inner {
         wire.extend_from_slice(&timestamp.to_be_bytes());
         wire.extend_from_slice(&mac);
 
-        self.ifaces.send_default(&wire, src).await?;
+        self.ifaces.send_for(0, &wire, src).await?;
         self.metrics.challenges_issued.fetch_add(1, Ordering::Relaxed);
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
@@ -297,7 +297,7 @@ impl Inner {
         };
 
         if let Some((wire, target)) = retry {
-            self.ifaces.send_default(&wire, target).await?;
+            self.ifaces.send_for(0, &wire, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_sent

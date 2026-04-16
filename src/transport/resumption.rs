@@ -344,7 +344,7 @@ impl Inner {
             (wire, peer.addr)
         };
 
-        self.ifaces.send_default(&wire, addr).await?;
+        self.ifaces.send_for(self.iface_for(&peer_id).await, &wire, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -522,7 +522,7 @@ impl Inner {
             (wire, peer.addr)
         };
 
-        self.ifaces.send_default(&wire, addr).await?;
+        self.ifaces.send_for(self.iface_for(&peer_id).await, &wire, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -699,7 +699,7 @@ impl Inner {
                 .fetch_sub(1, Ordering::Relaxed);
         }
 
-        self.ifaces.send_default(&ack_wire, ack_addr).await?;
+        self.ifaces.send_for(self.iface_for(&client_peer_id).await, &ack_wire, ack_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -833,7 +833,7 @@ impl Inner {
         }
 
         for (bytes, target) in pending_built {
-            self.ifaces.send_default(&bytes, target).await?;
+            self.ifaces.send_for(0, &bytes, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_sent

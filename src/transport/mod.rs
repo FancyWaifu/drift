@@ -967,7 +967,8 @@ impl Inner {
             (wire, peer.addr, new_key_bytes)
         };
 
-        self.ifaces.send_default(&wire, addr).await?;
+        let iface = self.iface_for(dst).await;
+        self.ifaces.send_for(iface, &wire, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1066,7 +1067,7 @@ impl Inner {
             (ack_wire, peer.addr, new_key_bytes_val)
         };
 
-        self.ifaces.send_default(&ack_wire, ack_addr).await?;
+        self.ifaces.send_for(0, &ack_wire, ack_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1149,7 +1150,7 @@ impl Inner {
             (wire, addr)
         };
 
-        self.ifaces.send_default(&bytes, addr).await?;
+        self.ifaces.send_for(0, &bytes, addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1372,7 +1373,7 @@ impl Inner {
             // the trait. batch::send_batch needs a UdpSocket ref.
             let mut n = 0usize;
             for (bytes, addr) in &batch {
-                self.ifaces.send_default(bytes, *addr).await?;
+                self.ifaces.send_for(0, bytes, *addr).await?;
                 n += 1;
             }
             self.metrics
@@ -1390,7 +1391,7 @@ impl Inner {
         let sent = {
             let mut sent = 0;
             for (bytes, addr) in &batch {
-                self.ifaces.send_default(bytes, *addr).await?;
+                self.ifaces.send_for(0, bytes, *addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics
                     .bytes_sent
@@ -1404,6 +1405,13 @@ impl Inner {
 
     /// Populate the CID lookup maps for an established
     /// session so short-header packets can be sent and
+    /// Quick lookup: which interface reaches this peer?
+    /// Returns 0 (default) if the peer is unknown.
+    async fn iface_for(&self, peer_id: &PeerId) -> usize {
+        let peers = self.peers.lock_for(peer_id).await;
+        peers.get(peer_id).map(|p| p.interface_id).unwrap_or(0)
+    }
+
     /// received. `local_is_initiator` is true on the side
     /// that sent HELLO (the Initiator).
     async fn install_cids(
@@ -1436,7 +1444,7 @@ impl Inner {
     async fn dispatch(&self, action: SendAction) -> Result<()> {
         match action {
             SendAction::Data(bytes, addr) => {
-                self.ifaces.send_default(&bytes, addr).await?;
+                self.ifaces.send_for(0, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 if let Some(q) = &self.qlog {
@@ -1444,7 +1452,7 @@ impl Inner {
                 }
             }
             SendAction::Hello(bytes, addr) => {
-                self.ifaces.send_default(&bytes, addr).await?;
+                self.ifaces.send_for(0, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 debug!("sent HELLO to {:?}", addr);
@@ -1644,7 +1652,7 @@ impl Inner {
         };
 
         if let Some((bytes, addr)) = probe {
-            if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
+            if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
                 debug!(error = %e, "PathChallenge send failed (short hdr)");
             } else {
                 self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
@@ -1813,7 +1821,7 @@ impl Inner {
                 out
             };
             for (bytes, addr) in to_retransmit {
-                if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
+                if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
                     warn!(error = %e, "HELLO retransmit failed");
                 } else {
                     self.metrics.handshake_retries.fetch_add(1, Ordering::Relaxed);
@@ -2201,7 +2209,7 @@ impl Inner {
         }
 
         for (bytes, target) in to_send {
-            self.ifaces.send_default(&bytes, target).await?;
+            self.ifaces.send_for(0, &bytes, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
@@ -2489,7 +2497,7 @@ impl Inner {
         // the responder-side establishment path, outside the
         // peer lock.
         for (bytes, addr) in flushed_pending {
-            if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
+            if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
                 debug!(error = %e, "flushed DATA send failed");
             } else {
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
@@ -2515,7 +2523,7 @@ impl Inner {
         }
 
         if let Some((bytes, addr)) = probe_to_send {
-            if let Err(e) = self.ifaces.send_default(&bytes, addr).await {
+            if let Err(e) = self.ifaces.send_for(0, &bytes, addr).await {
                 debug!(error = %e, "PathChallenge send failed");
             } else {
                 self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
