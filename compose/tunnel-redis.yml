@@ -1,0 +1,79 @@
+# Real Redis over DRIFT.
+#
+# Same four-container shape as tunnel-http.yml but running a real
+# redis-server on the server side and real redis-cli commands on the
+# client side. Exercises pipelined request/response and many short
+# commands on a single stream.
+
+services:
+  redis-server:
+    image: redis:alpine
+    container_name: drift-redis-server
+    networks:
+      testnet:
+        ipv4_address: 10.92.0.20
+
+  drift-listen:
+    image: drift:latest
+    container_name: drift-redis-listen
+    depends_on: [redis-server]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 1
+        exec drift-tun listen --name server --drift-port 9000 \
+          --forward 10.92.0.20:6379
+    networks:
+      testnet:
+        ipv4_address: 10.92.0.10
+
+  drift-dial:
+    image: drift:latest
+    container_name: drift-redis-dial
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec drift-tun dial --name client \
+          --peer server@10.92.0.10:9000 --listen-port 6379
+    networks:
+      testnet:
+        ipv4_address: 10.92.0.11
+
+  redis-client:
+    image: drift:latest
+    container_name: drift-redis-client
+    depends_on: [drift-dial]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 5
+        H=10.92.0.11
+        echo "[client] PING"
+        redis-cli -h $$H -p 6379 PING
+        echo "[client] SET hello drift"
+        redis-cli -h $$H -p 6379 SET hello drift
+        echo "[client] GET hello"
+        GOT=$$(redis-cli -h $$H -p 6379 GET hello)
+        echo "[client] got: $$GOT"
+        echo "[client] bulk LPUSH/LRANGE"
+        for i in 1 2 3 4 5; do
+          redis-cli -h $$H -p 6379 LPUSH mylist "item-$$i" > /dev/null
+        done
+        redis-cli -h $$H -p 6379 LRANGE mylist 0 -1
+        if [ "$$GOT" = "drift" ]; then
+          echo "[client] REDIS-OVER-DRIFT: PASS"
+        else
+          echo "[client] REDIS-OVER-DRIFT: FAIL"
+          exit 1
+        fi
+    networks:
+      testnet:
+        ipv4_address: 10.92.0.12
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.92.0.0/24

@@ -1,0 +1,171 @@
+# Directory test: 1 relay bridging two LANs, 3 clients per LAN.
+#
+# Topology (all isolated from real network by in-container iptables):
+#
+#    lan-north (10.70.0.0/24)            lan-south (10.71.0.0/24)
+#    ┌───────────────────┐               ┌───────────────────┐
+#    │ north1 10.70.0.11 │               │ south1 10.71.0.11 │
+#    │ north2 10.70.0.12 │               │ south2 10.71.0.12 │
+#    │ north3 10.70.0.13 │               │ south3 10.71.0.13 │
+#    └─────────┬─────────┘               └─────────┬─────────┘
+#              │                                   │
+#              └──────┐              ┌─────────────┘
+#                     ▼              ▼
+#                  ┌────────────────────┐
+#                  │ relay              │
+#                  │ 10.70.0.254 (north)│
+#                  │ 10.71.0.254 (south)│
+#                  └────────────────────┘
+#
+# The relay has interfaces on BOTH LANs. It runs `drift-dir-server`
+# listening on 0.0.0.0:9000 so clients from either LAN reach it at
+# their LAN-local gateway IP.
+#
+# Clients only know the relay's pubkey. After discovery via the relay
+# they connect directly to each other — within a LAN that works at the
+# IP layer; cross-LAN direct would need IP forwarding (not configured
+# here, which is intentional — we want to see LAN-local direct work).
+
+services:
+  relay:
+    image: drift:latest
+    container_name: drift-dir-relay
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Allow forwarding between the two LANs so cross-LAN direct
+        # connections work after discovery.
+        iptables -A FORWARD -s 10.70.0.0/24 -d 10.71.0.0/24 -j ACCEPT
+        iptables -A FORWARD -s 10.71.0.0/24 -d 10.70.0.0/24 -j ACCEPT
+        # Seal the relay from real networks.
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        echo "[relay-init] iptables set, starting drift-dir-server"
+        exec drift-dir-server 0.0.0.0:9000
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.254
+      lan-south:
+        ipv4_address: 10.71.0.254
+
+  # --- LAN north clients ---
+  north1:
+    image: drift:latest
+    container_name: drift-dir-north1
+    cap_add: [NET_ADMIN]
+    depends_on: [relay]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        exec drift-dir-client north1 0.0.0.0:9000 10.70.0.11:9000 10.70.0.254:9000
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.11
+
+  north2:
+    image: drift:latest
+    container_name: drift-dir-north2
+    cap_add: [NET_ADMIN]
+    depends_on: [relay]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        exec drift-dir-client north2 0.0.0.0:9000 10.70.0.12:9000 10.70.0.254:9000
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.12
+
+  north3:
+    image: drift:latest
+    container_name: drift-dir-north3
+    cap_add: [NET_ADMIN]
+    depends_on: [relay]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        exec drift-dir-client north3 0.0.0.0:9000 10.70.0.13:9000 10.70.0.254:9000
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.13
+
+  # --- LAN south clients ---
+  south1:
+    image: drift:latest
+    container_name: drift-dir-south1
+    cap_add: [NET_ADMIN]
+    depends_on: [relay]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.71.0.254
+        exec drift-dir-client south1 0.0.0.0:9000 10.71.0.11:9000 10.71.0.254:9000
+    networks:
+      lan-south:
+        ipv4_address: 10.71.0.11
+
+  south2:
+    image: drift:latest
+    container_name: drift-dir-south2
+    cap_add: [NET_ADMIN]
+    depends_on: [relay]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.71.0.254
+        exec drift-dir-client south2 0.0.0.0:9000 10.71.0.12:9000 10.71.0.254:9000
+    networks:
+      lan-south:
+        ipv4_address: 10.71.0.12
+
+  south3:
+    image: drift:latest
+    container_name: drift-dir-south3
+    cap_add: [NET_ADMIN]
+    depends_on: [relay]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.71.0.254
+        exec drift-dir-client south3 0.0.0.0:9000 10.71.0.13:9000 10.71.0.254:9000
+    networks:
+      lan-south:
+        ipv4_address: 10.71.0.13
+
+networks:
+  lan-north:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.70.0.0/24
+          gateway: 10.70.0.1
+  lan-south:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.71.0.0/24
+          gateway: 10.71.0.1

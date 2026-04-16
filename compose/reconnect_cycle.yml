@@ -1,0 +1,33 @@
+services:
+  server:
+    image: drift:latest
+    container_name: drift-reconnect-server
+    environment:
+      ROLE: server
+      RUST_LOG: "drift=info,drift_reconnect_node=info"
+    command: ["drift-reconnect-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.40.0.10
+
+  client:
+    image: drift:latest
+    container_name: drift-reconnect-client
+    depends_on:
+      - server
+    environment:
+      ROLE: client
+      SERVER_ADDR: "10.40.0.10:9200"
+      CYCLES: "20"
+      RUST_LOG: "drift=info,drift_reconnect_node=info"
+    command: ["drift-reconnect-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.40.0.20
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.40.0.0/16

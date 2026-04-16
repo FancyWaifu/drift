@@ -1,0 +1,35 @@
+[package]
+name = "drift-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+drift = { path = ".." }
+
+# Prevent accidentally running the fuzz targets as part of
+# `cargo test` on the parent crate.
+[[bin]]
+name = "header_decode"
+path = "fuzz_targets/header_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "directory_decode"
+path = "fuzz_targets/directory_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stream_frame"
+path = "fuzz_targets/stream_frame.rs"
+test = false
+doc = false
+bench = false

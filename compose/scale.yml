@@ -1,0 +1,39 @@
+# Scale test: one DRIFT server plus a "driver" container that spawns
+# N parallel scale-client subprocesses. This is faster than creating
+# N container services and measures the server's ability to handle
+# many concurrent handshakes and streams from one shared network.
+
+services:
+  server:
+    image: drift:latest
+    container_name: drift-scale-server
+    command: scale-server 0.0.0.0:9000 50
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.10
+
+  driver:
+    image: drift:latest
+    container_name: drift-scale-driver
+    depends_on: [server]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 3
+        echo "launching 50 parallel clients..."
+        for i in $$(seq 0 49); do
+          scale-client 10.50.0.10:9000 $$i --count 20 --interval_ms 10 &
+        done
+        wait
+        echo "all clients finished"
+        sleep 2
+    networks:
+      testnet:
+        ipv4_address: 10.50.0.20
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.50.0.0/24

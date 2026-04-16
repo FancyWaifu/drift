@@ -1,0 +1,45 @@
+# Small-MTU test: both endpoints shrink their eth0 MTU to 800 bytes.
+# DRIFT packets are ≤1400 bytes, so a 1000+ byte packet must either
+# fragment at IP layer (and either reassemble or get dropped) or fail
+# cleanly. This tests whether DRIFT survives constrained paths.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-mtu-bob
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ip link set eth0 mtu 800
+        echo "[bob] mtu set to 800"
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.40.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-mtu-alice
+    depends_on:
+      - bob
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ip link set eth0 mtu 800
+        echo "[alice] mtu set to 800"
+        sleep 2
+        exec drift-send 10.40.0.6:9000
+    networks:
+      testnet:
+        ipv4_address: 10.40.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.40.0.0/24

@@ -1,0 +1,132 @@
+# Multi-client HTTP-over-DRIFT demo.
+#
+# Topology:
+#
+#   +-----------+      plain TCP      +----------------+      DRIFT UDP     +----------------+   plain TCP   +--------+
+#   |  nginx    |  <---------------   |  drift-listen  |  <--------------   |  drift-dial-N  |  <----------  | client |
+#   |  :80      |     10.94.0.0/24    |  :9000 (UDP)   |  10.94.0.10:9000   |  :8080 (TCP)   |  10.94.0.x    |  curl  |
+#   +-----------+                     +----------------+                    +----------------+               +--------+
+#
+# nginx is NEVER directly exposed to the clients — every byte has to
+# cross the DRIFT tunnel. We spin up one listen side and six
+# independent clients, each with its own drift-dial + curl loop,
+# so you can see multiple DRIFT sessions hitting the same backend
+# concurrently.
+
+services:
+  # --- the actual web backend ---
+  web:
+    image: nginx:alpine
+    container_name: drift-multi-web
+    volumes:
+      - ./multi-http-site/index.html:/usr/share/nginx/html/index.html:ro
+    networks:
+      tun:
+        ipv4_address: 10.94.0.20
+
+  # --- drift listen side: forwards DRIFT streams to the nginx backend ---
+  drift-listen:
+    image: drift:latest
+    container_name: drift-multi-listen
+    depends_on: [web]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 1
+        exec drift-tun listen --name server --drift-port 9000 \
+          --forward 10.94.0.20:80
+    networks:
+      tun:
+        ipv4_address: 10.94.0.10
+
+  # --- clients 1..6: each handshakes independently, fires a burst of
+  #     curl requests through its own local TCP listener ---
+  client-1:
+    image: drift:latest
+    container_name: drift-multi-client-1
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command: &client_cmd
+      - |
+        drift-tun dial --name $${HOSTNAME} \
+          --peer server@10.94.0.10:9000 --listen-port 8080 &
+        TUN_PID=$$!
+        sleep 5
+        ok=0
+        total=5
+        for i in $$(seq 1 $$total); do
+          if curl -sS --max-time 10 http://127.0.0.1:8080/ -o /tmp/out.html; then
+            if grep -q "DRIFT-TUNNEL-OK-9F37" /tmp/out.html; then
+              ok=$$((ok + 1))
+              echo "[$$HOSTNAME req=$$i] PASS (magic marker found)"
+            else
+              echo "[$$HOSTNAME req=$$i] FAIL (no marker): $$(head -c 60 /tmp/out.html)"
+            fi
+          else
+            echo "[$$HOSTNAME req=$$i] curl failed"
+          fi
+        done
+        echo "[$$HOSTNAME] SUMMARY: $$ok / $$total requests OK"
+        if [ "$$ok" != "$$total" ]; then
+          exit 1
+        fi
+    networks:
+      tun:
+        ipv4_address: 10.94.0.101
+
+  client-2:
+    image: drift:latest
+    container_name: drift-multi-client-2
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command: *client_cmd
+    networks:
+      tun:
+        ipv4_address: 10.94.0.102
+
+  client-3:
+    image: drift:latest
+    container_name: drift-multi-client-3
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command: *client_cmd
+    networks:
+      tun:
+        ipv4_address: 10.94.0.103
+
+  client-4:
+    image: drift:latest
+    container_name: drift-multi-client-4
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command: *client_cmd
+    networks:
+      tun:
+        ipv4_address: 10.94.0.104
+
+  client-5:
+    image: drift:latest
+    container_name: drift-multi-client-5
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command: *client_cmd
+    networks:
+      tun:
+        ipv4_address: 10.94.0.105
+
+  client-6:
+    image: drift:latest
+    container_name: drift-multi-client-6
+    depends_on: [drift-listen]
+    entrypoint: ["/bin/sh", "-c"]
+    command: *client_cmd
+    networks:
+      tun:
+        ipv4_address: 10.94.0.106
+
+networks:
+  tun:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.94.0.0/24

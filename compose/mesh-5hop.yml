@@ -1,0 +1,108 @@
+# Topology:
+#   alice (10.30.0.23)
+#      |
+#      v
+#   r1 (10.30.0.11) -> r2 (10.30.0.12) -> r3 (10.30.0.13) -> r4 (10.30.0.14)
+#                                                               |
+#                                                               v
+#                                                        bob (10.30.0.10)
+#
+# Every relay has two routes:
+#   8d7bdef7c1f55505 (bob)   -> next hop toward bob
+#   a0ad9eef2a0d64cb (alice) -> previous hop toward alice
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-mesh-bob
+    command: drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.10
+
+  r4:
+    image: drift:latest
+    container_name: drift-mesh-r4
+    depends_on:
+      - bob
+    environment:
+      RUST_LOG: "drift=debug"
+    command:
+      - drift-relay
+      - 0.0.0.0:9000
+      - 8d7bdef7c1f55505:10.30.0.10:9000
+      - a0ad9eef2a0d64cb:10.30.0.13:9000
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.14
+
+  r3:
+    image: drift:latest
+    container_name: drift-mesh-r3
+    depends_on:
+      - r4
+    environment:
+      RUST_LOG: "drift=debug"
+    command:
+      - drift-relay
+      - 0.0.0.0:9000
+      - 8d7bdef7c1f55505:10.30.0.14:9000
+      - a0ad9eef2a0d64cb:10.30.0.12:9000
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.13
+
+  r2:
+    image: drift:latest
+    container_name: drift-mesh-r2
+    depends_on:
+      - r3
+    environment:
+      RUST_LOG: "drift=debug"
+    command:
+      - drift-relay
+      - 0.0.0.0:9000
+      - 8d7bdef7c1f55505:10.30.0.13:9000
+      - a0ad9eef2a0d64cb:10.30.0.11:9000
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.12
+
+  r1:
+    image: drift:latest
+    container_name: drift-mesh-r1
+    depends_on:
+      - r2
+    environment:
+      RUST_LOG: "drift=debug"
+    command:
+      - drift-relay
+      - 0.0.0.0:9000
+      - 8d7bdef7c1f55505:10.30.0.12:9000
+      - a0ad9eef2a0d64cb:10.30.0.23:9000
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.11
+
+  alice:
+    image: drift:latest
+    container_name: drift-mesh-alice
+    depends_on:
+      - r1
+    environment:
+      RUST_LOG: "drift=debug"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 3
+        exec drift-send 10.30.0.10:9000 --via 10.30.0.11:9000 --listen 0.0.0.0:9000
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.23
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.30.0.0/24

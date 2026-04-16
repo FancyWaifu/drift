@@ -1,0 +1,37 @@
+# Capture DRIFT traffic with tcpdump inside bob's container, verify the
+# packets look right. Tracks wire format + packet type distribution.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-cap-bob
+    cap_add: [NET_ADMIN, NET_RAW]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        tcpdump -ni eth0 -w /tmp/drift.pcap 'udp port 9000' 2>&1 &
+        sleep 0.5
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.65.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-cap-alice
+    depends_on: [bob]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 3
+        exec drift-send 10.65.0.6:9000
+    networks:
+      testnet:
+        ipv4_address: 10.65.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.65.0.0/24

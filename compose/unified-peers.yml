@@ -1,0 +1,161 @@
+# Unified peer demo — every container runs the SAME drift-peer binary.
+#
+# "bridge" has no special role in the code. It just happens to be a
+# peer that:
+#   - Is multi-homed on both lan-north and lan-south
+#   - Has no --seed flag (so it doesn't reach out to anyone)
+#   - Has no --greet flag (so it stays up as a discovery node)
+#
+# Clients (north1..3, south1..3) all run drift-peer with:
+#   - --seed bridge@<lan-local-gateway>  (only peer they know at start)
+#   - --wait-for 7  (wait until phonebook has all 7 peers)
+#   - --greet  (connect directly to everyone and say hello)
+#
+# After discovery, every pair exchanges greetings DIRECTLY. The bridge
+# is not used as a data-plane forwarder — it's only used for directory
+# bootstrapping. IP-level routing on the bridge container handles
+# cross-LAN packets at the network layer.
+
+services:
+  bridge:
+    image: drift:latest
+    container_name: drift-u-bridge
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A FORWARD -s 10.70.0.0/24 -d 10.71.0.0/24 -j ACCEPT
+        iptables -A FORWARD -s 10.71.0.0/24 -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        exec drift-peer --name bridge --listen 0.0.0.0:9000 --advertise 10.70.0.254:9000
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.254
+      lan-south:
+        ipv4_address: 10.71.0.254
+
+  north1:
+    image: drift:latest
+    container_name: drift-u-north1
+    cap_add: [NET_ADMIN]
+    depends_on: [bridge]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        exec drift-peer --name north1 --listen 0.0.0.0:9000 --advertise 10.70.0.11:9000 \
+          --seed bridge@10.70.0.254:9000 --wait-for 7 --greet
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.11
+
+  north2:
+    image: drift:latest
+    container_name: drift-u-north2
+    cap_add: [NET_ADMIN]
+    depends_on: [bridge]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        exec drift-peer --name north2 --listen 0.0.0.0:9000 --advertise 10.70.0.12:9000 \
+          --seed bridge@10.70.0.254:9000 --wait-for 7 --greet
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.12
+
+  north3:
+    image: drift:latest
+    container_name: drift-u-north3
+    cap_add: [NET_ADMIN]
+    depends_on: [bridge]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.70.0.254
+        exec drift-peer --name north3 --listen 0.0.0.0:9000 --advertise 10.70.0.13:9000 \
+          --seed bridge@10.70.0.254:9000 --wait-for 7 --greet
+    networks:
+      lan-north:
+        ipv4_address: 10.70.0.13
+
+  south1:
+    image: drift:latest
+    container_name: drift-u-south1
+    cap_add: [NET_ADMIN]
+    depends_on: [bridge]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.71.0.254
+        exec drift-peer --name south1 --listen 0.0.0.0:9000 --advertise 10.71.0.11:9000 \
+          --seed bridge@10.71.0.254:9000 --wait-for 7 --greet
+    networks:
+      lan-south:
+        ipv4_address: 10.71.0.11
+
+  south2:
+    image: drift:latest
+    container_name: drift-u-south2
+    cap_add: [NET_ADMIN]
+    depends_on: [bridge]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.71.0.254
+        exec drift-peer --name south2 --listen 0.0.0.0:9000 --advertise 10.71.0.12:9000 \
+          --seed bridge@10.71.0.254:9000 --wait-for 7 --greet
+    networks:
+      lan-south:
+        ipv4_address: 10.71.0.12
+
+  south3:
+    image: drift:latest
+    container_name: drift-u-south3
+    cap_add: [NET_ADMIN]
+    depends_on: [bridge]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.70.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 10.71.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.71.0.254
+        exec drift-peer --name south3 --listen 0.0.0.0:9000 --advertise 10.71.0.13:9000 \
+          --seed bridge@10.71.0.254:9000 --wait-for 7 --greet
+    networks:
+      lan-south:
+        ipv4_address: 10.71.0.13
+
+networks:
+  lan-north:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.70.0.0/24
+          gateway: 10.70.0.1
+  lan-south:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.71.0.0/24
+          gateway: 10.71.0.1

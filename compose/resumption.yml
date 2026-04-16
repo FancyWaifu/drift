@@ -1,0 +1,57 @@
+services:
+  server:
+    image: drift:latest
+    container_name: drift-resume-server
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[server] starting resumption-server on :9100"
+        exec resumption-server
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.10
+
+  client:
+    image: drift:latest
+    container_name: drift-resume-client
+    depends_on:
+      - server
+    # The ticket path is shared across runs via a volume so
+    # the second invocation sees what the first wrote.
+    volumes:
+      - drift-ticket:/state
+    environment:
+      SERVER_ADDR: "10.30.0.10:9100"
+      TICKET_PATH: "/state/ticket.bin"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Give the server a moment to bind.
+        sleep 2
+
+        echo "========================================"
+        echo "[client] RUN 1: full handshake expected"
+        echo "========================================"
+        resumption-client || exit 1
+
+        echo
+        echo "========================================"
+        echo "[client] RUN 2: 1-RTT resumption expected"
+        echo "========================================"
+        resumption-client || exit 1
+
+        echo
+        echo "[client] DONE — both runs succeeded"
+    networks:
+      testnet:
+        ipv4_address: 10.30.0.20
+
+volumes:
+  drift-ticket:
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.30.0.0/16

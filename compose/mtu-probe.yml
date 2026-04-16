@@ -1,0 +1,53 @@
+# Probe a range of payload sizes at MTU 800:
+# - 100 bytes: well under MTU, expect 100% delivery
+# - 700 bytes: at IP+UDP+DRIFT overhead level, still under 800
+# - 1000 bytes: exceeds MTU 800 — expect IP fragmentation
+# - 1300 bytes: well over MTU, stress test of fragmentation path
+#
+# Note: Docker bridge networks don't clamp MTU by default, so the kernel
+# will IP-fragment to 800 and reassemble on the other side. This test
+# verifies that DRIFT's AEAD survives IP fragmentation.
+
+services:
+  bob:
+    image: drift:latest
+    container_name: drift-probe-bob
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ip link set eth0 mtu 800
+        exec drift-recv
+    networks:
+      testnet:
+        ipv4_address: 10.41.0.6
+
+  alice:
+    image: drift:latest
+    container_name: drift-probe-alice
+    depends_on: [bob]
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ip link set eth0 mtu 800
+        sleep 2
+        echo "=== probe 100 bytes ==="
+        big-send 10.41.0.6:9000 100 || true
+        echo "=== probe 700 bytes ==="
+        big-send 10.41.0.6:9000 700 || true
+        echo "=== probe 1000 bytes ==="
+        big-send 10.41.0.6:9000 1000 || true
+        echo "=== probe 1300 bytes ==="
+        big-send 10.41.0.6:9000 1300 || true
+        sleep 1
+    networks:
+      testnet:
+        ipv4_address: 10.41.0.5
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.41.0.0/24

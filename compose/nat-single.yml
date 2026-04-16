@@ -1,0 +1,90 @@
+# Single-NAT scenario: client behind NAT, server on isolated public network.
+#
+# SAFETY: Docker's `internal: true` blocks cross-bridge routing, so this
+# uses `internal: false` with explicit in-container iptables rules that
+# DROP any traffic outside the test subnets (10.1.0.0/24 and
+# 203.0.113.0/24). No host ports are published, so nothing is reachable
+# from the LAN.
+#
+# The "public" subnet uses RFC 5737 documentation addresses, which are
+# reserved by IANA and never routed on the real internet — even if a
+# packet leaked, it would be dropped by any real router.
+
+services:
+  alice:
+    image: drift:latest
+    container_name: drift-nat1-alice
+    cap_add: [NET_ADMIN]
+    depends_on: [nat-a]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Lock alice into the test subnets only.
+        iptables -A OUTPUT -d 10.1.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        ip route replace default via 10.1.0.254
+        echo "[alice] isolated, routing via 10.1.0.254"
+        sleep 3
+        exec drift-send 203.0.113.50:9000
+    networks:
+      private-a:
+        ipv4_address: 10.1.0.5
+
+  nat-a:
+    image: drift:latest
+    container_name: drift-nat1-router
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Allow forwarding only between the two test subnets.
+        iptables -P FORWARD DROP
+        iptables -A FORWARD -s 10.1.0.0/24 -d 203.0.113.0/24 -j ACCEPT
+        iptables -A FORWARD -s 203.0.113.0/24 -d 10.1.0.0/24 -j ACCEPT
+        iptables -t nat -A POSTROUTING -s 10.1.0.0/24 -o eth1 -j MASQUERADE
+        # Deny nat-a itself from reaching anything outside the test subnets.
+        iptables -A OUTPUT -d 10.1.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        echo "[nat-a] NAT configured, isolated to test subnets"
+        exec sleep infinity
+    networks:
+      private-a:
+        ipv4_address: 10.1.0.254
+      public-net:
+        ipv4_address: 203.0.113.10
+
+  server:
+    image: drift:latest
+    container_name: drift-nat1-server
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        iptables -A OUTPUT -d 10.1.0.0/24 -j ACCEPT
+        iptables -A OUTPUT -d 203.0.113.0/24 -j ACCEPT
+        iptables -A OUTPUT -j DROP
+        echo "[server] isolated"
+        exec drift-recv
+    networks:
+      public-net:
+        ipv4_address: 203.0.113.50
+
+networks:
+  private-a:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 10.1.0.0/24
+          gateway: 10.1.0.1
+  public-net:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+          gateway: 203.0.113.1

@@ -1,0 +1,82 @@
+services:
+  hub:
+    image: drift:latest
+    container_name: drift-churn-hub
+    environment:
+      ROLE: hub
+      RUST_LOG: "drift=info,drift_churn_node=info"
+    command: ["drift-churn-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.10
+
+  client0:
+    image: drift:latest
+    container_name: drift-churn-client0
+    depends_on:
+      - hub
+    environment:
+      ROLE: client
+      CLIENT_ID: "0"
+      HUB_ADDR: "10.60.0.10:9400"
+      ACTIONS: "30"
+      RUST_LOG: "drift=info,drift_churn_node=info"
+    command: ["drift-churn-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.20
+
+  client1:
+    image: drift:latest
+    container_name: drift-churn-client1
+    depends_on:
+      - hub
+    environment:
+      ROLE: client
+      CLIENT_ID: "1"
+      HUB_ADDR: "10.60.0.10:9400"
+      ACTIONS: "30"
+      RUST_LOG: "drift=info,drift_churn_node=info"
+    command: ["drift-churn-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.21
+
+  client2:
+    image: drift:latest
+    container_name: drift-churn-client2
+    depends_on:
+      - hub
+    environment:
+      ROLE: client
+      CLIENT_ID: "2"
+      HUB_ADDR: "10.60.0.10:9400"
+      ACTIONS: "30"
+      RUST_LOG: "drift=info,drift_churn_node=info"
+    command: ["drift-churn-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.22
+
+  client3:
+    image: drift:latest
+    container_name: drift-churn-client3
+    depends_on:
+      - hub
+    environment:
+      ROLE: client
+      CLIENT_ID: "3"
+      HUB_ADDR: "10.60.0.10:9400"
+      ACTIONS: "30"
+      RUST_LOG: "drift=info,drift_churn_node=info"
+    command: ["drift-churn-node"]
+    networks:
+      testnet:
+        ipv4_address: 10.60.0.23
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.60.0.0/16
