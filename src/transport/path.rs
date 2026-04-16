@@ -151,7 +151,7 @@ impl Inner {
             build_path_challenge_packet(self.local_peer_id, peer, &challenge)?
         };
 
-        self.io.send_to(&wire, candidate_addr).await?;
+        self.ifaces.send_default(&wire, candidate_addr).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -208,7 +208,7 @@ impl Inner {
             build_path_response_packet(self.local_peer_id, peer, &challenge_bytes)?
         };
 
-        self.io.send_to(&response_bytes, src).await?;
+        self.ifaces.send_default(&response_bytes, src).await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent

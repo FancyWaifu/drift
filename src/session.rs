@@ -190,6 +190,12 @@ pub struct Peer {
     /// first successful DATA (the validation point).
     pub unauth_bytes_rx: u32,
     pub unauth_bytes_tx: u32,
+    /// Index into the transport's `InterfaceSet` that this
+    /// peer is reachable through. Set when the peer first
+    /// handshakes (the interface the HELLO arrived on) and
+    /// updated on path migration. The send path uses this
+    /// to pick the right adapter for outgoing traffic.
+    pub interface_id: usize,
 }
 
 /// Client-side state for a 1-RTT resumption attempt currently
@@ -245,6 +251,7 @@ impl Peer {
             pending_ping: None,
             unauth_bytes_rx: 0,
             unauth_bytes_tx: 0,
+            interface_id: 0,
         }
     }
 
