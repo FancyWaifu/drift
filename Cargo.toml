@@ -22,6 +22,8 @@ blake2 = "0.10"
 siphasher = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ml-kem = "0.2"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
