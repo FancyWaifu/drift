@@ -148,7 +148,12 @@ async fn three_udp_and_three_tcp_all_pairs() {
     }
 
     // ---- Wait for beacons to propagate routes ----
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Routes need to propagate in BOTH directions:
+    //   1. TCP peers beacon to bridge → bridge learns routes
+    //   2. Bridge beacons to UDP peers → UDP peers learn routes
+    // With 300ms beacon interval, this takes 2-3 cycles.
+    // Give 3s to be safe.
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     // ---- Every peer sends to every other peer ----
     for i in 0..TOTAL {
@@ -167,11 +172,16 @@ async fn three_udp_and_three_tcp_all_pairs() {
         results.insert(i, Vec::new());
     }
 
-    // Give everything time to route through the bridge.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Give handshakes time to complete through the bridge.
+    // Cross-medium handshakes need: HELLO → bridge → forward
+    // → HELLO_ACK → bridge → forward → DATA → bridge →
+    // forward. Multiple round trips at ~1ms each but the
+    // handshake retry loop has exponential backoff starting
+    // at the configured base.
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     for i in 0..TOTAL {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while results[&i].len() < TOTAL - 1 {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -194,12 +204,13 @@ async fn three_udp_and_three_tcp_all_pairs() {
         let medium = if i < UDP_COUNT { "UDP" } else { "TCP" };
         let got = results[&i].len();
         total_delivered += got;
+        let m = peers[i].metrics();
         println!(
-            "  peer {} ({}): received {}/{} packets",
-            i,
-            medium,
-            got,
-            TOTAL - 1
+            "  peer {} ({}): recv={}/{} | pkts_tx={} pkts_rx={} hs={} resume={} auth_fail={} retries={}",
+            i, medium, got, TOTAL - 1,
+            m.packets_sent, m.packets_received,
+            m.handshakes_completed, m.resumptions_completed,
+            m.auth_failures, m.handshake_retries
         );
     }
     println!(

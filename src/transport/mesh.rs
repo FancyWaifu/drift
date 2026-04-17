@@ -194,7 +194,7 @@ impl RoutingTable {
                         metric,
                         cost_us,
                         updated_at: now,
-                        interface_id: 0,
+                        interface_id: iface,
                     },
                 );
                 true
@@ -265,13 +265,34 @@ impl Inner {
     }
 
     pub(crate) async fn emit_beacons(&self) -> Result<()> {
-        // Build the advertisement: all destinations we know about from our
-        // routing table, plus ourselves at metric 0 / cost 0.
+        // Build the advertisement: all destinations we know
+        // about from the routing table, PLUS all direct peers
+        // we have Established sessions with (at cost 0, since
+        // they're one hop away via us). This is critical for
+        // multi-interface bridging: a bridge that handshakes
+        // with a TCP peer needs to immediately advertise that
+        // peer to its UDP neighbors so they can route through
+        // the bridge without waiting for the TCP peer's own
+        // beacons to propagate.
         let mut entries: Vec<(PeerId, u16, u32)> = {
             let routes = self.routes.lock().await;
             routes.entries()
         };
+        // Add self.
         entries.push((self.local_peer_id, 0, 0));
+        // Add direct peers not already in the routing table.
+        {
+            let peers = self.peers.lock_all().await;
+            let existing: std::collections::HashSet<_> =
+                entries.iter().map(|(id, _, _)| *id).collect();
+            for peer in peers.iter() {
+                if matches!(peer.handshake, HandshakeState::Established { .. })
+                    && !existing.contains(&peer.id)
+                {
+                    entries.push((peer.id, 1, peer.neighbor_rtt_us() as u32));
+                }
+            }
+        }
         if entries.len() > MAX_BEACON_ENTRIES {
             entries.truncate(MAX_BEACON_ENTRIES);
         }
@@ -453,13 +474,40 @@ impl Inner {
     /// ciphertext — end-to-end crypto is preserved because hop_ttl is
     /// zeroed in the canonical AAD.
     pub(crate) async fn forward_packet(&self, data: &[u8], header: &Header) -> Result<()> {
+        // Two-tier lookup: first check the routing table (mesh
+        // routes learned from beacons), then fall back to the
+        // peer table (direct sessions). The peer-table fallback
+        // is what makes cross-medium bridging work without
+        // waiting for full beacon convergence: the bridge has
+        // direct sessions with every peer it handshook, so it
+        // can immediately forward to any of them regardless of
+        // whether beacons have propagated the route yet.
+        //
+        // This is the key insight: the bridge's adapters hand
+        // off bytes, the bridge checks "who is this addressed
+        // to?", finds the destination in its peer table, picks
+        // the right interface, and sends. The destination peer
+        // receives the bytes on their adapter and processes
+        // them as if they arrived directly.
         let (next_hop, fwd_iface) = {
+            // Try routing table first (has mesh cost info).
             let routes = self.routes.lock().await;
-            match routes.lookup_entry(&header.dst_id) {
-                Some(entry) => (entry.next_hop, entry.interface_id),
-                None => {
-                    debug!(dst = ?header.dst_id, "no route for destination");
-                    return Ok(());
+            if let Some(entry) = routes.lookup_entry(&header.dst_id) {
+                (entry.next_hop, entry.interface_id)
+            } else {
+                drop(routes);
+                // Fall back to peer table: if we have a direct
+                // session with the destination, forward to
+                // their addr via their interface.
+                let peers = self.peers.lock_for(&header.dst_id).await;
+                match peers.get(&header.dst_id) {
+                    Some(peer) if peer.handshake.is_ready_for_data() => {
+                        (peer.addr, peer.interface_id)
+                    }
+                    _ => {
+                        debug!(dst = ?header.dst_id, "no route or peer for destination");
+                        return Ok(());
+                    }
                 }
             }
         };
@@ -472,6 +520,7 @@ impl Inner {
         debug!(
             dst = ?header.dst_id,
             next_hop = ?next_hop,
+            iface = fwd_iface,
             new_ttl = forwarded[28],
             "forwarded"
         );
