@@ -255,6 +255,95 @@ impl PacketIO for MemPacketIO {
     }
 }
 
+/// WebSocket packet I/O. Each DRIFT packet becomes one
+/// WebSocket binary message. No framing needed — WebSocket
+/// already preserves message boundaries natively. This is
+/// the adapter for browser-to-server communication: a WASM
+/// DRIFT client in a browser talks to a server through
+/// WebSocket, which passes through every CDN, reverse proxy,
+/// and firewall on earth because it looks like normal HTTP
+/// traffic.
+///
+/// Create from an established WebSocket stream (either
+/// client-side from `tokio_tungstenite::connect_async` or
+/// server-side from `tokio_tungstenite::accept_async`).
+pub struct WsPacketIO<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> {
+    writer: tokio::sync::Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<S>,
+            tokio_tungstenite::tungstenite::Message,
+        >,
+    >,
+    reader: tokio::sync::Mutex<
+        futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
+    >,
+    addr: SocketAddr,
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> WsPacketIO<S> {
+    /// Wrap an established WebSocket stream. `addr` is a
+    /// placeholder SocketAddr for the trait's requirements —
+    /// for server-accepted connections, use the client's TCP
+    /// peer address; for client connections, use the server's
+    /// address.
+    pub fn new(
+        ws: tokio_tungstenite::WebSocketStream<S>,
+        addr: SocketAddr,
+    ) -> Self {
+        use futures_util::StreamExt;
+        let (writer, reader) = ws.split();
+        Self {
+            writer: tokio::sync::Mutex::new(writer),
+            reader: tokio::sync::Mutex::new(reader),
+            addr,
+        }
+    }
+}
+
+#[async_trait]
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>
+    PacketIO for WsPacketIO<S>
+{
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+        use futures_util::SinkExt;
+        let msg = tokio_tungstenite::tungstenite::Message::Binary(buf.to_vec().into());
+        let mut writer = self.writer.lock().await;
+        writer
+            .send(msg)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Ok(buf.len())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        use futures_util::StreamExt;
+        let mut reader = self.reader.lock().await;
+        loop {
+            match reader.next().await {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
+                    let n = data.len().min(buf.len());
+                    buf[..n].copy_from_slice(&data[..n]);
+                    return Ok((n, self.addr));
+                }
+                Some(Ok(_)) => continue, // skip text, ping, pong, close frames
+                Some(Err(e)) => {
+                    return Err(io::Error::new(io::ErrorKind::Other, e));
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "websocket closed",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.addr)
+    }
+}
+
 /// A set of named packet I/O interfaces that a single DRIFT
 /// transport listens on simultaneously. Incoming packets
 /// from ANY interface are multiplexed into a single recv

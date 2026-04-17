@@ -1249,14 +1249,14 @@ impl Inner {
             let mut peers = self.peers.lock_for(dst).await;
             let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
 
-            // SECURITY: prefer the direct `peer.addr` whenever we
-            // have an Established session with this destination. A
-            // learned mesh route (populated by BEACON) is only
-            // honored when we don't have a direct session. This
-            // prevents a malicious neighbor from advertising a
-            // 1-hop route to peers we already talk to and siphoning
-            // our direct traffic through themselves.
-            let mesh_next_hop = if matches!(
+            // Mesh-routed peers always need hop_ttl and long
+            // headers so intermediate nodes can forward. For
+            // direct peers, suppress learned routes once
+            // Established to prevent a malicious neighbor from
+            // advertising a 1-hop route and siphoning traffic.
+            let mesh_next_hop = if peer.via_mesh {
+                learned_route.or(Some(peer.addr))
+            } else if matches!(
                 peer.handshake,
                 HandshakeState::Established { .. }
             ) {
@@ -1264,6 +1264,8 @@ impl Inner {
             } else {
                 learned_route
             };
+
+            let effective_cid = if peer.via_mesh { None } else { out_cid };
 
             if peer.handshake.is_ready_for_data() {
                 build_data_packet_with_cid(
@@ -1273,7 +1275,7 @@ impl Inner {
                     deadline_ms,
                     coalesce_group,
                     mesh_next_hop,
-                    out_cid,
+                    effective_cid,
                 )?
             } else {
                 // Fail fast if the handshake has already burned
@@ -2000,6 +2002,7 @@ impl Inner {
                         client_peer_id,
                         src,
                         &self.metrics.handshakes_inflight,
+                        header.hop_ttl,
                     )?;
                     regen
                 }
@@ -2014,6 +2017,7 @@ impl Inner {
                     client_peer_id,
                     src,
                     &self.metrics.handshakes_inflight,
+                    header.hop_ttl,
                 )?;
                 regen
             }
@@ -2154,6 +2158,9 @@ impl Inner {
                 key_bytes: session_key_bytes,
                 prev: None,
             };
+            if mesh_next_hop.is_some() {
+                peer.via_mesh = true;
+            }
             self.metrics.handshakes_completed.fetch_add(1, Ordering::Relaxed);
             debug!("handshake complete with peer {:?}", peer_id);
             if let Some(q) = &self.qlog {
@@ -2399,6 +2406,11 @@ impl Inner {
                     // side. Mirrors the initiator-side flush
                     // in `handle_hello_ack`.
                     let pending = std::mem::take(&mut peer.pending);
+                    let flush_mesh = if peer.via_mesh {
+                        Some(peer.addr)
+                    } else {
+                        None
+                    };
                     for ps in pending {
                         if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
                             self.local_peer_id,
@@ -2406,7 +2418,7 @@ impl Inner {
                             &ps.payload,
                             ps.deadline_ms,
                             ps.coalesce_group,
-                            None,
+                            flush_mesh,
                         ) {
                             flushed.push((bytes, target, iface));
                         }
@@ -2677,6 +2689,7 @@ fn regenerate_session(
     client_peer_id: PeerId,
     src: SocketAddr,
     inflight_gauge: &std::sync::atomic::AtomicUsize,
+    incoming_hop_ttl: u8,
 ) -> Result<(Vec<u8>, SocketAddr)> {
     let was_awaiting_data =
         matches!(peer.handshake, HandshakeState::AwaitingData { .. });
@@ -2707,6 +2720,9 @@ fn regenerate_session(
     peer.coalesce_order.clear();
     peer.mark_session_start();
     peer.addr = src;
+    if incoming_hop_ttl > 0 {
+        peer.via_mesh = true;
+    }
 
     let mut ack_header =
         Header::new(PacketType::HelloAck, 1, local_peer_id, client_peer_id)
