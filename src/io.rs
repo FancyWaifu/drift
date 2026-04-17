@@ -182,6 +182,79 @@ impl PacketIO for TcpPacketIO {
     }
 }
 
+/// In-memory packet I/O via `tokio::sync::mpsc` channels.
+/// No network, no sockets, no kernel involvement — just Rust
+/// async channels passing `Vec<u8>` packets between two
+/// endpoints. Useful for:
+///
+///   * **Testing**: deterministic, no port conflicts, no
+///     timing jitter from the kernel.
+///   * **Same-process IPC**: two DRIFT transports in the same
+///     binary talking to each other with zero syscall overhead.
+///   * **Proof of universality**: if DRIFT works over bare
+///     channels, it works over anything.
+///
+/// Create a connected pair with `MemPacketIO::pair()`.
+pub struct MemPacketIO {
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    /// Placeholder address used as both local and remote.
+    /// Since there's no real network, this is purely for the
+    /// PacketIO trait's SocketAddr requirements.
+    addr: SocketAddr,
+}
+
+impl MemPacketIO {
+    /// Create a connected pair. Packets sent on side A arrive
+    /// on side B's recv, and vice versa. Each side gets a
+    /// unique placeholder SocketAddr so DRIFT can distinguish
+    /// them in its peer table.
+    pub fn pair() -> (Self, Self) {
+        let (tx_a, rx_b) = tokio::sync::mpsc::channel(1024);
+        let (tx_b, rx_a) = tokio::sync::mpsc::channel(1024);
+        let addr_a: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:60001".parse().unwrap();
+        (
+            Self {
+                tx: tx_a,
+                rx: tokio::sync::Mutex::new(rx_a),
+                addr: addr_a,
+            },
+            Self {
+                tx: tx_b,
+                rx: tokio::sync::Mutex::new(rx_b),
+                addr: addr_b,
+            },
+        )
+    }
+}
+
+#[async_trait]
+impl PacketIO for MemPacketIO {
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+        self.tx
+            .send(buf.to_vec())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::ConnectionReset, "channel closed"))?;
+        Ok(buf.len())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let mut rx = self.rx.lock().await;
+        let packet = rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::ConnectionReset, "channel closed"))?;
+        let n = packet.len().min(buf.len());
+        buf[..n].copy_from_slice(&packet[..n]);
+        Ok((n, self.addr))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.addr)
+    }
+}
+
 /// A set of named packet I/O interfaces that a single DRIFT
 /// transport listens on simultaneously. Incoming packets
 /// from ANY interface are multiplexed into a single recv
