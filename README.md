@@ -2,51 +2,25 @@
 
 **Deadline-aware, Routed, Identity-based, Fresh-over-stale, Tiny-footprint transport protocol.**
 
-DRIFT is an encrypted, identity-based transport protocol that runs over UDP (and now TCP, WebSocket, serial, or any medium that can carry packets). It takes inspiration from [Reticulum](https://reticulum.network/)'s identity-first philosophy -- your address IS your public key, encryption is non-negotiable, mesh routing is built in -- but is designed to work *with* existing IP infrastructure rather than replace it.
+DRIFT is an encrypted transport protocol where your address IS your public key, encryption is non-negotiable, and mesh routing is built in. Inspired by [Reticulum](https://reticulum.network/)'s identity-first philosophy, but designed for production IP networks with QUIC-grade performance.
 
-Where Reticulum targets off-grid mesh networks over LoRa and serial links, DRIFT targets production IP deployments where you want Reticulum's security model with QUIC-grade performance: congestion control, stream multiplexing, session resumption, pacing, and connection migration.
+## Why DRIFT
 
-**The positioning:** Reticulum proved the identity-first model works. DRIFT proves it can also be fast.
+Reticulum proved identity-first networking works. DRIFT proves it can also be fast — congestion control, stream multiplexing, session resumption, and connection migration over any medium that can carry packets.
 
-## Key Features
+## Features
 
-### Identity & Security
-- **Identity-based addressing** -- peer IDs are derived from X25519 public keys (BLAKE2b hash). No DNS, no certificates, no CA.
-- **Always encrypted** -- every packet is ChaCha20-Poly1305 AEAD-sealed. There is no plaintext mode.
-- **Post-quantum ready** -- optional X25519 + ML-KEM-768 (Kyber) hybrid handshake. Traffic captured today stays private even against future quantum computers.
-- **DoS cookies** -- adaptive stateless challenge-response prevents amplification attacks before any crypto work.
-- **3x amplification limit** -- RFC 9000-style cap on pre-handshake outbound bytes.
+**Crypto** — X25519 + ChaCha20-Poly1305 (WireGuard-style minimal surface). Optional post-quantum hybrid (X25519 + ML-KEM-768). Adaptive DoS cookies. RFC 9000-style 3× amplification limit. No plaintext mode.
 
-### Transport
-- **Reliable streams** -- TCP-like multiplexed streams with per-stream flow control, retransmission, and ordering. No head-of-line blocking between streams.
-- **Unreliable datagrams** -- fire-and-forget messages on the same session (like QUIC's DATAGRAM frame, RFC 9221).
-- **Congestion control** -- NewReno (default) or BBR-lite, with HyStart++ slow-start exit, pacing, and ECN CE-mark feedback.
-- **Deadline-aware delivery** -- packets carry a `deadline_ms`; receivers drop stale data automatically. For real-time apps where late is worse than lost.
-- **Semantic coalescing** -- packets in a `supersedes` group replace older ones. Only the freshest game-state update is delivered.
+**Transport** — Reliable multiplexed streams. Unreliable datagrams. NewReno or BBR-lite congestion control with ECN feedback. Deadline-aware delivery (`deadline_ms`). Semantic coalescing (`supersedes` groups — only the freshest update is delivered).
 
-### Session Management
-- **1-RTT session resumption** -- PSK-based reconnect skips X25519 on repeat connections. Export/import tickets for cross-restart persistence.
-- **Auto-rekey** -- transparent key rotation when the sequence counter approaches the 2^31 ceiling. No app intervention needed.
-- **Graceful connection migration** -- preemptive path validation for mobile handoff (wifi -> cellular) with no traffic stall.
+**Sessions** — 1-RTT PSK resumption with exportable tickets. Auto-rekey at the 2³¹ sequence ceiling. Graceful connection migration (wifi → cellular) via path validation probes.
 
-### Mesh & Routing
-- **Multi-hop forwarding** -- packets addressed to non-local peers get forwarded through intermediate nodes without breaking end-to-end encryption (`hop_ttl` is zeroed in the AEAD AAD).
-- **RTT-weighted routing** -- distance-vector beacons with per-neighbor latency measurement. Routes pick the lowest-RTT path, not just the fewest hops.
-- **Stability mechanisms** -- hold-down timers, hysteresis thresholds, staleness expiry, infinity-cost rejection. Prevents oscillation and count-to-infinity.
+**Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry.
 
-### Wire Efficiency
-- **Compact short headers** -- established direct sessions use a 7-byte header (vs 36-byte long header) with 2-byte Connection IDs derived from the session key. 56% overhead reduction.
-- **Long headers** -- full 36-byte headers for handshakes, mesh forwarding, and feature-tagged traffic (deadlines, coalescing).
-- **UDP GSO / sendmmsg** -- batched send path on Linux for high-throughput senders.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), and in-memory channels. Plug in serial, BLE, or anything else.
 
-### Medium Agnostic
-- **PacketIO trait** -- the transport layer talks through a trait, not a concrete socket type. Ship with UDP and TCP adapters; plug in WebSocket, serial, BLE, or anything else that can move packets.
-- **TCP adapter** -- length-prefix framing over TCP for networks that block UDP. Full DRIFT protocol stack works identically.
-
-### Observability
-- **30+ metrics** -- packets sent/received, handshakes, retries, auth failures, replays, coalesce drops, deadline drops, congestion state, resumption counts, amplification blocks, and more.
-- **qlog event logging** -- structured NDJSON event log (packet_sent, packet_received, handshake_complete) compatible with qlog tooling.
-- **FEC** -- XOR-based forward error correction for single-loss recovery on lossy links.
+**Observability** — 30+ runtime metrics. Structured NDJSON qlog. XOR-based FEC for lossy links.
 
 ## Quick Start
 
@@ -56,208 +30,118 @@ use drift::{Direction, Transport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate or load identities.
     let alice = Identity::generate();
     let bob = Identity::generate();
-    let bob_pub = bob.public_bytes();
 
-    // Bob listens.
     let bob_t = Transport::bind("0.0.0.0:9000".parse()?, bob).await?;
-    bob_t.add_peer(alice.public_bytes(), "0.0.0.0:0".parse()?, Direction::Responder).await?;
-
-    // Alice connects and sends.
     let alice_t = Transport::bind("0.0.0.0:0".parse()?, alice).await?;
-    let bob_peer = alice_t.add_peer(bob_pub, "127.0.0.1:9000".parse()?, Direction::Initiator).await?;
-    alice_t.send_data(&bob_peer, b"hello drift", 0, 0).await?;
 
-    // Bob receives.
+    let bob_peer = alice_t.add_peer(
+        bob_t.local_public(), "127.0.0.1:9000".parse()?, Direction::Initiator,
+    ).await?;
+
+    alice_t.send_data(&bob_peer, b"hello drift", 0, 0).await?;
     let pkt = bob_t.recv().await.unwrap();
     assert_eq!(pkt.payload, b"hello drift");
     Ok(())
 }
 ```
 
-## TCP Transport (Firewall Traversal)
+### Non-UDP Transports
 
 ```rust
-use drift::io::TcpPacketIO;
-use std::sync::Arc;
+use drift::io::{TcpPacketIO, WsPacketIO};
 
-// Connect via TCP instead of UDP.
+// TCP (firewall traversal)
 let tcp = tokio::net::TcpStream::connect("10.0.0.5:443").await?;
-let io = Arc::new(TcpPacketIO::new(tcp)?);
-let transport = Transport::bind_with_io(io, identity, config).await?;
-// Same API from here -- the app doesn't know or care which medium is underneath.
+let transport = Transport::bind_with_io(Arc::new(TcpPacketIO::new(tcp)?), identity, config).await?;
+
+// WebSocket (browser-to-server, CDN-friendly)
+let (ws, _) = tokio_tungstenite::connect_async("ws://10.0.0.5:8080").await?;
+let transport = Transport::bind_with_io(Arc::new(WsPacketIO::new(ws, addr)), identity, config).await?;
 ```
 
-## Tunneling TCP Apps Over DRIFT
+### Multi-Interface Bridging
 
-```bash
-# Server side: forward DRIFT streams to a local nginx.
-drift-tun listen --name myserver --drift-port 9000 --forward 127.0.0.1:80
+A single node can bridge across mediums — UDP peers talk to TCP peers talk to WebSocket peers through one bridge, zero medium-specific routing code:
 
-# Client side: accept local TCP, tunnel through DRIFT.
-drift-tun dial --name myclient --peer myserver@10.0.0.5:9000 --listen-port 8080
-
-# Now: curl http://localhost:8080 -> DRIFT tunnel -> nginx
-# Encrypted, identity-authenticated, multiplexed, mesh-routable.
+```rust
+let bridge = Transport::bind("0.0.0.0:9000".parse()?, bridge_id).await?;
+bridge.add_interface("tcp", Arc::new(TcpPacketIO::new(tcp_stream)?));
+bridge.add_interface("websocket", Arc::new(WsPacketIO::new(ws_stream, addr)));
+// Packets route by identity, not by medium.
 ```
+
+## Wire Format
+
+| Format | Header | AEAD tag | Total | Used for |
+|--------|--------|----------|-------|----------|
+| Long | 36 B | 16 B | 52 B | Handshakes, mesh forwarding, deadlines, coalescing |
+| Short | 7 B | 16 B | 23 B | Established direct sessions (56% reduction) |
+
+15 packet types: Hello/HelloAck, Data, Beacon, Challenge, PathChallenge/Response, Close, RekeyRequest/Ack, ResumeHello/Ack/Ticket, Ping/Pong.
 
 ## Architecture
 
 ```
 src/
-  lib.rs              Module exports
-  crypto.rs           ChaCha20-Poly1305 AEAD, X25519 DH, SipHash cookies
-  identity.rs         X25519 keypairs, session key derivation, rekey KDF
-  header.rs           36-byte long header, 20 packet types, canonical AAD
-  short_header.rs     7-byte compact header with Connection IDs
-  session.rs          Handshake state machine, peer table, replay protection
-  streams.rs          Reliable stream multiplexing, congestion control (NewReno + BBR)
-  io.rs               PacketIO trait, UdpPacketIO, TcpPacketIO adapters
-  pq.rs               X25519 + ML-KEM-768 post-quantum hybrid KDF
-  fec.rs              XOR-based forward error correction
-  multipath.rs        Multi-path manager with RTT-weighted path selection
+  crypto.rs            X25519 DH, ChaCha20-Poly1305, SipHash cookies
+  identity.rs          Keypairs, session key derivation, rekey KDF
+  header.rs            36-byte long header, 15 packet types
+  short_header.rs      7-byte compact header with Connection IDs
+  session.rs           Handshake state machine, replay protection
+  streams.rs           Reliable streams, NewReno + BBR congestion control
+  io.rs                PacketIO trait + UDP/TCP/WebSocket/Memory adapters
+  pq.rs                Post-quantum hybrid (X25519 + ML-KEM-768)
+  fec.rs               XOR forward error correction
+  multipath.rs         RTT-weighted path selection
   transport/
-    mod.rs            Transport struct, send/recv, handshake, rekey, resumption dispatch
-    cookies.rs        Adaptive DoS cookie challenge-response
-    mesh.rs           Routing table, BEACON emission/ingestion, hop-TTL forwarding
-    path.rs           Path validation (PathChallenge/PathResponse), graceful migration
-    peer_shards.rs    16-shard peer table for reduced lock contention
-    resumption.rs     1-RTT PSK session resumption with ticket export/import
-    rtt.rs            Ping/Pong RTT measurement for routing
-    ecn.rs            ECN (RFC 3168) outbound marking + CE-mark feedback
-    batch.rs          sendmmsg batching for high-throughput senders
-    qlog.rs           Structured NDJSON event logging
+    mod.rs             Core engine: send/recv, handshake, rekey, resumption
+    mesh.rs            Routing table, beacons, hop-TTL forwarding
+    cookies.rs         Adaptive DoS challenge-response
+    path.rs            PathChallenge/Response, connection migration
+    peer_shards.rs     16-shard peer table (lock contention reduction)
+    resumption.rs      1-RTT PSK session resumption
+    rtt.rs             Ping/Pong RTT measurement
+    ecn.rs             ECN marking + CE feedback
+    batch.rs           sendmmsg batching (Linux)
+    qlog.rs            Structured NDJSON event logging
 ```
-
-## Wire Format
-
-### Long Header (36 bytes) -- handshakes, mesh forwarding, feature-tagged DATA
-
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|Ver(4)|Flg(4) | PacketType    |        deadline_ms            |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                        seq (u32)                              |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     supersedes (u32)                          |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-+                     src_id (8 bytes)                          +
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-+                     dst_id (8 bytes)                          +
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  hop_ttl      |  reserved     |       payload_len             |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     send_time_ms (u32)                        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
-
-### Short Header (7 bytes) -- established direct sessions
-
-```
- 0               1               2               3
- 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  0x2  | flags |     connection_id (u16)       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   seq (u32)                   |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
-
-**Overhead comparison:**
-
-| Format | Header | AEAD tag | Total |
-|--------|--------|----------|-------|
-| Long header | 36 B | 16 B | 52 B |
-| Short header | 7 B | 16 B | 23 B |
-
-## Packet Types
-
-| Type | Value | Direction | Purpose |
-|------|-------|-----------|---------|
-| Hello | 1 | C -> S | Initiate handshake |
-| HelloAck | 2 | S -> C | Complete handshake |
-| Data | 3 | Both | Application payload |
-| Beacon | 6 | Both | Mesh route advertisement |
-| Challenge | 8 | S -> C | DoS cookie challenge |
-| PathChallenge | 9 | Both | Path validation probe |
-| PathResponse | 10 | Both | Path validation echo |
-| Close | 11 | Both | Graceful session teardown |
-| RekeyRequest | 12 | C -> S | Session rekey initiation |
-| RekeyAck | 13 | S -> C | Rekey confirmation |
-| ResumeHello | 14 | C -> S | 1-RTT session resumption |
-| ResumeAck | 15 | S -> C | Resumption confirmation |
-| ResumptionTicket | 16 | S -> C | Opaque ticket for future resumption |
-| Ping | 17 | Both | RTT measurement probe |
-| Pong | 18 | Both | RTT measurement echo |
-
-## Comparison with Reticulum
-
-DRIFT shares Reticulum's core philosophy -- identity-based addressing, always-encrypted, mesh-capable -- but targets a different deployment model:
-
-| | Reticulum | DRIFT |
-|---|---|---|
-| **Target medium** | Any (LoRa, serial, UDP, TCP) | Layer 4+ (UDP default, TCP/WS/serial via trait) |
-| **Target bandwidth** | 300 bps -- 10 Mbps | 1 Mbps -- 10 Gbps |
-| **Identity model** | Ed25519 pubkey hash | X25519 pubkey hash (BLAKE2b) |
-| **Encryption** | X25519 + AES-CBC + HMAC | X25519 + ChaCha20-Poly1305 |
-| **Congestion control** | None | NewReno, BBR-lite, HyStart++, pacing, ECN |
-| **Reliable delivery** | Links (message-level) | Streams (TCP-like, multiplexed) |
-| **Session resumption** | No | 1-RTT PSK with exportable tickets |
-| **Post-quantum** | No | X25519 + ML-KEM-768 hybrid (opt-in) |
-| **Compact headers** | ~8 B minimal | 7 B short / 36 B long |
-| **Implementation** | Python | Rust |
 
 ## Testing
 
-197 tests across 56 test files covering:
+~200 tests across 60+ files:
 
-- **Protocol correctness**: wire format KAT, header proptests, handshake state machine, rekey, resumption
-- **Security**: 17+ attack tests (replay, hijack, amplification, flood, poisoning, weak keys)
-- **Reliability**: lossy links (10-65% drop), satellite latency (2s RTT), bandwidth caps (10 Kbps), intermittent connectivity
-- **Scale**: 1000 concurrent handshakes, 64-client fan-in, 5-node full mesh, 10-cycle reconnect
-- **Features**: congestion control, streams, datagrams, ECN, FEC, BBR, short headers, TCP transport, qlog
-
-Docker integration tests: 5-node mesh, reconnect cycle, peer churn -- all running across real container networks.
+- **Correctness**: wire format KAT, header proptests, handshake state machine, rekey, resumption
+- **Security**: 17+ attack scenarios (replay, hijack, amplification, flood, beacon poisoning, weak keys)
+- **Reliability**: 10–65% packet loss, 2s RTT satellite links, 10 Kbps bandwidth caps, intermittent connectivity
+- **Scale**: 1000 concurrent handshakes, 64-client fan-in, 5-node full mesh
+- **Cross-medium**: four-medium bridge (UDP + TCP + Memory + WebSocket) with streams, datagrams, and coalescing
+- **Docker**: 30+ compose scenarios (mesh, NAT, chaos, extreme loss)
 
 ```bash
-# Run the full test suite
-cargo test
-
-# Run Docker integration tests
-docker build -t drift:latest -f docker/Dockerfile .
-docker compose -f compose/five_node_mesh.yml up -d
-docker compose -f compose/reconnect_cycle.yml up --exit-code-from client
-docker compose -f compose/peer_churn.yml up -d
+cargo test                # full suite
+cargo bench               # throughput benchmarks
 ```
 
-## Extreme Conditions (vs Reticulum)
+## vs Reticulum
 
-Stress-tested under conditions Reticulum is designed for:
-
-| Scenario | Result |
-|----------|--------|
-| 50% packet loss, 16 KB stream | Delivered intact at 1.7 KB/s |
-| 90% packet loss, handshake | Protocol limit -- needs >50 retries |
-| 2s RTT (satellite), 8 KB stream | Handshake in 3.2s, stream at 156 KB/s |
-| 10 Kbps bandwidth cap | 9/10 paced packets delivered |
-| 5-hop chain (~65% cumulative loss) | 4 KB stream delivered intact |
-| Intermittent link (2s up / 3s down) | Session survived, 40% delivery during up windows |
+| | Reticulum | DRIFT |
+|---|---|---|
+| **Bandwidth** | 300 bps – 10 Mbps | 1 Mbps – 10 Gbps |
+| **Encryption** | X25519 + AES-CBC + HMAC | X25519 + ChaCha20-Poly1305 |
+| **Congestion control** | None | NewReno, BBR, ECN |
+| **Reliable delivery** | Message-level | Multiplexed streams |
+| **Session resumption** | No | 1-RTT PSK |
+| **Post-quantum** | No | ML-KEM-768 hybrid |
+| **Transport mediums** | Any | Any (via PacketIO trait) |
+| **Implementation** | Python | Rust |
 
 ## Inspiration
 
-DRIFT draws heavily from:
-
-- **[Reticulum](https://reticulum.network/)** -- identity-first addressing, always-encrypted philosophy, mesh architecture. DRIFT is "Reticulum for production IP networks."
-- **[QUIC](https://www.rfc-editor.org/rfc/rfc9000)** -- congestion control, stream multiplexing, connection migration, 0/1-RTT handshakes, short headers with Connection IDs.
-- **[WireGuard](https://www.wireguard.com/)** -- minimal crypto surface (X25519 + ChaCha20-Poly1305), small codebase, Noise-like handshake simplicity.
+- **[Reticulum](https://reticulum.network/)** — identity-first addressing, always-encrypted, mesh architecture
+- **[QUIC](https://www.rfc-editor.org/rfc/rfc9000)** — congestion control, streams, connection migration, short headers
+- **[WireGuard](https://www.wireguard.com/)** — minimal crypto surface, small codebase
 
 ## License
 
