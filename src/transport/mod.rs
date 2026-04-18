@@ -2012,6 +2012,7 @@ impl Inner {
                         src,
                         &self.metrics.handshakes_inflight,
                         header.hop_ttl,
+                        iface_idx,
                     )?;
                     regen
                 }
@@ -2027,6 +2028,7 @@ impl Inner {
                     src,
                     &self.metrics.handshakes_inflight,
                     header.hop_ttl,
+                    iface_idx,
                 )?;
                 regen
             }
@@ -2697,6 +2699,7 @@ fn regenerate_session(
     src: SocketAddr,
     inflight_gauge: &std::sync::atomic::AtomicUsize,
     incoming_hop_ttl: u8,
+    iface_idx: usize,
 ) -> Result<(Vec<u8>, SocketAddr)> {
     let was_awaiting_data =
         matches!(peer.handshake, HandshakeState::AwaitingData { .. });
@@ -2727,6 +2730,15 @@ fn regenerate_session(
     peer.coalesce_order.clear();
     peer.mark_session_start();
     peer.addr = src;
+    // Keep `peer.interface_id` in sync with the interface the
+    // fresh handshake actually arrived on. Without this, an
+    // existing peer who reconnects from a new adapter (client
+    // process exited, reconnected from a new TCP ephemeral port
+    // or switched medium) would leave the outbound interface_id
+    // pointing at the previous — now-dead — interface, and
+    // every reply from us would be silently dropped at
+    // send_for while the inbound path worked fine.
+    peer.interface_id = iface_idx;
     // A HELLO arriving with `hop_ttl > 1` was issued with
     // `with_hop_ttl(DEFAULT_MESH_TTL)` — the sender intended
     // mesh routing. The default `hop_ttl = 1` indicates a

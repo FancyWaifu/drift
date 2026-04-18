@@ -124,3 +124,7 @@ path = "examples/drift_shell.rs"
 [[example]]
 name = "drift-chat"
 path = "examples/drift_chat.rs"
+
+[[example]]
+name = "drift-kv"
+path = "examples/drift_kv.rs"
