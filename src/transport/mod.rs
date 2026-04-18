@@ -267,6 +267,14 @@ pub(crate) struct MetricsInner {
     pub(crate) amplification_blocked: AtomicU64,
     pub(crate) batched_sends: AtomicU64,
     pub(crate) handshakes_inflight: std::sync::atomic::AtomicUsize,
+    /// Packets dropped because the destination peer wasn't
+    /// known to this node (handlers that require `dst_id ==
+    /// local_peer_id` and the destination wasn't local, or a
+    /// lookup in the peer table missed). Common cause on
+    /// bridges: a control packet (ticket, beacon, rekey)
+    /// addressed to a mesh peer arrived with `hop_ttl <= 1`,
+    /// so the forward gate didn't route it.
+    pub(crate) unknown_peer_drops: AtomicU64,
 }
 
 /// Snapshot of transport metrics at a point in time.
@@ -304,6 +312,7 @@ pub struct Metrics {
     pub pongs_received: u64,
     pub amplification_blocked: u64,
     pub batched_sends: u64,
+    pub unknown_peer_drops: u64,
 }
 
 /// Shared inner state — cloned into the background receive task.
@@ -612,6 +621,7 @@ impl Transport {
             pongs_received: m.pongs_received.load(Ordering::Relaxed),
             amplification_blocked: m.amplification_blocked.load(Ordering::Relaxed),
             batched_sends: m.batched_sends.load(Ordering::Relaxed),
+            unknown_peer_drops: m.unknown_peer_drops.load(Ordering::Relaxed),
         }
     }
 
@@ -1531,6 +1541,9 @@ impl Inner {
                         }
                         DriftError::DeadlineExpired => {
                             self.metrics.deadline_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        DriftError::UnknownPeer => {
+                            self.metrics.unknown_peer_drops.fetch_add(1, Ordering::Relaxed);
                         }
                         _ => {}
                     }
