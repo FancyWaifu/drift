@@ -133,10 +133,19 @@ impl RoutingTable {
     /// entry for `dst` iff:
     ///
     /// 1. There's currently no entry, OR
-    /// 2. The advertised cost is strictly lower AND
+    /// 2. Same `next_hop` and `interface_id`, strictly lower cost AND
     ///    * we're past the hold-down window, OR
     ///    * the new cost beats the current by at least
-    ///      the hysteresis threshold (≥20% improvement).
+    ///      the hysteresis threshold (≥20% improvement), OR
+    /// 3. A different `next_hop`/`interface_id` that also beats
+    ///    the current cost (hysteresis applies).
+    ///
+    /// For peer migration — where the same peer announces itself
+    /// from a new address at equal cost — use
+    /// [`force_migration`]. The plain cost comparison here
+    /// can't distinguish "peer moved to a new addr" from
+    /// "an inferior alternate route just got advertised," so
+    /// self-advertisements are routed through a separate path.
     ///
     /// Returns true when the table was updated. Infinity-
     /// tagged advertisements (`cost_us >= COST_INFINITY_US`)
@@ -200,6 +209,60 @@ impl RoutingTable {
                 true
             }
         }
+    }
+
+    /// Force-install a route reported by the peer itself (a
+    /// self-advertisement in a beacon: the beacon sender's
+    /// peer_id equals the advertised destination). Used for
+    /// graceful migration: a peer that moves to a new address
+    /// announces itself from the new addr at equal cost, and
+    /// we must trust that over any stale cost-equal entry
+    /// pointing at the dead old addr.
+    ///
+    /// Safe because beacons are AEAD-sealed under a per-peer
+    /// session key, so we only reach this code path after
+    /// authenticating the sender as the peer it claims to be.
+    /// A third-party neighbor cannot trigger this — their
+    /// beacons about someone else go through `update_if_better`
+    /// and compete on cost as usual.
+    pub fn force_migration(
+        &mut self,
+        dst: PeerId,
+        next_hop: SocketAddr,
+        metric: u16,
+        cost_us: u32,
+        iface: usize,
+    ) -> bool {
+        if cost_us >= COST_INFINITY_US {
+            return false;
+        }
+        match self.routes.get(&dst) {
+            Some(existing)
+                if existing.next_hop == next_hop && existing.interface_id == iface =>
+            {
+                // Same path, no migration — fall through to
+                // normal cost logic to preserve anti-flap.
+                return self.update_if_better(dst, next_hop, metric, cost_us, iface);
+            }
+            _ => {}
+        }
+        // Either no entry or a path change from the peer itself.
+        // Accept unconditionally, subject only to the route cap
+        // on fresh inserts.
+        if !self.routes.contains_key(&dst) && self.routes.len() >= MAX_ROUTES {
+            return false;
+        }
+        self.routes.insert(
+            dst,
+            RouteEntry {
+                next_hop,
+                metric,
+                cost_us,
+                updated_at: std::time::Instant::now(),
+                interface_id: iface,
+            },
+        );
+        true
     }
 
     pub fn lookup(&self, dst: &PeerId) -> Option<SocketAddr> {
@@ -447,7 +510,18 @@ impl Inner {
             // cost.
             let new_cost = effective_neighbor_rtt.saturating_add(advertised_cost);
             let new_metric = metric.saturating_add(1);
-            if routes.update_if_better(id, src, new_metric, new_cost, iface_idx) {
+            // Self-advertisement: the beacon sender is
+            // advertising themselves. If they've moved, the
+            // new `src` addr must replace any stale entry even
+            // at equal cost. `force_migration` handles that
+            // safely — the beacon's AEAD tag has already
+            // authenticated the sender as `peer_id`.
+            let accepted = if id == peer_id {
+                routes.force_migration(id, src, new_metric, new_cost, iface_idx)
+            } else {
+                routes.update_if_better(id, src, new_metric, new_cost, iface_idx)
+            };
+            if accepted {
                 updated += 1;
             }
         }
@@ -599,6 +673,62 @@ mod tests {
         assert!(rt.update_if_better(dst, hop(2), 1, 7_000, 0));
         let e = rt.lookup_entry(&dst).unwrap();
         assert_eq!(e.next_hop, hop(2));
+    }
+
+    #[test]
+    fn force_migration_replaces_route_at_equal_cost() {
+        // Regression test for the rotation bug: when a peer
+        // moves to a new address but the cost stays the same
+        // (loopback alias → loopback alias, both near-zero
+        // RTT), self-advertisements in the peer's own beacons
+        // must replace the stale entry so subsequent
+        // forwarding hits the new addr. Without the fix,
+        // `cost_us >= existing.cost_us` rejected the refresh
+        // and outgoing traffic went to the dead old next_hop
+        // until ROUTE_STALENESS swept the entry seconds later.
+        let mut rt = RoutingTable::default();
+        let dst = [7u8; 8];
+        assert!(rt.update_if_better(dst, hop(1), 1, 1_000, 0));
+
+        // Peer itself announces from a new next_hop at the
+        // same cost (self-advertisement → force_migration).
+        assert!(
+            rt.force_migration(dst, hop(2), 1, 1_000, 0),
+            "equal-cost path change via force_migration should update"
+        );
+        let e = rt.lookup_entry(&dst).unwrap();
+        assert_eq!(e.next_hop, hop(2));
+
+        // Interface change by the peer itself.
+        assert!(
+            rt.force_migration(dst, hop(2), 1, 1_000, 1),
+            "interface migration should update"
+        );
+        let e = rt.lookup_entry(&dst).unwrap();
+        assert_eq!(e.interface_id, 1);
+
+        // Same path, same cost → no churn even via force_migration.
+        assert!(
+            !rt.force_migration(dst, hop(2), 1, 1_000, 1),
+            "identical force_migration should be a no-op"
+        );
+    }
+
+    #[test]
+    fn non_self_advert_at_equal_cost_still_rejected() {
+        // A third-party neighbor re-advertising a peer at
+        // equal cost must NOT reroute us through them. Only
+        // the peer's own self-advertisement can migrate. This
+        // preserves the existing behavior that
+        // `update_picks_lower_cost_over_hop_count` asserts
+        // and prevents a noisy neighbor from stealing routes.
+        let mut rt = RoutingTable::default();
+        let dst = [8u8; 8];
+        assert!(rt.update_if_better(dst, hop(1), 1, 1_000, 0));
+        // Different neighbor, equal cost → still rejected.
+        assert!(!rt.update_if_better(dst, hop(2), 1, 1_000, 0));
+        let e = rt.lookup_entry(&dst).unwrap();
+        assert_eq!(e.next_hop, hop(1));
     }
 
     #[test]
