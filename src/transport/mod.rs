@@ -2720,7 +2720,15 @@ fn regenerate_session(
     peer.coalesce_order.clear();
     peer.mark_session_start();
     peer.addr = src;
-    if incoming_hop_ttl > 0 {
+    // A HELLO arriving with `hop_ttl > 1` was issued with
+    // `with_hop_ttl(DEFAULT_MESH_TTL)` — the sender intended
+    // mesh routing. The default `hop_ttl = 1` indicates a
+    // direct HELLO. The old `> 0` check misfired on every
+    // direct handshake and caused the beacon emitter to treat
+    // direct neighbors as mesh-routed (silently skipping them
+    // in the fixed filter, dropping them at the bridge's
+    // forward gate before the filter existed).
+    if incoming_hop_ttl > 1 {
         peer.via_mesh = true;
     }
 

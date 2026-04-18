@@ -313,12 +313,20 @@ impl Inner {
         // Skip peers whose seq counter has hit the safety ceiling —
         // we can't emit without a re-handshake, but this isn't an
         // error path, just "no beacons today".
+        // Only emit beacons to direct neighbors. Peers reachable
+        // via mesh already learn routes from their own direct
+        // neighbor (the relay we're sending through). Sending
+        // beacons to mesh-routed peers would hit the relay with
+        // `dst != relay && hop_ttl == 1`, getting dropped as
+        // "unknown peer" at `process_incoming`'s forward gate.
         let targets: Vec<(PeerId, SocketAddr, u32)> = {
             let mut peers = self.peers.lock_all().await;
             peers
                 .iter_mut()
                 .filter_map(|p| {
-                    if matches!(p.handshake, HandshakeState::Established { .. }) {
+                    if matches!(p.handshake, HandshakeState::Established { .. })
+                        && !p.via_mesh
+                    {
                         p.next_seq_checked().map(|seq| (p.id, p.addr, seq))
                     } else {
                         None
