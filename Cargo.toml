@@ -108,3 +108,7 @@ path = "examples/mesh_node.rs"
 [[example]]
 name = "drift-churn-node"
 path = "examples/churn_node.rs"
+
+[[example]]
+name = "drift-medium-demo"
+path = "examples/medium_demo.rs"
