@@ -265,6 +265,20 @@ impl RoutingTable {
         true
     }
 
+    /// Remove the route for `dst` only if it still points at
+    /// the `next_hop`/`iface` pair we expect. Used from
+    /// `forward_packet` to invalidate a dead path without
+    /// accidentally clobbering a fresher entry that a concurrent
+    /// beacon may have installed between our lookup and the
+    /// send-error that motivated the removal.
+    pub fn remove_if_matches(&mut self, dst: &PeerId, next_hop: SocketAddr, iface: usize) {
+        if let Some(entry) = self.routes.get(dst) {
+            if entry.next_hop == next_hop && entry.interface_id == iface {
+                self.routes.remove(dst);
+            }
+        }
+    }
+
     pub fn lookup(&self, dst: &PeerId) -> Option<SocketAddr> {
         self.routes.get(dst).map(|e| e.next_hop)
     }
@@ -597,7 +611,33 @@ impl Inner {
         let mut forwarded = data.to_vec();
         // hop_ttl lives at byte 28 of the header.
         forwarded[28] = header.hop_ttl.saturating_sub(1);
-        self.ifaces.send_for(fwd_iface, &forwarded, next_hop).await?;
+        if let Err(e) = self.ifaces.send_for(fwd_iface, &forwarded, next_hop).await {
+            // Forward failed: the next_hop is dead (TCP/WS will
+            // surface closed-connection errors; UDP won't, so
+            // this is best-effort). Purge the stale route so
+            // subsequent sends don't repeat the failure — without
+            // this, `ROUTE_STALENESS` would keep the entry alive
+            // for up to 15 s, during which every cross-peer probe
+            // produces the same silent-drop noise at the bridge.
+            // The matching peer entry (if we hit the peer-table
+            // fallback above) is left in place: the peer may
+            // re-handshake on a new addr and we want the session
+            // state preserved for that path.
+            let mut routes = self.routes.lock().await;
+            let was_present = routes.lookup_entry(&header.dst_id).is_some();
+            routes.remove_if_matches(&header.dst_id, next_hop, fwd_iface);
+            drop(routes);
+            if was_present {
+                debug!(
+                    error = %e,
+                    dst = ?header.dst_id,
+                    next_hop = ?next_hop,
+                    iface = fwd_iface,
+                    "forward failed; route invalidated"
+                );
+            }
+            return Ok(());
+        }
         self.metrics.forwarded.fetch_add(1, Ordering::Relaxed);
         debug!(
             dst = ?header.dst_id,
