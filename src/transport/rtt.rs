@@ -84,10 +84,8 @@ impl Inner {
                 let Some(peer) = peers.get_mut(&dst_id) else {
                     continue;
                 };
-                let mut header =
-                    Header::new(PacketType::Ping, seq, self.local_peer_id, dst_id);
+                let mut header = peer.make_header(PacketType::Ping, seq, self.local_peer_id);
                 header.payload_len = (PING_NONCE_LEN + AUTH_TAG_LEN) as u16;
-                header.send_time_ms = peer.send_time_ms();
                 let mut hbuf = [0u8; HEADER_LEN];
                 header.encode(&mut hbuf);
                 let aad = canonical_aad(&hbuf);
@@ -171,10 +169,8 @@ impl Inner {
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut pong_header =
-                Header::new(PacketType::Pong, seq, self.local_peer_id, peer_id);
+            let mut pong_header = peer.make_header(PacketType::Pong, seq, self.local_peer_id);
             pong_header.payload_len = (PING_NONCE_LEN + AUTH_TAG_LEN) as u16;
-            pong_header.send_time_ms = peer.send_time_ms();
             let mut pong_hbuf = [0u8; HEADER_LEN];
             pong_header.encode(&mut pong_hbuf);
             let pong_aad = canonical_aad(&pong_hbuf);
