@@ -71,12 +71,18 @@ async fn bogus_ack_cannot_clear_pending_beyond_sent() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     let alice_mgr = StreamManager::bind(alice_t.clone()).await;
     let bob_mgr = StreamManager::bind(bob_t.clone()).await;
@@ -103,7 +109,10 @@ async fn bogus_ack_cannot_clear_pending_beyond_sent() {
     bogus.push(0x12u8); // TAG_ACK
     bogus.extend_from_slice(&stream_alice.id().to_be_bytes());
     bogus.extend_from_slice(&u32::MAX.to_be_bytes());
-    bob_t.send_data(&alice_t.local_peer_id(), &bogus, 0, 0).await.unwrap();
+    bob_t
+        .send_data(&alice_t.local_peer_id(), &bogus, 0, 0)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Send more bytes both ways. Both must still be delivered
@@ -177,13 +186,9 @@ async fn auto_registered_peer_flood_bounded_by_max_peers() {
     let server_id = Identity::from_secret_bytes([0x50; 32]);
     let server_pub = server_id.public_bytes();
     let server = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            server_id,
-            cfg,
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), server_id, cfg)
+            .await
+            .unwrap(),
     );
     let server_addr = server.local_addr().unwrap();
     let atk = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -192,8 +197,7 @@ async fn auto_registered_peer_flood_bounded_by_max_peers() {
     for i in 0u8..(cap as u8 + 32) {
         let secret = [i ^ 0xAA; 32];
         let static_pub = Identity::from_secret_bytes(secret).public_bytes();
-        let ephemeral_pub =
-            Identity::from_secret_bytes([i ^ 0x55; 32]).public_bytes();
+        let ephemeral_pub = Identity::from_secret_bytes([i ^ 0x55; 32]).public_bytes();
         let mut nonce = [0u8; 16];
         nonce[0] = i;
         let wire = build_hello(static_pub, ephemeral_pub, nonce, server_pub);
@@ -234,13 +238,9 @@ async fn all_zero_client_static_pub_rejected() {
     let server_id = Identity::from_secret_bytes([0x60; 32]);
     let server_pub = server_id.public_bytes();
     let server = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            server_id,
-            cfg,
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), server_id, cfg)
+            .await
+            .unwrap(),
     );
     let server_addr = server.local_addr().unwrap();
     let atk = UdpSocket::bind("127.0.0.1:0").await.unwrap();

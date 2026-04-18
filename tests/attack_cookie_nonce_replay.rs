@@ -75,18 +75,14 @@ async fn cookie_replay_with_different_nonce_is_rejected() {
     // Step 1: send a plain HELLO with nonce N1; receive the CHALLENGE
     // reply and pull the 24-byte cookie blob out of its body.
     let nonce1 = [0x11u8; 16];
-    let hello1 =
-        build_hello_wire(atk_static, atk_ephemeral, nonce1, server_pub, None);
+    let hello1 = build_hello_wire(atk_static, atk_ephemeral, nonce1, server_pub, None);
     attacker.send_to(&hello1, server_addr).await.unwrap();
 
     let mut buf = [0u8; 1500];
-    let (n, _) = tokio::time::timeout(
-        Duration::from_secs(2),
-        attacker.recv_from(&mut buf),
-    )
-    .await
-    .expect("server never sent a CHALLENGE")
-    .unwrap();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), attacker.recv_from(&mut buf))
+        .await
+        .expect("server never sent a CHALLENGE")
+        .unwrap();
     assert!(n >= HEADER_LEN + COOKIE_BLOB_LEN, "challenge too short");
 
     let hdr = Header::decode(&buf[..HEADER_LEN]).unwrap();
@@ -102,13 +98,7 @@ async fn cookie_replay_with_different_nonce_is_rejected() {
     // server burns an X25519 on this forged packet. A properly bound
     // cookie must reject it.
     let nonce2 = [0x22u8; 16];
-    let hello2 = build_hello_wire(
-        atk_static,
-        atk_ephemeral,
-        nonce2,
-        server_pub,
-        Some(cookie),
-    );
+    let hello2 = build_hello_wire(atk_static, atk_ephemeral, nonce2, server_pub, Some(cookie));
     attacker.send_to(&hello2, server_addr).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;

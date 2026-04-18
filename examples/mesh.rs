@@ -36,7 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bob listens on 9010 as the real destination.
     let bob = Transport::bind(bob_addr, bob_id).await?;
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse()?, Direction::Responder).await.unwrap();
+    bob.add_peer(alice_pub, "0.0.0.0:0".parse()?, Direction::Responder)
+        .await
+        .unwrap();
     println!("bob bound on {}", bob.local_addr()?);
 
     // Relay listens on 9011. It has no peer entries — it just forwards.
@@ -49,7 +51,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Alice binds 9012 (fixed port so the relay can route back to her).
     let alice = Transport::bind(alice_addr, alice_id).await?;
     // Give bob a placeholder addr; the mesh route overrides it.
-    alice.add_peer(bob_pub, "0.0.0.0:0".parse()?, Direction::Initiator).await.unwrap();
+    alice
+        .add_peer(bob_pub, "0.0.0.0:0".parse()?, Direction::Initiator)
+        .await
+        .unwrap();
     alice.add_route(bob_peer_id, relay_addr).await;
     println!("alice bound on {}", alice.local_addr()?);
 
@@ -74,7 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Alice sends.
     for i in 1..=5 {
         let msg = format!("mesh hello #{i}");
-        alice.send_data(&bob_peer_id, msg.as_bytes(), 500, 0).await?;
+        alice
+            .send_data(&bob_peer_id, msg.as_bytes(), 500, 0)
+            .await?;
         println!("ALICE sent #{i}");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

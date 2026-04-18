@@ -24,7 +24,8 @@ async fn peer_table_add_10k() {
         let pub_key = Identity::from_secret_bytes(seed).public_bytes();
         server
             .add_peer(pub_key, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-            .await.unwrap();
+            .await
+            .unwrap();
     }
     let elapsed = start.elapsed();
     println!("peer_table_add_10k: {:?}", elapsed);
@@ -76,7 +77,8 @@ async fn pending_queue_flood_bounded() {
     let dead_addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, dead_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Blast 10,000 sends. We expect an error well before 10,000.
     let mut successes = 0;
@@ -102,10 +104,7 @@ async fn pending_queue_flood_bounded() {
         "queue must be bounded — got {} successful sends before erroring",
         successes
     );
-    println!(
-        "pending_queue_flood: {} queued before {:?}",
-        successes, err
-    );
+    println!("pending_queue_flood: {} queued before {:?}", successes, err);
 }
 
 /// Send many different coalesce groups and verify the coalesce_state map
@@ -123,8 +122,13 @@ async fn coalesce_map_10k_groups() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
@@ -132,7 +136,8 @@ async fn coalesce_map_10k_groups() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Spawn receiver in the background.
     let bob_recv = bob_t.clone();
@@ -195,8 +200,13 @@ async fn recv_channel_backpressure() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
@@ -204,7 +214,8 @@ async fn recv_channel_backpressure() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Warm up.
     alice_t.send_data(&bob_peer, b"warm", 0, 0).await.unwrap();

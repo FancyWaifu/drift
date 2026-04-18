@@ -137,7 +137,11 @@ async fn setup_pair_via_proxy_cfg(
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -266,7 +270,10 @@ async fn scenario_90pct_loss_handshake_survives() {
     let (alice_t, bob_t, bob_peer) = setup_pair_via_proxy(profile).await;
 
     let started = Instant::now();
-    alice_t.send_data(&bob_peer, b"extreme", 0, 0).await.unwrap();
+    alice_t
+        .send_data(&bob_peer, b"extreme", 0, 0)
+        .await
+        .unwrap();
 
     // At 90% loss, each HELLO has a 10% chance of arriving,
     // each HELLO_ACK has 10% chance, and the DATA has 10%.
@@ -284,7 +291,10 @@ async fn scenario_90pct_loss_handshake_survives() {
             assert_eq!(pkt.payload, b"extreme");
         }
         Ok(None) => {
-            println!("[90% loss] channel closed — handshake failed after {:?}", started.elapsed());
+            println!(
+                "[90% loss] channel closed — handshake failed after {:?}",
+                started.elapsed()
+            );
             // At 90% loss this is a valid outcome. Document
             // that DRIFT CANNOT reliably handshake under
             // 90% bidirectional loss with default retry
@@ -311,7 +321,7 @@ async fn scenario_90pct_loss_handshake_survives() {
 #[tokio::test]
 async fn scenario_satellite_2s_rtt() {
     let profile = LinkProfile {
-        drop_rate: 0.02, // light loss
+        drop_rate: 0.02,  // light loss
         latency_ms: 1000, // 1s one-way = 2s RTT
         jitter_ms: 100,
         bandwidth_bps: 0,
@@ -319,7 +329,10 @@ async fn scenario_satellite_2s_rtt() {
     let (alice_t, bob_t, bob_peer) = setup_pair_via_proxy(profile).await;
 
     let started = Instant::now();
-    alice_t.send_data(&bob_peer, b"satellite", 0, 0).await.unwrap();
+    alice_t
+        .send_data(&bob_peer, b"satellite", 0, 0)
+        .await
+        .unwrap();
 
     // Handshake at 2s RTT: HELLO (1s) → HELLO_ACK (1s) →
     // DATA (1s) = at least 3s. With jitter + retry backoff
@@ -329,10 +342,7 @@ async fn scenario_satellite_2s_rtt() {
         .expect("[satellite] handshake timed out at 2s RTT")
         .unwrap();
     let handshake_time = started.elapsed();
-    println!(
-        "[satellite] handshake + delivery in {:?}",
-        handshake_time
-    );
+    println!("[satellite] handshake + delivery in {:?}", handshake_time);
     assert_eq!(pkt.payload, b"satellite");
 
     // Now test throughput: push 8 KB through the stream
@@ -457,7 +467,10 @@ async fn scenario_5hop_chain_compounding_loss() {
     let (alice_t, bob_t, bob_peer) = setup_pair_via_proxy(profile).await;
 
     let started = Instant::now();
-    alice_t.send_data(&bob_peer, b"multihop", 0, 0).await.unwrap();
+    alice_t
+        .send_data(&bob_peer, b"multihop", 0, 0)
+        .await
+        .unwrap();
 
     // At ~65% bidirectional loss, only ~12% of HELLO→ACK
     // round trips succeed. With the default 10 retries,
@@ -541,7 +554,11 @@ async fn scenario_intermittent_link() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();

@@ -33,14 +33,22 @@ async fn path_probe_retry_is_rate_limited() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Transport::bind("127.0.0.1:0".parse().unwrap(), alice_id)
         .await
         .unwrap();
-    let bob_peer = alice.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
     alice.send_data(&bob_peer, b"warm-up", 0, 0).await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
@@ -103,8 +111,13 @@ async fn single_roaming_event_produces_single_probe() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let p1 = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -149,7 +162,10 @@ async fn single_roaming_event_produces_single_probe() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice.add_peer(bob_pub, p1_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice
+        .add_peer(bob_pub, p1_addr, Direction::Initiator)
+        .await
+        .unwrap();
     alice.send_data(&bob_peer, b"p1", 0, 0).await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv()).await;
 
@@ -157,7 +173,10 @@ async fn single_roaming_event_produces_single_probe() {
     *active.lock().await = 2;
     alice.update_peer_addr(&bob_peer, p2_addr).await;
     for i in 0..30u32 {
-        alice.send_data(&bob_peer, &i.to_be_bytes(), 0, 0).await.unwrap();
+        alice
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
         let _ = tokio::time::timeout(Duration::from_millis(200), bob.recv()).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await;

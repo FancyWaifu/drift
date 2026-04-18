@@ -51,15 +51,24 @@ async fn learned_route_cannot_hijack_direct_established_session() {
     let mallory_addr = mallory.local_addr().unwrap();
 
     // Bob expects Alice.
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     // Alice sets up a direct session with Bob.
     let bob_peer = alice
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Do one packet to establish the session with Bob.
-    alice.send_data(&bob_peer, b"hello-bob", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"hello-bob", 0, 0)
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()

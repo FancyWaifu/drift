@@ -19,8 +19,13 @@ async fn metrics_count_real_traffic() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
@@ -28,12 +33,16 @@ async fn metrics_count_real_traffic() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Send 10 packets; each carries a coalesce group so we can also
     // check coalesce behavior.
     for i in 0..10u32 {
-        alice_t.send_data(&bob_peer, &i.to_be_bytes(), 0, 1).await.unwrap();
+        alice_t
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 1)
+            .await
+            .unwrap();
     }
 
     // Drain receiver.

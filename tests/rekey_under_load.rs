@@ -32,7 +32,11 @@ async fn rekey_midway_through_256k_push() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -130,9 +134,13 @@ async fn rekey_on_resumed_session() {
         .await
         .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     // First session → ticket.
@@ -175,7 +183,10 @@ async fn rekey_on_resumed_session() {
         .await
         .unwrap();
 
-    alice2.send_data(&bob_peer2, b"resumed-1", 0, 0).await.unwrap();
+    alice2
+        .send_data(&bob_peer2, b"resumed-1", 0, 0)
+        .await
+        .unwrap();
     let p = tokio::time::timeout(Duration::from_secs(3), bob.recv())
         .await
         .unwrap()
@@ -188,7 +199,10 @@ async fn rekey_on_resumed_session() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Traffic should still flow after the rekey-on-resumed.
-    alice2.send_data(&bob_peer2, b"after-rekey-on-resumed", 0, 0).await.unwrap();
+    alice2
+        .send_data(&bob_peer2, b"after-rekey-on-resumed", 0, 0)
+        .await
+        .unwrap();
     let p2 = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()

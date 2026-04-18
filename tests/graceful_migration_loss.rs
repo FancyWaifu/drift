@@ -23,8 +23,8 @@
 use drift::identity::Identity;
 use drift::{Direction, Transport};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -84,9 +84,13 @@ async fn setup_pair() -> (
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -119,7 +123,10 @@ async fn lossy_candidate_succeeds_on_retry() {
 
     // First attempt: challenge dropped. The probe is recorded
     // in peer.probing but no response comes.
-    alice.probe_candidate_path(&bob_peer, proxy_addr).await.unwrap();
+    alice
+        .probe_candidate_path(&bob_peer, proxy_addr)
+        .await
+        .unwrap();
     assert_eq!(alice.metrics().graceful_probes_initiated, 1);
 
     // Wait past the PATH_PROBE_RETRY interval (500ms) so a
@@ -128,7 +135,10 @@ async fn lossy_candidate_succeeds_on_retry() {
 
     // Second attempt: this one should get through (proxy has
     // now exhausted its drop budget).
-    alice.probe_candidate_path(&bob_peer, proxy_addr).await.unwrap();
+    alice
+        .probe_candidate_path(&bob_peer, proxy_addr)
+        .await
+        .unwrap();
     assert_eq!(alice.metrics().graceful_probes_initiated, 2);
 
     // Wait for validation.
@@ -158,10 +168,16 @@ async fn lossy_candidate_probe_does_not_corrupt_state() {
     // Proxy drops EVERYTHING — effectively a black hole.
     let black_hole = spawn_head_drop_proxy(bob_real_addr, usize::MAX).await;
 
-    alice.probe_candidate_path(&bob_peer, black_hole).await.unwrap();
+    alice
+        .probe_candidate_path(&bob_peer, black_hole)
+        .await
+        .unwrap();
 
     // Session should still work via the direct path.
-    alice.send_data(&bob_peer, b"still-alive", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"still-alive", 0, 0)
+        .await
+        .unwrap();
     let p = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .expect("direct-path send should still work while probe is stuck")

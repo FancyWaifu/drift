@@ -63,8 +63,7 @@ async fn spawn_proxy(target: SocketAddr, profile: LossProfile) -> SocketAddr {
             }
 
             let base = profile.latency_ms;
-            let jitter =
-                rng.gen_range(0..=profile.jitter_ms.saturating_add(1)) as u64;
+            let jitter = rng.gen_range(0..=profile.jitter_ms.saturating_add(1)) as u64;
             let mut delay = base + jitter;
             if rng.gen::<f64>() < profile.reorder_rate {
                 delay += rng.gen_range(10..=50);
@@ -96,8 +95,13 @@ async fn large_payload_over_lossy_link_arrives_intact() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let proxy = spawn_proxy(
@@ -116,7 +120,10 @@ async fn large_payload_over_lossy_link_arrives_intact() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice_t.add_peer(bob_pub, proxy, Direction::Initiator).await.unwrap();
+    let bob_peer = alice_t
+        .add_peer(bob_pub, proxy, Direction::Initiator)
+        .await
+        .unwrap();
 
     let alice_mgr = StreamManager::bind(alice_t.clone()).await;
     let bob_mgr = StreamManager::bind(bob_t.clone()).await;
@@ -181,8 +188,13 @@ async fn many_concurrent_streams_interleave_correctly() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Arc::new(
@@ -190,7 +202,10 @@ async fn many_concurrent_streams_interleave_correctly() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice_t.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice_t
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Warm up the handshake BEFORE binding StreamManagers so the
     // session is Established by the time OPEN frames fly — otherwise
@@ -287,8 +302,13 @@ async fn close_during_active_send_is_safe() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Arc::new(
@@ -296,7 +316,10 @@ async fn close_during_active_send_is_safe() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice_t.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice_t
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     let alice_mgr = StreamManager::bind(alice_t.clone()).await;
     let bob_mgr = StreamManager::bind(bob_t.clone()).await;

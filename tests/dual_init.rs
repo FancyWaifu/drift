@@ -56,12 +56,14 @@ async fn concurrent_mutual_dial_resolves_to_one_session() {
     let alice_c = alice.clone();
     let bob_c = bob.clone();
     let send_a = tokio::spawn(async move {
-        alice_c.send_data(&bob_peer_on_alice, b"alice-says-hi", 0, 0)
+        alice_c
+            .send_data(&bob_peer_on_alice, b"alice-says-hi", 0, 0)
             .await
             .unwrap();
     });
     let send_b = tokio::spawn(async move {
-        bob_c.send_data(&alice_peer_on_bob, b"bob-says-hi", 0, 0)
+        bob_c
+            .send_data(&alice_peer_on_bob, b"bob-says-hi", 0, 0)
             .await
             .unwrap();
     });

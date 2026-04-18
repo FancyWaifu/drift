@@ -95,8 +95,13 @@ async fn handshake_under_loss() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     // 30% loss per direction — each HELLO/HELLO_ACK round-trip
@@ -123,16 +128,14 @@ async fn handshake_under_loss() {
         handshake_retry_base_ms: 30,
         ..drift::TransportConfig::default()
     };
-    let alice_t = Transport::bind_with_config(
-        "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-        alice,
-        cfg,
-    )
-    .await
-    .unwrap();
+    let alice_t =
+        Transport::bind_with_config("127.0.0.1:0".parse::<SocketAddr>().unwrap(), alice, cfg)
+            .await
+            .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Try handshake by sending a DATA packet.
     let mut delivered = 0;
@@ -141,9 +144,7 @@ async fn handshake_under_loss() {
             .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
             .await
             .unwrap();
-        if let Ok(Some(_)) =
-            tokio::time::timeout(Duration::from_millis(400), bob_t.recv()).await
-        {
+        if let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(400), bob_t.recv()).await {
             delivered += 1;
             if delivered >= 5 {
                 break;
@@ -173,8 +174,13 @@ async fn coalescing_under_reorder() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let proxy_addr = spawn_proxy(
@@ -193,7 +199,8 @@ async fn coalescing_under_reorder() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Send 100 position updates in the same coalesce group.
     for tick in 1..=100u32 {
@@ -252,8 +259,13 @@ async fn deadline_drops_slow_packets() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let proxy_addr = spawn_proxy(
@@ -272,7 +284,8 @@ async fn deadline_drops_slow_packets() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // First: warm up the handshake (no deadline).
     alice_t.send_data(&bob_peer, b"warmup", 0, 0).await.unwrap();

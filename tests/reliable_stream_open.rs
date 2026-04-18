@@ -9,8 +9,8 @@ use drift::identity::Identity;
 use drift::streams::StreamManager;
 use drift::{Direction, Transport};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -49,9 +49,7 @@ async fn spawn_head_drop_proxy(target: SocketAddr, drop_first_n: usize) -> Socke
 
             // Only drop client→target traffic so server replies
             // (cookies, hello-acks, ACKs) always make it through.
-            if dst == target
-                && dropped.fetch_add(1, AtomicOrdering::Relaxed) < drop_first_n
-            {
+            if dst == target && dropped.fetch_add(1, AtomicOrdering::Relaxed) < drop_first_n {
                 continue;
             }
 
@@ -74,7 +72,11 @@ async fn data_creates_stream_when_open_is_lost() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -128,4 +130,3 @@ async fn data_creates_stream_when_open_is_lost() {
         .expect("stream closed");
     assert_eq!(chunk, b"hello-after-lost-open");
 }
-

@@ -12,8 +12,8 @@
 use drift::identity::Identity;
 use drift::{Direction, Transport};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -48,12 +48,20 @@ async fn cross_identity_ticket_rejected() {
         .unwrap(),
     );
     // Bob knows both Alice (legitimate) and Mallory (attacker).
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
-    bob.add_peer(mallory_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
+    bob.add_peer(
+        mallory_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     // Alice completes a normal handshake with Bob, gets a
@@ -71,13 +79,19 @@ async fn cross_identity_ticket_rejected() {
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
         .await
         .unwrap();
-    alice.send_data(&bob_peer_on_alice, b"legit", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer_on_alice, b"legit", 0, 0)
+        .await
+        .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let ticket_blob = alice.export_resumption_ticket(&bob_peer_on_alice).await.unwrap();
+    let ticket_blob = alice
+        .export_resumption_ticket(&bob_peer_on_alice)
+        .await
+        .unwrap();
     drop(alice);
 
     // Mallory's own separate transport. She imports the
@@ -200,9 +214,13 @@ async fn resume_hello_single_use() {
         .await
         .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_real_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -248,7 +266,10 @@ async fn resume_hello_single_use() {
         .import_resumption_ticket(&bob_peer2, &ticket_blob)
         .await
         .unwrap();
-    alice2.send_data(&bob_peer2, b"legit-resume", 0, 0).await.unwrap();
+    alice2
+        .send_data(&bob_peer2, b"legit-resume", 0, 0)
+        .await
+        .unwrap();
 
     // Wait for the legit resume to complete.
     let _ = tokio::time::timeout(Duration::from_secs(3), bob.recv())

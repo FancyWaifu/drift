@@ -38,8 +38,8 @@
 //! mp.send_on_best_path(&peer, payload).await?;
 //! ```
 
-use crate::{PeerId, Transport};
 use crate::error::Result;
+use crate::{PeerId, Transport};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -119,16 +119,10 @@ impl MultipathManager {
     /// sample on success. Uses the transport's existing
     /// graceful probe API, then polls for success via the
     /// `path_probes_succeeded` metric.
-    pub async fn probe_path(
-        &self,
-        peer: &PeerId,
-        addr: SocketAddr,
-    ) -> Result<Duration> {
+    pub async fn probe_path(&self, peer: &PeerId, addr: SocketAddr) -> Result<Duration> {
         let before = self.transport.metrics().path_probes_succeeded;
         let started = Instant::now();
-        self.transport
-            .probe_candidate_path(peer, addr)
-            .await?;
+        self.transport.probe_candidate_path(peer, addr).await?;
 
         // Poll up to 2s for the probe to land.
         let deadline = started + Duration::from_secs(2);
@@ -199,11 +193,7 @@ impl MultipathManager {
     /// active peer address before the send, so subsequent
     /// sends via normal `transport.send_data` will ALSO
     /// route via this path until the app swaps it again.
-    pub async fn send_on_best_path(
-        &self,
-        peer: &PeerId,
-        payload: &[u8],
-    ) -> Result<()> {
+    pub async fn send_on_best_path(&self, peer: &PeerId, payload: &[u8]) -> Result<()> {
         if let Some(best) = self.best_path(peer).await {
             self.transport.update_peer_addr(peer, best.addr).await;
         }
@@ -249,23 +239,41 @@ mod tests {
         assert_eq!(first.addr, "10.0.0.1:1000".parse().unwrap());
 
         // Force RTTs and check the minimum wins.
-        mp.record_rtt(&peer, "10.0.0.1:1000".parse().unwrap(), Duration::from_millis(50)).await;
-        mp.record_rtt(&peer, "10.0.0.2:1000".parse().unwrap(), Duration::from_millis(10)).await;
-        mp.record_rtt(&peer, "10.0.0.3:1000".parse().unwrap(), Duration::from_millis(30)).await;
+        mp.record_rtt(
+            &peer,
+            "10.0.0.1:1000".parse().unwrap(),
+            Duration::from_millis(50),
+        )
+        .await;
+        mp.record_rtt(
+            &peer,
+            "10.0.0.2:1000".parse().unwrap(),
+            Duration::from_millis(10),
+        )
+        .await;
+        mp.record_rtt(
+            &peer,
+            "10.0.0.3:1000".parse().unwrap(),
+            Duration::from_millis(30),
+        )
+        .await;
         let best = mp.best_path(&peer).await.unwrap();
         assert_eq!(best.addr, "10.0.0.2:1000".parse().unwrap());
         assert_eq!(best.rtt, Some(Duration::from_millis(10)));
 
         // Mark the winner unhealthy; it should fall back
         // to the next-best healthy path (10.0.0.3).
-        mp.mark_unhealthy(&peer, "10.0.0.2:1000".parse().unwrap()).await;
+        mp.mark_unhealthy(&peer, "10.0.0.2:1000".parse().unwrap())
+            .await;
         let next = mp.best_path(&peer).await.unwrap();
         assert_eq!(next.addr, "10.0.0.3:1000".parse().unwrap());
 
         // Mark everything unhealthy — should still return
         // the first registered path as a last resort.
-        mp.mark_unhealthy(&peer, "10.0.0.1:1000".parse().unwrap()).await;
-        mp.mark_unhealthy(&peer, "10.0.0.3:1000".parse().unwrap()).await;
+        mp.mark_unhealthy(&peer, "10.0.0.1:1000".parse().unwrap())
+            .await;
+        mp.mark_unhealthy(&peer, "10.0.0.3:1000".parse().unwrap())
+            .await;
         let fallback = mp.best_path(&peer).await.unwrap();
         assert_eq!(fallback.addr, "10.0.0.1:1000".parse().unwrap());
 

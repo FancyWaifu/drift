@@ -95,10 +95,7 @@ pub fn compute_parity(block: &[Vec<u8>]) -> Vec<u8> {
 /// length-prefixed frame if they care about exact length,
 /// since XOR-parity loses length info). Returns `None` if
 /// more than one packet is missing.
-pub fn recover_one_missing(
-    received: &[&[u8]],
-    parity: &[u8],
-) -> Option<Vec<u8>> {
+pub fn recover_one_missing(received: &[&[u8]], parity: &[u8]) -> Option<Vec<u8>> {
     // XOR everything we received against the parity. What
     // falls out is the missing packet (padded). If the
     // caller gave us all N packets, the result will be all

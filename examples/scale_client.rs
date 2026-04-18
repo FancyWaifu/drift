@@ -52,7 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = Transport::bind("0.0.0.0:0".parse()?, client_id).await?;
     let peer = transport
         .add_peer(server_pub, server_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     for i in 0..count {
         let mut buf = Vec::new();

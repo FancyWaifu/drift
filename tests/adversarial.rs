@@ -21,8 +21,13 @@ async fn setup_victim() -> (Transport, SocketAddr, Identity) {
         .await
         .unwrap();
     transport
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let addr = transport.local_addr().unwrap();
     (transport, addr, Identity::from_secret_bytes([0x66; 32]))
 }
@@ -112,16 +117,26 @@ async fn tampered_data_tag_rejected() {
     let alice = Identity::from_secret_bytes([0x66; 32]);
     let alice_pub = alice.public_bytes();
 
-    let bob_t = Transport::bind("127.0.0.1:0".parse().unwrap(), bob).await.unwrap();
+    let bob_t = Transport::bind("127.0.0.1:0".parse().unwrap(), bob)
+        .await
+        .unwrap();
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
-    let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice).await.unwrap();
+    let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
+        .await
+        .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     alice_t.send_data(&bob_peer, b"hello1", 0, 0).await.unwrap();
     let first = tokio::time::timeout(Duration::from_millis(500), bob_t.recv())
@@ -176,7 +191,8 @@ async fn flood_survives() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     alice_t.send_data(&bob_peer, b"alive?", 0, 0).await.unwrap();
     let pkt = tokio::time::timeout(Duration::from_secs(2), victim.recv())

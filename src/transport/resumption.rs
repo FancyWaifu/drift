@@ -86,16 +86,9 @@ struct ServerEntry {
 /// client identity binding). Lives on `Inner`. Entries are
 /// looked up by incoming `ResumeHello` packets and evicted
 /// either on expiry or on cap-exceed (oldest first).
+#[derive(Default)]
 pub(crate) struct ResumptionStore {
     entries: HashMap<[u8; TICKET_ID_LEN], ServerEntry>,
-}
-
-impl Default for ResumptionStore {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
 }
 
 impl ResumptionStore {
@@ -314,11 +307,8 @@ impl Inner {
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut header = peer.make_header(
-                PacketType::ResumptionTicket,
-                seq,
-                self.local_peer_id,
-            );
+            let mut header =
+                peer.make_header(PacketType::ResumptionTicket, seq, self.local_peer_id);
             header.payload_len = (TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN) as u16;
             let mut hbuf = [0u8; HEADER_LEN];
             header.encode(&mut hbuf);
@@ -329,8 +319,7 @@ impl Inner {
             plaintext[TICKET_ID_LEN..].copy_from_slice(&expiry_ms.to_be_bytes());
 
             let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
-            let mut wire =
-                Vec::with_capacity(HEADER_LEN + TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN);
+            let mut wire = Vec::with_capacity(HEADER_LEN + TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN);
             wire.extend_from_slice(&hbuf);
             tx.seal_into(
                 seq,
@@ -342,7 +331,9 @@ impl Inner {
             (wire, peer.addr)
         };
 
-        self.ifaces.send_for(self.iface_for(&peer_id).await, &wire, addr).await?;
+        self.ifaces
+            .send_for(self.iface_for(&peer_id).await, &wire, addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -396,8 +387,7 @@ impl Inner {
                 Ok(p) => Some(p),
                 Err(_) => {
                     if let HandshakeState::Established { prev: Some(p), .. } = &peer.handshake {
-                        p.rx
-                            .open(header.seq, PacketType::ResumptionTicket as u8, &aad, body)
+                        p.rx.open(header.seq, PacketType::ResumptionTicket as u8, &aad, body)
                             .ok()
                     } else {
                         None
@@ -439,10 +429,7 @@ impl Inner {
             server_id,
             server_static_pub,
         };
-        self.client_tickets
-            .lock()
-            .await
-            .insert(server_id, ticket);
+        self.client_tickets.lock().await.insert(server_id, ticket);
         self.metrics
             .resumption_tickets_received
             .fetch_add(1, Ordering::Relaxed);
@@ -502,11 +489,7 @@ impl Inner {
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut header = peer.make_header(
-                PacketType::ResumeHello,
-                seq,
-                self.local_peer_id,
-            );
+            let mut header = peer.make_header(PacketType::ResumeHello, seq, self.local_peer_id);
             header.payload_len = RESUME_HELLO_BODY_LEN as u16;
             let mut hbuf = [0u8; HEADER_LEN];
             header.encode(&mut hbuf);
@@ -519,7 +502,9 @@ impl Inner {
             (wire, peer.addr)
         };
 
-        self.ifaces.send_for(self.iface_for(&peer_id).await, &wire, addr).await?;
+        self.ifaces
+            .send_for(self.iface_for(&peer_id).await, &wire, addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -554,13 +539,9 @@ impl Inner {
         let mut ticket_id = [0u8; TICKET_ID_LEN];
         ticket_id.copy_from_slice(&body[..TICKET_ID_LEN]);
         let mut client_eph_pub = [0u8; STATIC_KEY_LEN];
-        client_eph_pub.copy_from_slice(
-            &body[TICKET_ID_LEN..TICKET_ID_LEN + STATIC_KEY_LEN],
-        );
+        client_eph_pub.copy_from_slice(&body[TICKET_ID_LEN..TICKET_ID_LEN + STATIC_KEY_LEN]);
         let mut client_nonce = [0u8; NONCE_LEN];
-        client_nonce.copy_from_slice(
-            &body[TICKET_ID_LEN + STATIC_KEY_LEN..RESUME_HELLO_BODY_LEN],
-        );
+        client_nonce.copy_from_slice(&body[TICKET_ID_LEN + STATIC_KEY_LEN..RESUME_HELLO_BODY_LEN]);
 
         // Reject low-order ephemerals up front.
         if client_eph_pub == [0u8; STATIC_KEY_LEN] {
@@ -617,9 +598,10 @@ impl Inner {
         // same PSK.
         let (ack_wire, ack_addr, prev_session, was_awaiting_data) = {
             let mut peers = self.peers.lock_for(&client_peer_id).await;
-            let peer = peers.get_mut(&client_peer_id).ok_or(DriftError::UnknownPeer)?;
-            let was_awaiting_data =
-                matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+            let peer = peers
+                .get_mut(&client_peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
 
             // Capture the OLD session keys (if any) so we can
             // hold them in the rekey-style `prev` slot for the
@@ -637,11 +619,7 @@ impl Inner {
 
             // Build header.
             let seq = 1u32;
-            let mut header = peer.make_header(
-                PacketType::ResumeAck,
-                seq,
-                self.local_peer_id,
-            );
+            let mut header = peer.make_header(PacketType::ResumeAck, seq, self.local_peer_id);
             header.payload_len = RESUME_ACK_BODY_LEN as u16;
             let mut hbuf = [0u8; HEADER_LEN];
             header.encode(&mut hbuf);
@@ -649,16 +627,14 @@ impl Inner {
             // AAD includes the canonical header + the in-the-clear
             // server_eph_pub + server_nonce, mirroring HELLO_ACK.
             let canon = canonical_aad(&hbuf);
-            let mut aad =
-                Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
+            let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
             aad.extend_from_slice(&canon);
             aad.extend_from_slice(&server_eph_pub);
             aad.extend_from_slice(&server_nonce);
 
             // Server seals with Responder direction (mirrors HELLO_ACK).
             let server_tx = SessionKey::new(&new_session_key, Direction::Responder);
-            let auth_tag =
-                server_tx.seal(seq, PacketType::ResumeAck as u8, &aad, b"")?;
+            let auth_tag = server_tx.seal(seq, PacketType::ResumeAck as u8, &aad, b"")?;
             // `seal` returns just the auth tag for empty plaintext
             // (16 bytes). Concat into the wire.
             let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_ACK_BODY_LEN);
@@ -695,7 +671,9 @@ impl Inner {
                 .fetch_sub(1, Ordering::Relaxed);
         }
 
-        self.ifaces.send_for(self.iface_for(&client_peer_id).await, &ack_wire, ack_addr).await?;
+        self.ifaces
+            .send_for(self.iface_for(&client_peer_id).await, &ack_wire, ack_addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -718,11 +696,7 @@ impl Inner {
     /// auth tag — a successful decrypt proves the server held
     /// the same PSK and is therefore the same identity we
     /// previously authenticated.
-    pub(crate) async fn handle_resume_ack(
-        &self,
-        header: &Header,
-        body: &[u8],
-    ) -> Result<()> {
+    pub(crate) async fn handle_resume_ack(&self, header: &Header, body: &[u8]) -> Result<()> {
         if body.len() < RESUME_ACK_BODY_LEN {
             return Err(DriftError::PacketTooShort {
                 got: body.len(),
@@ -750,8 +724,7 @@ impl Inner {
                 }
             };
 
-            let old_state =
-                std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
+            let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
             let (client_nonce, ephemeral) = match old_state {
                 HandshakeState::AwaitingAck {
                     client_nonce,
@@ -769,12 +742,8 @@ impl Inner {
                 .dh(&server_eph_pub)
                 .ok_or(DriftError::AuthFailed)?;
             drop(ephemeral);
-            let new_session_key = derive_resumption_key(
-                &resumption.psk,
-                &ephemeral_dh,
-                &client_nonce,
-                &server_nonce,
-            );
+            let new_session_key =
+                derive_resumption_key(&resumption.psk, &ephemeral_dh, &client_nonce, &server_nonce);
 
             let tx = SessionKey::new(&new_session_key, Direction::Initiator);
             let rx = SessionKey::new(&new_session_key, Direction::Responder);

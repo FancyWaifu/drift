@@ -35,9 +35,13 @@ async fn happy_path_export_import_resume() {
         .await
         .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -53,7 +57,10 @@ async fn happy_path_export_import_resume() {
         .await
         .unwrap();
 
-    alice.send_data(&bob_peer, b"first-session", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"first-session", 0, 0)
+        .await
+        .unwrap();
     let p = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()
@@ -65,7 +72,10 @@ async fn happy_path_export_import_resume() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let am = alice.metrics();
-    assert_eq!(am.resumption_tickets_received, 1, "Alice should have received a ticket");
+    assert_eq!(
+        am.resumption_tickets_received, 1,
+        "Alice should have received a ticket"
+    );
     assert_eq!(bob.metrics().resumption_tickets_issued, 1);
 
     // Export the ticket and remember Bob's address.
@@ -88,7 +98,10 @@ async fn happy_path_export_import_resume() {
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
         .await
         .unwrap();
-    assert_eq!(bob_peer2, bob_peer, "peer ids are deterministic from pubkey");
+    assert_eq!(
+        bob_peer2, bob_peer,
+        "peer ids are deterministic from pubkey"
+    );
 
     alice2
         .import_resumption_ticket(&bob_peer2, &ticket_blob)
@@ -96,7 +109,10 @@ async fn happy_path_export_import_resume() {
         .unwrap();
 
     // Trigger the resumption.
-    alice2.send_data(&bob_peer2, b"resumed-session", 0, 0).await.unwrap();
+    alice2
+        .send_data(&bob_peer2, b"resumed-session", 0, 0)
+        .await
+        .unwrap();
     let p2 = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .expect("resume timed out — server probably didn't accept the ticket")
@@ -106,9 +122,18 @@ async fn happy_path_export_import_resume() {
     // Resumption-specific metrics should have bumped.
     let am2 = alice2.metrics();
     let bm = bob.metrics();
-    assert_eq!(am2.resumption_attempts, 1, "alice should have tried 1 resume");
-    assert_eq!(am2.resumptions_completed, 1, "alice should have completed 1 resume");
-    assert_eq!(bm.resumptions_completed, 1, "bob should have handled exactly 1 ResumeHello");
+    assert_eq!(
+        am2.resumption_attempts, 1,
+        "alice should have tried 1 resume"
+    );
+    assert_eq!(
+        am2.resumptions_completed, 1,
+        "alice should have completed 1 resume"
+    );
+    assert_eq!(
+        bm.resumptions_completed, 1,
+        "bob should have handled exactly 1 ResumeHello"
+    );
     // Bob did NOT do a second full handshake. handshakes_completed
     // should still be 1 from the first full handshake. Resumption
     // bumps `resumptions_completed`, not `handshakes_completed`.
@@ -137,9 +162,13 @@ async fn import_with_wrong_peer_id_rejected() {
         .unwrap(),
     );
     let alice_pub = Identity::from_secret_bytes([0x81; 32]).public_bytes();
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
     let bob_pub = bob.local_public();
 
@@ -190,9 +219,13 @@ async fn import_with_corrupted_blob_rejected() {
         .unwrap(),
     );
     let alice_pub = Identity::from_secret_bytes([0x91; 32]).public_bytes();
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
     let bob_pub = bob.local_public();
 

@@ -16,8 +16,8 @@
 use drift::identity::Identity;
 use drift::{Direction, Transport};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
@@ -69,9 +69,13 @@ async fn graceful_migration_swaps_peer_addr() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_real_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -131,7 +135,10 @@ async fn graceful_migration_swaps_peer_addr() {
     // direct path down (we can't really do that on localhost,
     // but we CAN check that subsequent traffic still arrives
     // at Bob — which it will via either path on loopback).
-    alice.send_data(&bob_peer, b"after-migrate", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"after-migrate", 0, 0)
+        .await
+        .unwrap();
     let p2 = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()

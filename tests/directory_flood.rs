@@ -9,7 +9,7 @@
 //! (c) Many REGISTERs in a row — verify decoding is linear-ish
 //!     and the struct shape is preserved across many roundtrips.
 
-use drift::directory::{DirMessage, MAX_LISTING_ENTRIES, PeerEntry};
+use drift::directory::{DirMessage, PeerEntry, MAX_LISTING_ENTRIES};
 use rand::{Rng, SeedableRng};
 
 #[test]

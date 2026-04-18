@@ -37,7 +37,8 @@ async fn thousand_concurrent_handshakes() {
                 "0.0.0.0:0".parse().unwrap(),
                 Direction::Responder,
             )
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     // Fire all N clients concurrently.
@@ -53,7 +54,8 @@ async fn thousand_concurrent_handshakes() {
             .unwrap();
             let peer = client
                 .add_peer(server_pub, server_addr, Direction::Initiator)
-                .await.unwrap();
+                .await
+                .unwrap();
             client.send_data(&peer, b"scale", 0, 0).await.unwrap();
             // Keep the client alive long enough for the handshake
             // to reach the server; drop triggers socket close.

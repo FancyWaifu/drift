@@ -7,7 +7,11 @@ use drift::{Direction, Transport, MAX_PAYLOAD};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
-async fn pair() -> (std::sync::Arc<Transport>, std::sync::Arc<Transport>, drift::PeerId) {
+async fn pair() -> (
+    std::sync::Arc<Transport>,
+    std::sync::Arc<Transport>,
+    drift::PeerId,
+) {
     let bob = Identity::from_secret_bytes([0x80; 32]);
     let alice = Identity::from_secret_bytes([0x81; 32]);
     let alice_pub = alice.public_bytes();
@@ -19,8 +23,13 @@ async fn pair() -> (std::sync::Arc<Transport>, std::sync::Arc<Transport>, drift:
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = std::sync::Arc::new(
@@ -30,7 +39,8 @@ async fn pair() -> (std::sync::Arc<Transport>, std::sync::Arc<Transport>, drift:
     );
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     (alice_t, bob_t, bob_peer)
 }
@@ -75,8 +85,13 @@ async fn unknown_packet_type_dropped() {
         .await
         .unwrap();
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let addr = bob_t.local_addr().unwrap();
 
     // Manually craft raw bytes with an invalid type byte.
@@ -104,8 +119,13 @@ async fn version_mismatch_dropped() {
         .await
         .unwrap();
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let addr = bob_t.local_addr().unwrap();
 
     // Craft a packet with version 2 instead of 1.
@@ -164,7 +184,10 @@ async fn tight_deadline_mostly_dropped() {
     // Blast 50 packets with deadline = 1ms and manual delay in between
     // to make sure each one ages at least 1ms before the receiver sees it.
     for i in 0..50u32 {
-        alice.send_data(&peer, &i.to_be_bytes(), 1, 0).await.unwrap();
+        alice
+            .send_data(&peer, &i.to_be_bytes(), 1, 0)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(3)).await;
     }
 
@@ -209,18 +232,20 @@ async fn handshake_race_both_initiators() {
     let a_addr = a.local_addr().unwrap();
     let b_addr = b.local_addr().unwrap();
 
-    let b_peer_on_a = a.add_peer(b_pub, b_addr, Direction::Initiator).await.unwrap();
-    let a_peer_on_b = b.add_peer(a_pub, a_addr, Direction::Initiator).await.unwrap();
+    let b_peer_on_a = a
+        .add_peer(b_pub, b_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    let a_peer_on_b = b
+        .add_peer(a_pub, a_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Both try to initiate.
     let ta = a.clone();
     let tb = b.clone();
-    let h1 = tokio::spawn(async move {
-        ta.send_data(&b_peer_on_a, b"from-a", 0, 0).await
-    });
-    let h2 = tokio::spawn(async move {
-        tb.send_data(&a_peer_on_b, b"from-b", 0, 0).await
-    });
+    let h1 = tokio::spawn(async move { ta.send_data(&b_peer_on_a, b"from-a", 0, 0).await });
+    let h2 = tokio::spawn(async move { tb.send_data(&a_peer_on_b, b"from-b", 0, 0).await });
     let _ = h1.await.unwrap();
     let _ = h2.await.unwrap();
 
@@ -257,8 +282,13 @@ async fn handshake_duplicate_different_nonces_regenerates() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     // First handshake.
@@ -270,7 +300,8 @@ async fn handshake_duplicate_different_nonces_regenerates() {
     .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
     alice_t.send_data(&bob_peer, b"first", 0, 0).await.unwrap();
     let first = tokio::time::timeout(Duration::from_secs(2), bob_t.recv())
         .await
@@ -286,7 +317,10 @@ async fn handshake_duplicate_different_nonces_regenerates() {
     )
     .await
     .unwrap();
-    let bob_peer2 = alice2.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer2 = alice2
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
     alice2.send_data(&bob_peer2, b"second", 0, 0).await.unwrap();
     let second = tokio::time::timeout(Duration::from_secs(3), bob_t.recv())
         .await
@@ -308,8 +342,13 @@ async fn empty_beacon_before_handshake_dropped() {
         .await
         .unwrap();
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let addr = bob_t.local_addr().unwrap();
 
     // Forge a BEACON header with random bytes as ciphertext.

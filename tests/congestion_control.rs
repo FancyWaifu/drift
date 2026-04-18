@@ -79,7 +79,11 @@ async fn cwnd_grows_during_slow_start_on_clean_link() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -186,7 +190,11 @@ async fn cwnd_shrinks_on_loss() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -211,7 +219,10 @@ async fn cwnd_shrinks_on_loss() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice_t.add_peer(bob_pub, proxy, Direction::Initiator).await.unwrap();
+    let bob_peer = alice_t
+        .add_peer(bob_pub, proxy, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Warm up through the proxy.
     alice_t.send_data(&bob_peer, b"warmup", 0, 0).await.unwrap();
@@ -229,11 +240,7 @@ async fn cwnd_shrinks_on_loss() {
         .unwrap()
         .unwrap();
 
-    let initial_cwnd = alice_mgr
-        .congestion_snapshot(&bob_peer)
-        .await
-        .unwrap()
-        .cwnd;
+    let initial_cwnd = alice_mgr.congestion_snapshot(&bob_peer).await.unwrap().cwnd;
 
     // Push 128 KB through the lossy proxy so retransmits fire.
     let payload = vec![0x77u8; 128 * 1024];
@@ -259,11 +266,7 @@ async fn cwnd_shrinks_on_loss() {
     let received = drain.await.unwrap();
     assert_eq!(received, 128 * 1024);
 
-    let final_cwnd = alice_mgr
-        .congestion_snapshot(&bob_peer)
-        .await
-        .unwrap()
-        .cwnd;
+    let final_cwnd = alice_mgr.congestion_snapshot(&bob_peer).await.unwrap().cwnd;
 
     println!(
         "cwnd trajectory: initial={} final={}",

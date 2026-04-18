@@ -28,8 +28,13 @@ async fn soak_steady_stream() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Arc::new(
@@ -39,7 +44,8 @@ async fn soak_steady_stream() {
     );
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Spawn receiver.
     let bob_recv = bob_t.clone();
@@ -125,8 +131,13 @@ async fn soak_many_coalesce_groups() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
@@ -134,7 +145,8 @@ async fn soak_many_coalesce_groups() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // 500 unique groups, one packet each. Yield between sends so
     // Bob's recv task can drain the socket — otherwise a tight burst

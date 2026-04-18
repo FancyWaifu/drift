@@ -239,9 +239,8 @@ fn build_command(parts: &[&[u8]]) -> Vec<u8> {
 // ─── Server ──────────────────────────────────────────────────
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
-    let transport = Arc::new(
-        Transport::bind_with_config(SERVER_UDP.parse()?, server_id(), cfg()).await?,
-    );
+    let transport =
+        Arc::new(Transport::bind_with_config(SERVER_UDP.parse()?, server_id(), cfg()).await?);
     let pid = hex8(&derive_peer_id(&server_id().public_bytes()));
     println!("[kv] UDP iface 0 on {} peer_id={}", SERVER_UDP, pid);
 
@@ -328,10 +327,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_command(
-    store: &Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    items: &[Resp],
-) -> Resp {
+async fn handle_command(store: &Arc<Mutex<HashMap<String, Vec<u8>>>>, items: &[Resp]) -> Resp {
     if items.is_empty() {
         return Resp::Error("ERR empty command".into());
     }
@@ -345,7 +341,9 @@ async fn handle_command(
     if argv.len() != items.len() {
         return Resp::Error("ERR non-bulk argument".into());
     }
-    let name = std::str::from_utf8(argv[0]).unwrap_or("").to_ascii_uppercase();
+    let name = std::str::from_utf8(argv[0])
+        .unwrap_or("")
+        .to_ascii_uppercase();
     match name.as_str() {
         "PING" => Resp::Simple("PONG".into()),
         "SET" if argv.len() == 3 => {
@@ -411,12 +409,8 @@ async fn run_client(bind_ip: &str, cmd_argv: &[String]) -> Result<(), Box<dyn st
     let (transport, server_addr_symbolic): (Arc<Transport>, SocketAddr) = match bind_ip {
         "127.0.0.1" => (
             Arc::new(
-                Transport::bind_with_config(
-                    format!("{}:0", bind_ip).parse()?,
-                    identity,
-                    cfg(),
-                )
-                .await?,
+                Transport::bind_with_config(format!("{}:0", bind_ip).parse()?, identity, cfg())
+                    .await?,
             ),
             SERVER_UDP.parse()?,
         ),
@@ -482,12 +476,18 @@ async fn run_client(bind_ip: &str, cmd_argv: &[String]) -> Result<(), Box<dyn st
                     Ok((r, _)) => {
                         println!(
                             "[client/{} {}] {} -> {}",
-                            bind_ip, medium, human, summarize_reply(&r)
+                            bind_ip,
+                            medium,
+                            human,
+                            summarize_reply(&r)
                         );
                         return Ok(());
                     }
                     Err(e) => {
-                        println!("[client/{} {}] {} -> (parse error: {})", bind_ip, medium, human, e);
+                        println!(
+                            "[client/{} {}] {} -> (parse error: {})",
+                            bind_ip, medium, human, e
+                        );
                         return Ok(());
                     }
                 }

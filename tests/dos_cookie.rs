@@ -40,8 +40,13 @@ async fn cookie_always_completes_handshake() {
             .unwrap(),
     );
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let server_addr = server.local_addr().unwrap();
 
     let client = Transport::bind(
@@ -52,7 +57,8 @@ async fn cookie_always_completes_handshake() {
     .unwrap();
     let server_peer = client
         .add_peer(server_pub, server_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // The first DATA triggers a HELLO → CHALLENGE → HELLO-with-cookie
     // → HELLO_ACK → DATA cycle. It MUST still arrive at the server.
@@ -104,8 +110,13 @@ async fn default_config_skips_cookie_path() {
             .unwrap(),
     );
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let server_addr = server.local_addr().unwrap();
 
     let client = Transport::bind(
@@ -116,9 +127,13 @@ async fn default_config_skips_cookie_path() {
     .unwrap();
     let server_peer = client
         .add_peer(server_pub, server_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
-    client.send_data(&server_peer, b"fast-path", 0, 0).await.unwrap();
+    client
+        .send_data(&server_peer, b"fast-path", 0, 0)
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
@@ -346,8 +361,12 @@ async fn adaptive_threshold_resets_after_eviction() {
     .unwrap();
     let server_peer = client
         .add_peer(server_pub, server_addr, Direction::Initiator)
-        .await.unwrap();
-    client.send_data(&server_peer, b"over-cookies", 0, 0).await.unwrap();
+        .await
+        .unwrap();
+    client
+        .send_data(&server_peer, b"over-cookies", 0, 0)
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(3), server.recv())
         .await
         .expect("server never received")
@@ -370,4 +389,3 @@ async fn adaptive_threshold_resets_after_eviction() {
         "expected reaper to have evicted the stuck AwaitingData peer"
     );
 }
-

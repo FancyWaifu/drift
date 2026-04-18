@@ -116,9 +116,8 @@ fn find_flag_u64(args: &[String], flag: &str) -> Option<u64> {
 }
 
 async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
-    let bridge = Arc::new(
-        Transport::bind_with_config(BRIDGE_UDP.parse()?, bridge_id(), cfg()).await?,
-    );
+    let bridge =
+        Arc::new(Transport::bind_with_config(BRIDGE_UDP.parse()?, bridge_id(), cfg()).await?);
     println!("[bridge] UDP iface 0 on {}", BRIDGE_UDP);
 
     let tcp_listener = TcpListener::bind(BRIDGE_TCP).await?;
@@ -150,8 +149,7 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
             match ws_listener.accept().await {
                 Ok((stream, addr)) => match tokio_tungstenite::accept_async(stream).await {
                     Ok(ws) => {
-                        let idx =
-                            b.add_interface("ws", Arc::new(WsPacketIO::new(ws, addr)));
+                        let idx = b.add_interface("ws", Arc::new(WsPacketIO::new(ws, addr)));
                         println!("[bridge] WS iface {} wired (peer {})", idx, addr);
                     }
                     Err(e) => eprintln!("[bridge] WS accept: {}", e),
@@ -183,10 +181,7 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(dc) => {
                                 let io = Arc::new(WebRTCPacketIO::new(dc, addr));
                                 let idx = bb.add_interface("webrtc", io);
-                                println!(
-                                    "[bridge] WebRTC iface {} wired (peer {})",
-                                    idx, addr
-                                );
+                                println!("[bridge] WebRTC iface {} wired (peer {})", idx, addr);
                             }
                             Err(e) => {
                                 eprintln!("[bridge] WebRTC setup failed for {}: {}", addr, e)
@@ -412,12 +407,8 @@ async fn run_chat(
     let (transport, bridge_addr_symbolic): (Arc<Transport>, SocketAddr) = match bind_ip {
         "127.0.0.1" => (
             Arc::new(
-                Transport::bind_with_config(
-                    format!("{}:0", bind_ip).parse()?,
-                    identity,
-                    cfg(),
-                )
-                .await?,
+                Transport::bind_with_config(format!("{}:0", bind_ip).parse()?, identity, cfg())
+                    .await?,
             ),
             BRIDGE_UDP.parse()?,
         ),
@@ -457,12 +448,7 @@ async fn run_chat(
         other => return Err(format!("unsupported chat bind IP: {}", other).into()),
     };
 
-    println!(
-        "[chat/{} {}] peer_id={}",
-        bind_ip,
-        my_medium,
-        &me_hex[..12]
-    );
+    println!("[chat/{} {}] peer_id={}", bind_ip, my_medium, &me_hex[..12]);
 
     let bridge_pub = bridge_id().public_bytes();
     let bridge_pid = derive_peer_id(&bridge_pub);
@@ -511,7 +497,13 @@ async fn run_chat(
         for (ip, pid) in &peers {
             let text = format!("hello from {} ({})", bind_ip, my_medium);
             let _ = transport.send_data(pid, text.as_bytes(), 0, 0).await;
-            println!("[{}] SEND -> {} ({}): {}", bind_ip, ip, medium_for(ip), text);
+            println!(
+                "[{}] SEND -> {} ({}): {}",
+                bind_ip,
+                ip,
+                medium_for(ip),
+                text
+            );
         }
     }
 
@@ -557,7 +549,9 @@ async fn run_interactive(
             ".3" => peers.iter().filter(|(ip, _)| ip == "127.0.0.3").collect(),
             ".4" => peers.iter().filter(|(ip, _)| ip == "127.0.0.4").collect(),
             _ => {
-                println!("  ? unknown command (`all <text>` | `.1|.2|.3|.4 <text>` | `who` | `quit`)");
+                println!(
+                    "  ? unknown command (`all <text>` | `.1|.2|.3|.4 <text>` | `who` | `quit`)"
+                );
                 continue;
             }
         };
@@ -568,7 +562,13 @@ async fn run_interactive(
         let tagged = format!("[{}/{}] {}", bind_ip, my_medium, rest);
         for (ip, pid) in targets {
             match transport.send_data(pid, tagged.as_bytes(), 0, 0).await {
-                Ok(_) => println!("[{}] SEND -> {} ({}): {}", bind_ip, ip, medium_for(ip), rest),
+                Ok(_) => println!(
+                    "[{}] SEND -> {} ({}): {}",
+                    bind_ip,
+                    ip,
+                    medium_for(ip),
+                    rest
+                ),
                 Err(e) => println!("[{}] FAIL -> {}: {}", bind_ip, ip, e),
             }
         }

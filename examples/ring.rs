@@ -52,12 +52,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--index" => { index = args[i + 1].parse()?; i += 2; }
-            "--total" => { total = args[i + 1].parse()?; i += 2; }
-            "--listen" => { listen = args[i + 1].parse()?; i += 2; }
-            "--next-addr" => { next_addr = args[i + 1].parse()?; i += 2; }
-            "--tokens" => { tokens = args[i + 1].parse()?; i += 2; }
-            "--interval-ms" => { interval_ms = args[i + 1].parse()?; i += 2; }
+            "--index" => {
+                index = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--total" => {
+                total = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--listen" => {
+                listen = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--next-addr" => {
+                next_addr = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--tokens" => {
+                tokens = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--interval-ms" => {
+                interval_ms = args[i + 1].parse()?;
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -71,17 +89,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = Arc::new(Transport::bind(listen, my_id).await?);
     println!(
         "node {}/{} listen={} next={}({})",
-        index, total, transport.local_addr()?, next_index, next_addr
+        index,
+        total,
+        transport.local_addr()?,
+        next_index,
+        next_addr
     );
 
     // Register next as Initiator (we send HELLO to them).
     let next_peer = transport
         .add_peer(next_pub, next_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
     // Register prev as Responder (they send HELLO to us).
     transport
         .add_peer(prev_pub, "0.0.0.0:0".parse()?, Direction::Responder)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Node 0 injects tokens after a warmup delay.
     if index == 0 {

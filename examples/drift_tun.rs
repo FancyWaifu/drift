@@ -212,14 +212,14 @@ async fn run_dial(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         accept_any_peer: true,
         ..TransportConfig::default()
     };
-    let transport = Arc::new(
-        Transport::bind_with_config("0.0.0.0:0".parse()?, identity, cfg).await?,
-    );
+    let transport =
+        Arc::new(Transport::bind_with_config("0.0.0.0:0".parse()?, identity, cfg).await?);
 
     let peer_pub = identity_from_name(&args.peer_name).public_bytes();
     let peer_id = transport
         .add_peer(peer_pub, args.peer_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     let mgr = StreamManager::bind(transport).await;
     let tcp_listener = TcpListener::bind(local_listen).await?;

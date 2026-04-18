@@ -29,8 +29,6 @@
 //!   - **Windows / other**: no-op. `enable_ecn = true` is
 //!     accepted but doesn't change behavior.
 
-#![cfg(unix)]
-
 use std::io;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
@@ -46,10 +44,12 @@ const ECN_ECT0: libc::c_int = 0x02;
 
 /// Mask for the ECN bits in the IPv4 TOS / IPv6 Traffic Class
 /// byte. The other 6 bits are DSCP and we don't touch them.
+#[allow(dead_code)]
 const ECN_MASK: u8 = 0x03;
 
 /// `CE` codepoint. A router has marked this packet to indicate
 /// it would have been dropped under congestion.
+#[allow(dead_code)]
 const ECN_CE: u8 = 0x03;
 
 /// Set the relevant socket options to enable ECN on `socket`.
@@ -124,6 +124,7 @@ pub(crate) fn enable_ecn(socket: &UdpSocket) -> io::Result<()> {
 /// mark, by reading IP_TOS / IPV6_TCLASS back via `getsockopt`.
 /// Used by tests + the public `is_ecn_enabled` accessor so
 /// callers can confirm their config landed.
+#[allow(dead_code)]
 pub(crate) fn ecn_outbound_active(socket: &UdpSocket) -> bool {
     let fd = socket.as_raw_fd();
     let Ok(local) = socket.local_addr() else {
@@ -200,8 +201,7 @@ pub(crate) async fn recv_with_tos(
             while !cmsg_ptr.is_null() {
                 let cmsg = unsafe { &*cmsg_ptr };
                 if (cmsg.cmsg_level == libc::IPPROTO_IP
-                    && (cmsg.cmsg_type == libc::IP_TOS
-                        || cmsg.cmsg_type == libc::IP_RECVTOS))
+                    && (cmsg.cmsg_type == libc::IP_TOS || cmsg.cmsg_type == libc::IP_RECVTOS))
                     || (cmsg.cmsg_level == libc::IPPROTO_IPV6
                         && cmsg.cmsg_type == libc::IPV6_TCLASS)
                 {
@@ -231,6 +231,7 @@ pub(crate) async fn recv_with_tos(
 
 /// Non-Linux fallback: no CE detection.
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub(crate) async fn recv_with_tos(
     socket: &UdpSocket,
     buf: &mut [u8],
@@ -241,6 +242,7 @@ pub(crate) async fn recv_with_tos(
 
 /// Did the kernel mark this packet as having experienced
 /// congestion?
+#[allow(dead_code)]
 pub(crate) fn is_ce(tos: u8) -> bool {
     tos & ECN_MASK == ECN_CE
 }
@@ -278,10 +280,7 @@ fn sockaddr_storage_to_socket_addr(
                 unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
             let ip = u32::from_be(sin.sin_addr.s_addr);
             let port = u16::from_be(sin.sin_port);
-            Some(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::from(ip)),
-                port,
-            ))
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port))
         }
         libc::AF_INET6 => {
             if (len as usize) < std::mem::size_of::<libc::sockaddr_in6>() {

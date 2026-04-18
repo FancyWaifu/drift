@@ -46,11 +46,17 @@ async fn open_flood_cannot_exhaust_victim_stream_table() {
     );
 
     victim_transport
-        .add_peer(attacker_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            attacker_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let victim_peer = attacker_transport
         .add_peer(victim_pub, victim_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     let victim_mgr = StreamManager::bind(victim_transport.clone()).await;
 

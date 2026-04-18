@@ -25,7 +25,6 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
-
 /// Minimal JSON value type. We avoid pulling in `serde_json`
 /// as a dependency — the event schema is small and the
 /// writer below hand-serializes. Strings are escaped for
@@ -73,12 +72,7 @@ impl QlogWriter {
 
     /// Emit a single event. Swallows write errors — if disk
     /// is full, the network path continues to function.
-    pub(crate) fn log_raw(
-        &self,
-        category: &str,
-        event: &str,
-        fields: &[(&str, QlogValue<'_>)],
-    ) {
+    pub(crate) fn log_raw(&self, category: &str, event: &str, fields: &[(&str, QlogValue<'_>)]) {
         let ms = self.started_at.elapsed().as_micros() as u64;
         let mut line = String::with_capacity(256);
         line.push('{');
@@ -106,13 +100,7 @@ impl QlogWriter {
     }
 
     /// Convenience: a packet send event.
-    pub(crate) fn log_packet_sent(
-        &self,
-        packet_type: &str,
-        dst: &str,
-        size: usize,
-        seq: u32,
-    ) {
+    pub(crate) fn log_packet_sent(&self, packet_type: &str, dst: &str, size: usize, seq: u32) {
         self.log_raw(
             "transport",
             "packet_sent",
@@ -126,13 +114,7 @@ impl QlogWriter {
     }
 
     /// Convenience: a packet receive event.
-    pub(crate) fn log_packet_received(
-        &self,
-        packet_type: &str,
-        src: &str,
-        size: usize,
-        seq: u32,
-    ) {
+    pub(crate) fn log_packet_received(&self, packet_type: &str, src: &str, size: usize, seq: u32) {
         self.log_raw(
             "transport",
             "packet_received",
@@ -160,11 +142,7 @@ impl QlogWriter {
     /// State-change events — e.g., rekey, path migration.
     #[allow(dead_code)]
     pub(crate) fn log_state_change(&self, what: &str, peer: &str) {
-        self.log_raw(
-            "transport",
-            what,
-            &[("peer", QlogValue::Str(peer))],
-        );
+        self.log_raw("transport", what, &[("peer", QlogValue::Str(peer))]);
     }
 }
 
@@ -223,7 +201,10 @@ mod tests {
         drop(w);
 
         let mut contents = String::new();
-        File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        File::open(&tmp)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         // trace_start + 3 user events = 4
         assert_eq!(lines.len(), 4);

@@ -22,8 +22,13 @@ async fn peak_packet_rate_single_pair() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
@@ -31,7 +36,8 @@ async fn peak_packet_rate_single_pair() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Warm up handshake.
     alice_t.send_data(&bob_peer, b"warm", 0, 0).await.unwrap();
@@ -107,15 +113,14 @@ async fn handshake_latency_distribution() {
         let pub_key = Identity::from_secret_bytes(seed).public_bytes();
         bob_t
             .add_peer(pub_key, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     // Spawn a task to drain Bob's recv channel so handshakes don't
     // block on backpressure.
     let bob_drain = bob_t.clone();
-    let drainer = tokio::spawn(async move {
-        while bob_drain.recv().await.is_some() {}
-    });
+    let drainer = tokio::spawn(async move { while bob_drain.recv().await.is_some() {} });
 
     let mut latencies = Vec::with_capacity(TRIALS);
     for seed in &client_keys {
@@ -125,7 +130,10 @@ async fn handshake_latency_distribution() {
         )
         .await
         .unwrap();
-        let bp = alice.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+        let bp = alice
+            .add_peer(bob_pub, bob_addr, Direction::Initiator)
+            .await
+            .unwrap();
 
         let t0 = Instant::now();
         alice.send_data(&bp, b"hs", 0, 0).await.unwrap();
@@ -196,7 +204,8 @@ async fn concurrent_sessions_100() {
         pubs.push(seed);
         bob_t
             .add_peer(cpub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     // Drain Bob's receive channel so senders don't backpressure.
@@ -222,12 +231,10 @@ async fn concurrent_sessions_100() {
             .unwrap();
             let bp = alice
                 .add_peer(bob_pub, bob_addr, Direction::Initiator)
-                .await.unwrap();
+                .await
+                .unwrap();
             for i in 0..5u32 {
-                alice
-                    .send_data(&bp, &i.to_be_bytes(), 0, 0)
-                    .await
-                    .unwrap();
+                alice.send_data(&bp, &i.to_be_bytes(), 0, 0).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
             tokio::time::sleep(Duration::from_millis(300)).await;

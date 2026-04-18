@@ -19,8 +19,13 @@ async fn exact_counts_for_clean_session() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -28,7 +33,10 @@ async fn exact_counts_for_clean_session() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Drive exactly 10 data packets through a warm session. Each
     // send is a single DATA packet (no fragmentation, no coalesce
@@ -40,7 +48,10 @@ async fn exact_counts_for_clean_session() {
         .unwrap();
 
     for i in 0u32..10 {
-        alice.send_data(&bob_peer, &i.to_be_bytes(), 0, 0).await.unwrap();
+        alice
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv())
             .await
             .unwrap()
@@ -152,8 +163,14 @@ async fn cookie_counts_match_under_forced_cookie_mode() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
-    alice.send_data(&bob_peer, b"behind-cookie", 0, 0).await.unwrap();
+    let bob_peer = alice
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    alice
+        .send_data(&bob_peer, b"behind-cookie", 0, 0)
+        .await
+        .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(3), bob.recv())
         .await
         .unwrap()

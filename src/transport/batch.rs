@@ -31,6 +31,12 @@ use tokio::net::UdpSocket;
 /// the number of packets successfully handed off to the
 /// kernel. On Linux uses `sendmmsg(2)`; on other platforms
 /// falls back to a loop of `send_to` calls.
+///
+/// Not yet wired into the hot send path — kept here for when
+/// high-throughput senders opt in via `send_data_batch`. The
+/// `linux::send_batch_mmsg` variant needs profiling work
+/// before we flip the default.
+#[allow(dead_code)]
 pub(crate) async fn send_batch(
     socket: &UdpSocket,
     packets: &[(Vec<u8>, SocketAddr)],
@@ -50,6 +56,7 @@ pub(crate) async fn send_batch(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 async fn send_batch_fallback(
     socket: &UdpSocket,
     packets: &[(Vec<u8>, SocketAddr)],
@@ -78,8 +85,9 @@ mod linux {
         // past the syscall boundary; we materialize it all
         // here and pass raw pointers.
         let n = packets.len();
-        let mut addrs: Vec<libc::sockaddr_storage> =
-            (0..n).map(|_| unsafe { MaybeUninit::zeroed().assume_init() }).collect();
+        let mut addrs: Vec<libc::sockaddr_storage> = (0..n)
+            .map(|_| unsafe { MaybeUninit::zeroed().assume_init() })
+            .collect();
         let mut addr_lens: Vec<libc::socklen_t> = vec![0; n];
         let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(n);
         let mut msgs: Vec<libc::mmsghdr> = Vec::with_capacity(n);
@@ -116,14 +124,7 @@ mod linux {
         socket
             .async_io(Interest::WRITABLE, || {
                 let fd = socket.as_raw_fd();
-                let rc = unsafe {
-                    libc::sendmmsg(
-                        fd,
-                        msgs.as_mut_ptr(),
-                        msgs.len() as _,
-                        0,
-                    )
-                };
+                let rc = unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as _, 0) };
                 if rc < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -133,24 +134,19 @@ mod linux {
             .await
     }
 
-    fn encode_sockaddr(
-        storage: &mut libc::sockaddr_storage,
-        addr: &SocketAddr,
-    ) -> libc::socklen_t {
+    fn encode_sockaddr(storage: &mut libc::sockaddr_storage, addr: &SocketAddr) -> libc::socklen_t {
         match addr {
             SocketAddr::V4(v4) => {
-                let sin: &mut libc::sockaddr_in = unsafe {
-                    &mut *(storage as *mut _ as *mut libc::sockaddr_in)
-                };
+                let sin: &mut libc::sockaddr_in =
+                    unsafe { &mut *(storage as *mut _ as *mut libc::sockaddr_in) };
                 sin.sin_family = libc::AF_INET as _;
                 sin.sin_port = v4.port().to_be();
                 sin.sin_addr.s_addr = u32::from(*v4.ip()).to_be();
                 std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
             }
             SocketAddr::V6(v6) => {
-                let sin6: &mut libc::sockaddr_in6 = unsafe {
-                    &mut *(storage as *mut _ as *mut libc::sockaddr_in6)
-                };
+                let sin6: &mut libc::sockaddr_in6 =
+                    unsafe { &mut *(storage as *mut _ as *mut libc::sockaddr_in6) };
                 sin6.sin6_family = libc::AF_INET6 as _;
                 sin6.sin6_port = v6.port().to_be();
                 sin6.sin6_flowinfo = v6.flowinfo();

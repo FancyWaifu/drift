@@ -46,7 +46,9 @@ const COUNTER_PATH: &str = "/tmp/drift-shell-counter";
 const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_CONVERGENCE_WAIT: Duration = Duration::from_millis(600);
 
-fn bridge_id() -> Identity { Identity::from_secret_bytes([0xBB; 32]) }
+fn bridge_id() -> Identity {
+    Identity::from_secret_bytes([0xBB; 32])
+}
 
 // Identity derived from a role tag + IP string. Lets the demo
 // give each local IP its own stable server and client identities
@@ -62,8 +64,12 @@ fn identity_for(role: u8, ip: &str) -> Identity {
     Identity::from_secret_bytes(seed)
 }
 
-fn server_id_for(ip: &str) -> Identity { identity_for(0x55, ip) }
-fn client_id_for(ip: &str) -> Identity { identity_for(0xC1, ip) }
+fn server_id_for(ip: &str) -> Identity {
+    identity_for(0x55, ip)
+}
+fn client_id_for(ip: &str) -> Identity {
+    identity_for(0xC1, ip)
+}
 
 fn cfg() -> TransportConfig {
     TransportConfig {
@@ -95,7 +101,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "client" => {
             // client <bind_ip> --target <ip>  <cmd...>
             // client <bind_ip> --any              <cmd...>   (iterates known server IPs)
-            let bind = args.get(2).ok_or("client <bind_ip> --target <ip>|--any <cmd...>")?.to_string();
+            let bind = args
+                .get(2)
+                .ok_or("client <bind_ip> --target <ip>|--any <cmd...>")?
+                .to_string();
             let mode_flag = args.get(3).map(String::as_str).unwrap_or("");
             let (targets, cmd_start) = match mode_flag {
                 "--target" => {
@@ -122,15 +131,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn find_flag_u64(args: &[String], flag: &str) -> Option<u64> {
-    args.iter().position(|a| a == flag)
+    args.iter()
+        .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
 }
 
 async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
-    let bridge = Arc::new(
-        Transport::bind_with_config(BRIDGE_ADDR.parse()?, bridge_id(), cfg()).await?,
-    );
+    let bridge =
+        Arc::new(Transport::bind_with_config(BRIDGE_ADDR.parse()?, bridge_id(), cfg()).await?);
     let pid = hex8(&derive_peer_id(&bridge_id().public_bytes()));
     println!("[bridge] UDP on {} peer_id={}", BRIDGE_ADDR, pid);
 
@@ -144,7 +153,8 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
                 if pkt.payload != b"warmup" {
                     println!(
                         "[bridge] unexpected direct packet from peer={} ({}B)",
-                        hex8(&pkt.peer_id), pkt.payload.len()
+                        hex8(&pkt.peer_id),
+                        pkt.payload.len()
                     );
                 }
             }
@@ -167,18 +177,23 @@ struct ServerState {
 }
 
 impl ServerState {
-    fn uptime_secs(&self) -> u64 { self.start.elapsed().as_secs() }
+    fn uptime_secs(&self) -> u64 {
+        self.start.elapsed().as_secs()
+    }
 }
 
 async fn run_server(bind_ip: &str, rotation: u32) -> Result<(), Box<dyn std::error::Error>> {
     let identity = server_id_for(bind_ip);
     let my_pid_hex = hex_full(&derive_peer_id(&identity.public_bytes()));
     let bind_addr: SocketAddr = format!("{}:0", bind_ip).parse()?;
-    let transport = Arc::new(
-        Transport::bind_with_config(bind_addr, identity, cfg()).await?,
-    );
+    let transport = Arc::new(Transport::bind_with_config(bind_addr, identity, cfg()).await?);
     let local = transport.local_addr()?;
-    println!("[server] bind={} rotation={} peer_id={}", local, rotation, &my_pid_hex[..12]);
+    println!(
+        "[server] bind={} rotation={} peer_id={}",
+        local,
+        rotation,
+        &my_pid_hex[..12]
+    );
 
     let bridge_pub = bridge_id().public_bytes();
     let bridge_pid = derive_peer_id(&bridge_pub);
@@ -215,9 +230,14 @@ async fn run_server(bind_ip: &str, rotation: u32) -> Result<(), Box<dyn std::err
         };
         println!(
             "[server] req from peer={} cmd={:?} -> {:?}",
-            hex8(&pkt.peer_id), req.trim(), resp.trim_end()
+            hex8(&pkt.peer_id),
+            req.trim(),
+            resp.trim_end()
         );
-        if let Err(e) = transport.send_data(&pkt.peer_id, resp.as_bytes(), 0, 0).await {
+        if let Err(e) = transport
+            .send_data(&pkt.peer_id, resp.as_bytes(), 0, 0)
+            .await
+        {
             eprintln!("[server] send_data failed: {}", e);
         }
     }
@@ -269,9 +289,7 @@ async fn run_client(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client_id_for(bind_ip);
     let bind_addr: SocketAddr = format!("{}:0", bind_ip).parse()?;
-    let transport = Arc::new(
-        Transport::bind_with_config(bind_addr, identity, cfg()).await?,
-    );
+    let transport = Arc::new(Transport::bind_with_config(bind_addr, identity, cfg()).await?);
     let bridge_pub = bridge_id().public_bytes();
     let bridge_pid = derive_peer_id(&bridge_pub);
 

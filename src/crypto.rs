@@ -1,10 +1,10 @@
 use crate::error::{DriftError, Result};
 use crate::header::AUTH_TAG_LEN;
 use blake2::{digest::consts::U8, Blake2b, Digest};
-use siphasher::sip128::{Hasher128, SipHasher13};
-use std::hash::Hasher as _;
 use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use siphasher::sip128::{Hasher128, SipHasher13};
+use std::hash::Hasher as _;
 
 pub const KEY_LEN: usize = 32;
 pub const PEER_ID_LEN: usize = 8;
@@ -75,16 +75,16 @@ impl SessionKey {
 
     /// Seal `plaintext` with arbitrary AAD, returning a freshly
     /// allocated `Vec<u8>` containing ciphertext + tag.
-    pub fn seal(
-        &self,
-        seq: u32,
-        packet_type: u8,
-        aad: &[u8],
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub fn seal(&self, seq: u32, packet_type: u8, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let nonce = self.nonce_for(seq, packet_type);
         self.cipher
-            .encrypt(&nonce, Payload { msg: plaintext, aad })
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|_| DriftError::AuthFailed)
     }
 
@@ -127,7 +127,13 @@ impl SessionKey {
         }
         let nonce = self.nonce_for(seq, packet_type);
         self.cipher
-            .decrypt(&nonce, Payload { msg: ciphertext, aad })
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|_| DriftError::AuthFailed)
     }
 }
@@ -209,7 +215,9 @@ mod tests {
         let h = Header::new(PacketType::Data, 1, [0; 8], [0; 8]);
         let mut hbuf = [0u8; HEADER_LEN];
         h.encode(&mut hbuf);
-        let ct = k.seal(1, PacketType::Data as u8, &hbuf, b"payload").unwrap();
+        let ct = k
+            .seal(1, PacketType::Data as u8, &hbuf, b"payload")
+            .unwrap();
         hbuf[4] ^= 0xFF;
         assert!(k.open(1, PacketType::Data as u8, &hbuf, &ct).is_err());
     }

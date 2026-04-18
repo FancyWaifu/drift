@@ -56,11 +56,7 @@ async fn high_fanin_send_data_completes_under_time_budget() {
     let drain_handle = tokio::spawn(async move {
         let mut got = 0usize;
         while got < total_expected {
-            match tokio::time::timeout(
-                Duration::from_secs(BUDGET_SECS),
-                server_drain.recv(),
-            )
-            .await
+            match tokio::time::timeout(Duration::from_secs(BUDGET_SECS), server_drain.recv()).await
             {
                 Ok(Some(_)) => got += 1,
                 Ok(None) | Err(_) => break,
@@ -90,7 +86,10 @@ async fn high_fanin_send_data_completes_under_time_budget() {
         handles.push(tokio::spawn(async move {
             for j in 0..PACKETS_PER_CLIENT {
                 let payload = [(i & 0xFF) as u8, (j & 0xFF) as u8];
-                client.send_data(&server_peer, &payload, 0, 0).await.unwrap();
+                client
+                    .send_data(&server_peer, &payload, 0, 0)
+                    .await
+                    .unwrap();
             }
         }));
     }

@@ -41,8 +41,7 @@ fn secret_for(node_id: u8) -> [u8; 32] {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -80,9 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let my_id = Identity::from_secret_bytes(secret_for(node_id));
     let my_port = peer_addrs[node_id as usize].port();
     let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", my_port).parse()?;
-    let t = Arc::new(
-        Transport::bind(bind_addr, my_id).await?,
-    );
+    let t = Arc::new(Transport::bind(bind_addr, my_id).await?);
     println!("[node-{}] bound {}", node_id, t.local_addr()?);
 
     // Register every other node as a peer.

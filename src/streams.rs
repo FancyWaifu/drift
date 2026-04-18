@@ -361,10 +361,8 @@ impl CongestionCtrl {
             .bbr_btlbw_bps
             .saturating_mul(self.bbr_rtprop.map(|r| r.as_nanos() as u64).unwrap_or(0))
             / 1_000_000_000;
-        let cwnd_target = bdp_bytes
-            .saturating_mul(BBR_CWND_GAIN_NUM)
-            / BBR_CWND_GAIN_DEN;
-        self.cwnd = (cwnd_target as usize).max(BBR_MIN_CWND).min(MAX_CWND);
+        let cwnd_target = bdp_bytes.saturating_mul(BBR_CWND_GAIN_NUM) / BBR_CWND_GAIN_DEN;
+        self.cwnd = (cwnd_target as usize).clamp(BBR_MIN_CWND, MAX_CWND);
 
         // Phase transitions:
         // Every "round" (every few samples — we approximate
@@ -378,7 +376,8 @@ impl CongestionCtrl {
                     // Has BtlBw grown by at least 25%
                     // this round?
                     let grown = self.bbr_btlbw_bps
-                        >= self.bbr_last_round_btlbw
+                        >= self
+                            .bbr_last_round_btlbw
                             .saturating_mul(BBR_STARTUP_GROWTH_NUMERATOR)
                             / BBR_STARTUP_GROWTH_DENOMINATOR;
                     if grown {
@@ -396,8 +395,7 @@ impl CongestionCtrl {
                     // Advance the gain cycle. The next
                     // pacing_delay call will read the new
                     // gain via `bbr_pacing_gain`.
-                    self.bbr_cycle_idx =
-                        (self.bbr_cycle_idx + 1) % BBR_PROBEBW_CYCLE.len();
+                    self.bbr_cycle_idx = (self.bbr_cycle_idx + 1) % BBR_PROBEBW_CYCLE.len();
                 }
             }
         }
@@ -443,11 +441,8 @@ impl CongestionCtrl {
             return;
         }
         // Round complete. Compare with previous round.
-        if let (Some(last), Some(curr)) =
-            (self.hs_last_round_min, self.hs_current_round_min)
-        {
-            let thresh = (last / 8)
-                .clamp(HYSTART_MIN_RTT_THRESH, HYSTART_MAX_RTT_THRESH);
+        if let (Some(last), Some(curr)) = (self.hs_last_round_min, self.hs_current_round_min) {
+            let thresh = (last / 8).clamp(HYSTART_MIN_RTT_THRESH, HYSTART_MAX_RTT_THRESH);
             if curr >= last + thresh {
                 // Rising RTT detected — exit slow start.
                 self.ssthresh = self.cwnd;
@@ -479,14 +474,16 @@ impl CongestionCtrl {
         let cwnd = self.cwnd.max(MIN_CWND);
         // gain = 2.0 in slow start, 1.25 in congestion avoidance.
         // Use integer-friendly form: numerator/denominator.
-        let (gain_num, gain_den): (u32, u32) =
-            if self.cwnd < self.ssthresh { (2, 1) } else { (5, 4) };
+        let (gain_num, gain_den): (u32, u32) = if self.cwnd < self.ssthresh {
+            (2, 1)
+        } else {
+            (5, 4)
+        };
         let interval_nanos = (segment_len as u128)
             .saturating_mul(srtt.as_nanos())
             .saturating_mul(gain_den as u128)
             / ((cwnd as u128).saturating_mul(gain_num as u128).max(1));
-        let interval =
-            Duration::from_nanos(interval_nanos.min(u64::MAX as u128) as u64);
+        let interval = Duration::from_nanos(interval_nanos.min(u64::MAX as u128) as u64);
 
         let now = Instant::now();
         let send_at = match self.next_send_time {
@@ -585,12 +582,8 @@ impl CongestionCtrl {
                 self.rttvar = Some(sample / 2);
             }
             (Some(srtt), Some(rttvar)) => {
-                let diff = if sample > srtt {
-                    sample - srtt
-                } else {
-                    srtt - sample
-                };
                 // RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - sample|
+                let diff = sample.abs_diff(srtt);
                 let new_rttvar = (rttvar * 3 + diff) / 4;
                 // SRTT = 7/8 * SRTT + 1/8 * sample
                 let new_srtt = (srtt * 7 + sample) / 8;
@@ -655,6 +648,11 @@ struct ManagerState {
     congestion: HashMap<PeerId, CongestionCtrl>,
 }
 
+/// Shape of one entry enqueued by `handle_data` and drained by
+/// `accept`: `(peer_id, stream_id, payload_rx)`. Aliased to
+/// keep `StreamManager` readable.
+type AcceptInbox = (PeerId, StreamId, mpsc::UnboundedReceiver<Vec<u8>>);
+
 /// The stream layer. Wraps a DRIFT `Transport` and provides
 /// `open()` / `accept()` APIs for bidirectional reliable streams.
 ///
@@ -665,18 +663,8 @@ pub struct StreamManager {
     transport: Arc<Transport>,
     local_peer_id: PeerId,
     state: Arc<Mutex<ManagerState>>,
-    accept_tx: mpsc::UnboundedSender<(
-        PeerId,
-        StreamId,
-        mpsc::UnboundedReceiver<Vec<u8>>,
-    )>,
-    accept_rx: Mutex<
-        mpsc::UnboundedReceiver<(
-            PeerId,
-            StreamId,
-            mpsc::UnboundedReceiver<Vec<u8>>,
-        )>,
-    >,
+    accept_tx: mpsc::UnboundedSender<AcceptInbox>,
+    accept_rx: Mutex<mpsc::UnboundedReceiver<AcceptInbox>>,
     /// Inbound datagram channel — fed by `handle_datagram`,
     /// drained by `recv_datagram`.
     datagram_tx: mpsc::UnboundedSender<(PeerId, Vec<u8>)>,
@@ -804,10 +792,7 @@ impl StreamManager {
 
     /// Open a new outbound stream to `peer`. Returns a handle the
     /// application uses to send and receive bytes.
-    pub async fn open(
-        self: &Arc<Self>,
-        peer: PeerId,
-    ) -> Result<Stream, StreamError> {
+    pub async fn open(self: &Arc<Self>, peer: PeerId) -> Result<Stream, StreamError> {
         let stream_id = self.next_outbound_id(&peer).await;
         let (deliver_tx, deliver_rx) = mpsc::unbounded_channel();
         {
@@ -856,11 +841,7 @@ impl StreamManager {
     ///
     /// Max payload size is bounded by the transport's MAX_PAYLOAD
     /// minus one tag byte. Larger payloads are rejected.
-    pub async fn send_datagram(
-        &self,
-        peer: PeerId,
-        data: &[u8],
-    ) -> Result<(), StreamError> {
+    pub async fn send_datagram(&self, peer: PeerId, data: &[u8]) -> Result<(), StreamError> {
         let mut wire = Vec::with_capacity(1 + data.len());
         wire.push(TAG_DATAGRAM);
         wire.extend_from_slice(data);
@@ -877,8 +858,7 @@ impl StreamManager {
 
     /// Wait for and return the next inbound stream from any peer.
     pub async fn accept(self: &Arc<Self>) -> Option<Stream> {
-        let (peer_id, stream_id, recv_rx) =
-            self.accept_rx.lock().await.recv().await?;
+        let (peer_id, stream_id, recv_rx) = self.accept_rx.lock().await.recv().await?;
         Some(Stream {
             peer_id,
             stream_id,
@@ -940,8 +920,7 @@ impl StreamManager {
                     .values()
                     .map(|p| p.data.len() as u32)
                     .sum();
-                let fc_room =
-                    stream.peer_recv_window.saturating_sub(unacked_for_stream);
+                let fc_room = stream.peer_recv_window.saturating_sub(unacked_for_stream);
                 let fc_ok = fc_room as usize >= chunk.len();
 
                 // Congestion control: never send past the
@@ -998,11 +977,7 @@ impl StreamManager {
         }
     }
 
-    async fn close_stream(
-        &self,
-        peer: PeerId,
-        stream_id: StreamId,
-    ) -> Result<(), StreamError> {
+    async fn close_stream(&self, peer: PeerId, stream_id: StreamId) -> Result<(), StreamError> {
         let mut wire = Vec::with_capacity(5);
         wire.push(TAG_CLOSE);
         wire.extend_from_slice(&stream_id.to_be_bytes());
@@ -1062,9 +1037,7 @@ impl StreamManager {
         if payload.len() < 5 {
             return;
         }
-        let stream_id = u32::from_be_bytes([
-            payload[1], payload[2], payload[3], payload[4],
-        ]);
+        let stream_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
         self.ensure_inbound_stream(peer, stream_id).await;
     }
 
@@ -1083,11 +1056,7 @@ impl StreamManager {
             // Enforce the per-peer stream cap BEFORE allocating new
             // state. An attacker spamming OPEN/DATA frames with
             // unique ids cannot force unbounded allocation.
-            let live_for_peer = state
-                .streams
-                .keys()
-                .filter(|(p, _)| p == &peer)
-                .count();
+            let live_for_peer = state.streams.keys().filter(|(p, _)| p == &peer).count();
             if live_for_peer >= MAX_STREAMS_PER_PEER {
                 return false;
             }
@@ -1120,12 +1089,8 @@ impl StreamManager {
         if payload.len() < 9 {
             return;
         }
-        let stream_id = u32::from_be_bytes([
-            payload[1], payload[2], payload[3], payload[4],
-        ]);
-        let seq = u32::from_be_bytes([
-            payload[5], payload[6], payload[7], payload[8],
-        ]);
+        let stream_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let seq = u32::from_be_bytes([payload[5], payload[6], payload[7], payload[8]]);
         let data = payload[9..].to_vec();
 
         // Reliable-OPEN fallback: if we've never seen this stream
@@ -1154,8 +1119,7 @@ impl StreamManager {
                     // We're draining an out-of-order segment
                     // that was previously counted in
                     // `recv_queue_bytes`; releasing it now.
-                    stream.recv_queue_bytes =
-                        stream.recv_queue_bytes.saturating_sub(next.len());
+                    stream.recv_queue_bytes = stream.recv_queue_bytes.saturating_sub(next.len());
                     chunks.push(next);
                     stream.recv_next_seq = stream.recv_next_seq.wrapping_add(1);
                 }
@@ -1167,14 +1131,12 @@ impl StreamManager {
                 // sending skipping seqs. Also drop if the buffer is
                 // already at its cap.
                 let gap = seq.wrapping_sub(stream.recv_next_seq);
-                if gap > MAX_REORDER_WINDOW
-                    || stream.recv_buf.len() >= MAX_REORDER_WINDOW as usize
+                if gap > MAX_REORDER_WINDOW || stream.recv_buf.len() >= MAX_REORDER_WINDOW as usize
                 {
                     // Silently drop; still ACK what we've delivered
                     // below so the sender isn't stuck retransmitting.
                 } else {
-                    stream.recv_queue_bytes =
-                        stream.recv_queue_bytes.saturating_add(data.len());
+                    stream.recv_queue_bytes = stream.recv_queue_bytes.saturating_add(data.len());
                     stream.recv_buf.insert(seq, data);
                 }
             }
@@ -1185,8 +1147,8 @@ impl StreamManager {
                 // currently buffering out-of-order. (Deliverable
                 // bytes are assumed to be drained fast enough to
                 // not count against flow control.)
-                let window = (DEFAULT_RECV_WINDOW as usize)
-                    .saturating_sub(stream.recv_queue_bytes) as u32;
+                let window =
+                    (DEFAULT_RECV_WINDOW as usize).saturating_sub(stream.recv_queue_bytes) as u32;
                 let mut wire = Vec::with_capacity(13);
                 wire.push(TAG_ACK);
                 wire.extend_from_slice(&stream_id.to_be_bytes());
@@ -1219,12 +1181,8 @@ impl StreamManager {
         if payload.len() < 9 {
             return;
         }
-        let stream_id = u32::from_be_bytes([
-            payload[1], payload[2], payload[3], payload[4],
-        ]);
-        let acked_up_to = u32::from_be_bytes([
-            payload[5], payload[6], payload[7], payload[8],
-        ]);
+        let stream_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
+        let acked_up_to = u32::from_be_bytes([payload[5], payload[6], payload[7], payload[8]]);
         // Optional 4-byte flow-control window appended by any
         // non-legacy receiver. If absent, leave the peer window
         // untouched — the old 9-byte form is still valid.
@@ -1300,13 +1258,9 @@ impl StreamManager {
         if payload.len() < 5 {
             return;
         }
-        let stream_id = u32::from_be_bytes([
-            payload[1], payload[2], payload[3], payload[4],
-        ]);
+        let stream_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
         let mut state = self.state.lock().await;
-        let should_remove = if let Some(stream) =
-            state.streams.get_mut(&(peer, stream_id))
-        {
+        let should_remove = if let Some(stream) = state.streams.get_mut(&(peer, stream_id)) {
             stream.received_close = true;
             // Dropping deliver_tx by removing from map will close the
             // receiver, signalling EOF to the app.
@@ -1330,8 +1284,7 @@ impl StreamManager {
     }
 
     async fn run_retransmit_loop(self: Arc<Self>) {
-        let mut ticker =
-            tokio::time::interval(Duration::from_millis(RETRANSMIT_SCAN_MS));
+        let mut ticker = tokio::time::interval(Duration::from_millis(RETRANSMIT_SCAN_MS));
         loop {
             ticker.tick().await;
             // Collect retransmit targets, then signal loss to the
@@ -1367,9 +1320,7 @@ impl StreamManager {
                             .checked_mul(1u32 << shift)
                             .unwrap_or_else(|| Duration::from_millis(RTO_MAX_MS))
                             .min(Duration::from_millis(RTO_MAX_MS));
-                        if pending.last_sent.elapsed() >= rto
-                            && pending.retries < MAX_RETRIES
-                        {
+                        if pending.last_sent.elapsed() >= rto && pending.retries < MAX_RETRIES {
                             pending.retries += 1;
                             pending.last_sent = Instant::now();
                             // NOTE: `first_sent` is NOT touched
@@ -1451,7 +1402,9 @@ mod tests {
                 .unwrap(),
         );
         let b_addr = b.local_addr().unwrap();
-        b.add_peer(a_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder).await.unwrap();
+        b.add_peer(a_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+            .await
+            .unwrap();
         let b_peer_id_on_a = crate::crypto::derive_peer_id(&b_pub);
 
         let a = Arc::new(
@@ -1466,7 +1419,10 @@ mod tests {
             .await
             .unwrap(),
         );
-        let _a_peer_on_a = a.add_peer(b_pub, b_addr, Direction::Initiator).await.unwrap();
+        let _a_peer_on_a = a
+            .add_peer(b_pub, b_addr, Direction::Initiator)
+            .await
+            .unwrap();
         let a_peer_id_on_b = crate::crypto::derive_peer_id(&a_pub);
 
         let mgr_a = StreamManager::bind(a).await;
@@ -1537,16 +1493,28 @@ mod tests {
         let s2 = a.open(b_on_a).await.unwrap();
         assert_ne!(s1.id(), s2.id());
 
-        let bs1 = tokio::time::timeout(Duration::from_secs(2), b.accept()).await.unwrap().unwrap();
-        let bs2 = tokio::time::timeout(Duration::from_secs(2), b.accept()).await.unwrap().unwrap();
+        let bs1 = tokio::time::timeout(Duration::from_secs(2), b.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let bs2 = tokio::time::timeout(Duration::from_secs(2), b.accept())
+            .await
+            .unwrap()
+            .unwrap();
 
         s1.send(b"stream one").await.unwrap();
         s2.send(b"stream two").await.unwrap();
 
         // Accept order may not match open order; match by stream id.
         let (first_id, second_id) = (bs1.id(), bs2.id());
-        let bs1_text = tokio::time::timeout(Duration::from_secs(2), bs1.recv()).await.unwrap().unwrap();
-        let bs2_text = tokio::time::timeout(Duration::from_secs(2), bs2.recv()).await.unwrap().unwrap();
+        let bs1_text = tokio::time::timeout(Duration::from_secs(2), bs1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let bs2_text = tokio::time::timeout(Duration::from_secs(2), bs2.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         // Map back: the stream with s1.id() got "stream one"
         if first_id == s1.id() {
@@ -1631,10 +1599,7 @@ mod tests {
                 cc.hystart_observe(Duration::from_millis(25));
             }
         }
-        assert!(
-            !cc.hs_done,
-            "stable RTT must not trigger HyStart++ exit"
-        );
+        assert!(!cc.hs_done, "stable RTT must not trigger HyStart++ exit");
         assert_eq!(cc.ssthresh, usize::MAX);
     }
 
@@ -1711,7 +1676,11 @@ mod tests {
         for _ in 0..40 {
             cc.on_ack(1024, Some(Duration::from_millis(10)));
         }
-        assert_eq!(cc.bbr_phase, BbrPhase::ProbeBw, "should have exited Startup");
+        assert_eq!(
+            cc.bbr_phase,
+            BbrPhase::ProbeBw,
+            "should have exited Startup"
+        );
     }
 
     #[test]

@@ -32,8 +32,13 @@ async fn steady_stream_twenty_seconds() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Arc::new(
@@ -41,7 +46,10 @@ async fn steady_stream_twenty_seconds() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice_t.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice_t
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Warm up.
     alice_t.send_data(&bob_peer, b"warm", 0, 0).await.unwrap();

@@ -31,8 +31,13 @@ async fn captured_data_replay_cannot_migrate_peer_addr() {
             .unwrap(),
     );
     let bob_addr = bob.local_addr().unwrap();
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
 
     let alice = Arc::new(
         Transport::bind("127.0.0.1:0".parse().unwrap(), alice_id)
@@ -40,7 +45,10 @@ async fn captured_data_replay_cannot_migrate_peer_addr() {
             .unwrap(),
     );
     let alice_real_addr = alice.local_addr().unwrap();
-    let bob_peer = alice.add_peer(bob_pub, bob_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Drive one real DATA packet Alice → Bob. After this Bob has
     // `peer.addr == alice_real_addr` and Alice's session is live.
@@ -183,8 +191,13 @@ async fn proxy_mid_session_path_switch_validates_and_migrates() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     // Two proxy sockets. Alice initially talks to Bob via p1;
@@ -245,10 +258,16 @@ async fn proxy_mid_session_path_switch_validates_and_migrates() {
             .await
             .unwrap(),
     );
-    let bob_peer = alice.add_peer(bob_pub, p1_addr, Direction::Initiator).await.unwrap();
+    let bob_peer = alice
+        .add_peer(bob_pub, p1_addr, Direction::Initiator)
+        .await
+        .unwrap();
 
     // Initial handshake + data through p1.
-    alice.send_data(&bob_peer, b"through-p1", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"through-p1", 0, 0)
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()
@@ -265,7 +284,10 @@ async fn proxy_mid_session_path_switch_validates_and_migrates() {
     // p2_addr (instead of p1_addr). Bob sees a new src and starts
     // a path probe; Alice's Transport auto-responds via
     // handle_path_challenge; Bob commits the migration.
-    alice.send_data(&bob_peer, b"through-p2", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"through-p2", 0, 0)
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()

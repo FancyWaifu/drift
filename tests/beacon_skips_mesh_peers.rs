@@ -149,12 +149,17 @@ async fn emit_beacons_skips_via_mesh_peers() {
         alice_emitted <= expected_ticks + 2,
         "alice emitted {} beacons in {}ms ({} ticks) — expected ~{}; the \
          beacon emitter is sending to via_mesh peers again",
-        alice_emitted, BEACON_WINDOW_MS, expected_ticks, expected_ticks,
+        alice_emitted,
+        BEACON_WINDOW_MS,
+        expected_ticks,
+        expected_ticks,
     );
     assert!(
         bob_emitted <= expected_ticks + 2,
         "bob emitted {} beacons in {}ms — expected ~{}",
-        bob_emitted, BEACON_WINDOW_MS, expected_ticks,
+        bob_emitted,
+        BEACON_WINDOW_MS,
+        expected_ticks,
     );
 
     // The bridge should not register any auth failures during
@@ -179,8 +184,13 @@ async fn emit_beacons_skips_via_mesh_peers() {
     // Sanity: the cross-medium session is still alive — send one
     // more payload each way and confirm it delivers. Regression
     // could otherwise hide behind a broken mesh forwarding path.
-    alice.send_data(&bob_pid, b"post-fix-1", 0, 0).await.unwrap();
-    bob.send_data(&alice_pid, b"post-fix-2", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_pid, b"post-fix-1", 0, 0)
+        .await
+        .unwrap();
+    bob.send_data(&alice_pid, b"post-fix-2", 0, 0)
+        .await
+        .unwrap();
 
     let mut alice_saw = false;
     let mut bob_saw = false;
@@ -196,8 +206,7 @@ async fn emit_beacons_skips_via_mesh_peers() {
             }
         }
         if !bob_saw {
-            if let Ok(Some(p)) =
-                tokio::time::timeout(Duration::from_millis(200), bob.recv()).await
+            if let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(200), bob.recv()).await
             {
                 if p.payload == b"post-fix-1" {
                     bob_saw = true;

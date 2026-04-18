@@ -29,9 +29,13 @@ async fn rekey_keeps_session_alive_and_reset_seq() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -47,7 +51,10 @@ async fn rekey_keeps_session_alive_and_reset_seq() {
     // Pre-rekey: send 10 packets. Alice's tx seq advances to
     // around 11.
     for i in 0..10u32 {
-        alice.send_data(&bob_peer, &i.to_be_bytes(), 0, 0).await.unwrap();
+        alice
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
     }
     let mut received = 0usize;
     while received < 10 {
@@ -72,7 +79,10 @@ async fn rekey_keeps_session_alive_and_reset_seq() {
     // pre-rekey — which is safe ONLY because the key has
     // changed (so the (key, nonce) tuple is fresh).
     for i in 0..20u32 {
-        alice.send_data(&bob_peer, &(100 + i).to_be_bytes(), 0, 0).await.unwrap();
+        alice
+            .send_data(&bob_peer, &(100 + i).to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
     }
 
     let mut post = 0usize;
@@ -88,8 +98,14 @@ async fn rekey_keeps_session_alive_and_reset_seq() {
     // Sanity: no auth failures, handshakes_completed is still
     // exactly 1 (rekey doesn't count as a handshake).
     let bm = bob.metrics();
-    assert_eq!(bm.auth_failures, 0, "rekey flow must not cause any AEAD failures");
-    assert_eq!(bm.handshakes_completed, 1, "rekey should NOT increment handshakes_completed");
+    assert_eq!(
+        bm.auth_failures, 0,
+        "rekey flow must not cause any AEAD failures"
+    );
+    assert_eq!(
+        bm.handshakes_completed, 1,
+        "rekey should NOT increment handshakes_completed"
+    );
 
     let am = alice.metrics();
     assert_eq!(am.auth_failures, 0);
@@ -112,9 +128,13 @@ async fn rekey_preserves_in_flight_under_grace_window() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -136,11 +156,17 @@ async fn rekey_preserves_in_flight_under_grace_window() {
 
     // Fire 30 packets, rekey in the middle, fire 30 more.
     for i in 0..30u32 {
-        alice.send_data(&bob_peer, &i.to_be_bytes(), 0, 0).await.unwrap();
+        alice
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
     }
     alice.rekey(&bob_peer).await.unwrap();
     for i in 100..130u32 {
-        alice.send_data(&bob_peer, &i.to_be_bytes(), 0, 0).await.unwrap();
+        alice
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
     }
 
     // Drain everything Bob receives for up to 3 seconds.
@@ -183,9 +209,13 @@ async fn auto_rekey_fires_before_seq_ceiling() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let alice = Arc::new(
@@ -199,7 +229,10 @@ async fn auto_rekey_fires_before_seq_ceiling() {
         .unwrap();
 
     // Establish the session.
-    alice.send_data(&bob_peer, b"establish", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"establish", 0, 0)
+        .await
+        .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()
@@ -214,7 +247,10 @@ async fn auto_rekey_fires_before_seq_ceiling() {
     assert!(alice.test_bump_peer_seq(&bob_peer, target).await);
 
     // This should auto-rekey and then deliver the packet.
-    alice.send_data(&bob_peer, b"after-rekey", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"after-rekey", 0, 0)
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(3), bob.recv())
         .await
         .expect("recv timeout after auto-rekey")
@@ -225,7 +261,10 @@ async fn auto_rekey_fires_before_seq_ceiling() {
     // should still be on handshake count 1 (rekey is not a new
     // handshake).
     let am = alice.metrics();
-    assert_eq!(am.auto_rekeys, 1, "auto-rekey should have fired exactly once");
+    assert_eq!(
+        am.auto_rekeys, 1,
+        "auto-rekey should have fired exactly once"
+    );
     assert_eq!(am.handshakes_completed, 1);
     assert_eq!(bob.metrics().handshakes_completed, 1);
 }

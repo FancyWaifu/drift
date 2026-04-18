@@ -4,9 +4,7 @@ use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN}
 use crate::identity::{
     derive_session_key, random_nonce, rekey_derive, Identity, NONCE_LEN, STATIC_KEY_LEN,
 };
-use crate::session::{
-    HandshakeState, PathProbe, Peer, PendingSend, PrevSession, SEQ_SEND_CEILING,
-};
+use crate::session::{HandshakeState, PathProbe, Peer, PendingSend, PrevSession, SEQ_SEND_CEILING};
 use rand::RngCore;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,14 +33,12 @@ mod qlog;
 mod resumption;
 mod rtt;
 use cookies::{CookieSecrets, COOKIE_BLOB_LEN, HELLO_WITH_COOKIE_LEN};
-use mesh::{DEFAULT_MESH_TTL, MAX_INCOMING_HOP_TTL};
 pub use mesh::{RouteEntry, RoutingTable, MAX_ROUTES};
-use path::{
-    build_path_challenge_packet, PATH_CHALLENGE_LEN, PATH_PROBE_RETRY,
-};
-pub use resumption::{ClientTicket, EXPORT_BLOB_LEN, TICKET_DEFAULT_TTL};
-use resumption::ResumptionStore;
+use mesh::{DEFAULT_MESH_TTL, MAX_INCOMING_HOP_TTL};
+use path::{build_path_challenge_packet, PATH_CHALLENGE_LEN, PATH_PROBE_RETRY};
 use peer_shards::PeerShards;
+use resumption::ResumptionStore;
+pub use resumption::{ClientTicket, EXPORT_BLOB_LEN, TICKET_DEFAULT_TTL};
 use std::collections::HashMap as StdHashMap;
 
 /// Runtime configuration for a `Transport`. Every field has a sensible
@@ -394,8 +390,7 @@ impl Transport {
                 warn!(error = %e, "failed to enable ECN on socket");
             }
         }
-        let io: Arc<dyn crate::io::PacketIO> =
-            Arc::new(crate::io::UdpPacketIO::new(udp_socket));
+        let io: Arc<dyn crate::io::PacketIO> = Arc::new(crate::io::UdpPacketIO::new(udp_socket));
         Self::bind_inner(io, identity, config).await
     }
 
@@ -411,15 +406,17 @@ impl Transport {
         let rtt_probe_interval_ms = config.rtt_probe_interval_ms;
         let recv_channel_capacity = config.recv_channel_capacity;
         let local_peer_id = identity.peer_id();
-        let qlog_writer = config.qlog_path.as_deref().and_then(|p| {
-            match qlog::QlogWriter::open(p) {
-                Ok(w) => Some(w),
-                Err(e) => {
-                    warn!(error = %e, path = ?p, "failed to open qlog file; disabling");
-                    None
-                }
-            }
-        });
+        let qlog_writer =
+            config
+                .qlog_path
+                .as_deref()
+                .and_then(|p| match qlog::QlogWriter::open(p) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        warn!(error = %e, path = ?p, "failed to open qlog file; disabling");
+                        None
+                    }
+                });
 
         let inner = Arc::new(Inner {
             ifaces: crate::io::InterfaceSet::single("default", io),
@@ -449,9 +446,7 @@ impl Transport {
         for iface_idx in 0..num_ifaces {
             let bg = inner.clone();
             let tx_clone = tx.clone();
-            tokio::spawn(async move {
-                bg.run_recv_loop_for(tx_clone, iface_idx).await
-            });
+            tokio::spawn(async move { bg.run_recv_loop_for(tx_clone, iface_idx).await });
         }
 
         let beacon_bg = inner.clone();
@@ -489,9 +484,7 @@ impl Transport {
         // handshakes. Don't spawn it when eviction is disabled and
         // there's no way for the state to go stale.
         if awaiting_data_timeout_secs != u64::MAX
-            && (accept_any_peer
-                || cookie_always
-                || cookie_threshold != u32::MAX)
+            && (accept_any_peer || cookie_always || cookie_threshold != u32::MAX)
         {
             let evict_bg = inner.clone();
             tokio::spawn(async move { evict_bg.run_handshake_eviction_loop().await });
@@ -641,10 +634,7 @@ impl Transport {
     /// the correct next-hop among competing beacon
     /// advertisements.
     #[doc(hidden)]
-    pub async fn test_lookup_route(
-        &self,
-        dst: &PeerId,
-    ) -> Option<(SocketAddr, u32)> {
+    pub async fn test_lookup_route(&self, dst: &PeerId) -> Option<(SocketAddr, u32)> {
         self.inner
             .routes
             .lock()
@@ -800,10 +790,7 @@ impl Transport {
     /// All targets must be established; a peer that's
     /// still mid-handshake is skipped (its payload is
     /// dropped and not counted).
-    pub async fn send_data_batch(
-        &self,
-        items: &[(PeerId, Vec<u8>)],
-    ) -> Result<usize> {
+    pub async fn send_data_batch(&self, items: &[(PeerId, Vec<u8>)]) -> Result<usize> {
         self.inner.send_data_batch(items).await
     }
 
@@ -856,11 +843,7 @@ impl Transport {
     /// `ResumeHello` instead of a full HELLO. Returns
     /// `Err(AuthFailed)` if the blob is malformed or doesn't
     /// match the peer's stored static pubkey.
-    pub async fn import_resumption_ticket(
-        &self,
-        peer: &PeerId,
-        blob: &[u8],
-    ) -> Result<()> {
+    pub async fn import_resumption_ticket(&self, peer: &PeerId, blob: &[u8]) -> Result<()> {
         let ticket = ClientTicket::from_bytes(blob).ok_or(DriftError::AuthFailed)?;
         if ticket.server_id != *peer {
             return Err(DriftError::AuthFailed);
@@ -881,11 +864,7 @@ impl Transport {
                 }
             }
         }
-        self.inner
-            .client_tickets
-            .lock()
-            .await
-            .insert(*peer, ticket);
+        self.inner.client_tickets.lock().await.insert(*peer, ticket);
         Ok(())
     }
 
@@ -926,10 +905,7 @@ impl Inner {
             let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
             let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
                 HandshakeState::Established {
-                    tx,
-                    rx,
-                    key_bytes,
-                    ..
+                    tx, rx, key_bytes, ..
                 } => (tx.clone(), rx.clone(), *key_bytes),
                 _ => return Err(DriftError::UnknownPeer),
             };
@@ -946,13 +922,7 @@ impl Inner {
             let aad = canonical_aad(&hbuf);
             let mut wire = Vec::with_capacity(HEADER_LEN + 32 + AUTH_TAG_LEN);
             wire.extend_from_slice(&hbuf);
-            old_tx.seal_into(
-                seq,
-                PacketType::RekeyRequest as u8,
-                &aad,
-                &salt,
-                &mut wire,
-            )?;
+            old_tx.seal_into(seq, PacketType::RekeyRequest as u8, &aad, &salt, &mut wire)?;
 
             // 2. Derive the new key and install it. Seq resets
             //    so the new (key, nonce) namespace starts at 1.
@@ -1008,10 +978,7 @@ impl Inner {
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
             let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
                 HandshakeState::Established {
-                    tx,
-                    rx,
-                    key_bytes,
-                    ..
+                    tx, rx, key_bytes, ..
                 } => (tx.clone(), rx.clone(), *key_bytes),
                 _ => return Err(DriftError::UnknownPeer),
             };
@@ -1020,12 +987,7 @@ impl Inner {
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
-            let salt_bytes = old_rx.open(
-                header.seq,
-                PacketType::RekeyRequest as u8,
-                &aad,
-                body,
-            )?;
+            let salt_bytes = old_rx.open(header.seq, PacketType::RekeyRequest as u8, &aad, body)?;
             if salt_bytes.len() != 32 {
                 return Err(DriftError::PacketTooShort {
                     got: salt_bytes.len(),
@@ -1060,7 +1022,8 @@ impl Inner {
             let ack_seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut ack_header = peer.make_header(PacketType::RekeyAck, ack_seq, self.local_peer_id);
+            let mut ack_header =
+                peer.make_header(PacketType::RekeyAck, ack_seq, self.local_peer_id);
             ack_header.payload_len = AUTH_TAG_LEN as u16;
             let mut ack_hbuf = [0u8; HEADER_LEN];
             ack_header.encode(&mut ack_hbuf);
@@ -1068,18 +1031,27 @@ impl Inner {
             let (tx_ref, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut ack_wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
             ack_wire.extend_from_slice(&ack_hbuf);
-            tx_ref.seal_into(ack_seq, PacketType::RekeyAck as u8, &ack_aad, b"", &mut ack_wire)?;
+            tx_ref.seal_into(
+                ack_seq,
+                PacketType::RekeyAck as u8,
+                &ack_aad,
+                b"",
+                &mut ack_wire,
+            )?;
 
             (ack_wire, peer.addr, new_key_bytes_val)
         };
 
-        self.ifaces.send_for(self.iface_for(&peer_id).await, &ack_wire, ack_addr).await?;
+        self.ifaces
+            .send_for(self.iface_for(&peer_id).await, &ack_wire, ack_addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
             .fetch_add(ack_wire.len() as u64, Ordering::Relaxed);
         // Refresh CID maps for the rekeyed session (Responder side).
-        self.install_cids(peer_id, &new_key_bytes_rekey, false).await;
+        self.install_cids(peer_id, &new_key_bytes_rekey, false)
+            .await;
         Ok(())
     }
 
@@ -1132,8 +1104,7 @@ impl Inner {
             if !peer.handshake.is_ready_for_data() {
                 return Err(DriftError::UnknownPeer);
             }
-            let was_awaiting_data =
-                matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+            let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
             let wire = build_close_packet(self.local_peer_id, peer)?;
             let addr = peer.addr;
 
@@ -1156,7 +1127,9 @@ impl Inner {
             (wire, addr)
         };
 
-        self.ifaces.send_for(self.iface_for(dst).await, &bytes, addr).await?;
+        self.ifaces
+            .send_for(self.iface_for(dst).await, &bytes, addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -1262,10 +1235,7 @@ impl Inner {
             // advertising a 1-hop route and siphoning traffic.
             let mesh_next_hop = if peer.via_mesh {
                 learned_route.or(Some(peer.addr))
-            } else if matches!(
-                peer.handshake,
-                HandshakeState::Established { .. }
-            ) {
+            } else if matches!(peer.handshake, HandshakeState::Established { .. }) {
                 None
             } else {
                 learned_route
@@ -1306,12 +1276,7 @@ impl Inner {
                 if matches!(peer.handshake, HandshakeState::Pending)
                     && peer.direction == Direction::Initiator
                 {
-                    build_hello(
-                        self.local_peer_id,
-                        peer,
-                        &self.identity,
-                        mesh_next_hop,
-                    )
+                    build_hello(self.local_peer_id, peer, &self.identity, mesh_next_hop)
                 } else {
                     SendAction::Queued
                 }
@@ -1327,10 +1292,7 @@ impl Inner {
     /// Established state are silently skipped — this is a
     /// fast-path API for bulk senders, not a general-purpose
     /// send.
-    async fn send_data_batch(
-        &self,
-        items: &[(PeerId, Vec<u8>)],
-    ) -> Result<usize> {
+    async fn send_data_batch(&self, items: &[(PeerId, Vec<u8>)]) -> Result<usize> {
         if items.is_empty() {
             return Ok(0);
         }
@@ -1353,14 +1315,9 @@ impl Inner {
                 // queueing.
                 continue;
             }
-            if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
-                self.local_peer_id,
-                peer,
-                payload,
-                0,
-                0,
-                None,
-            ) {
+            if let Ok(SendAction::Data(bytes, target, iface)) =
+                build_data_packet(self.local_peer_id, peer, payload, 0, 0, None)
+            {
                 batch.push((bytes, target, iface));
             }
         }
@@ -1431,7 +1388,9 @@ impl Inner {
             SendAction::Data(bytes, addr, iface) => {
                 self.ifaces.send_for(iface, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-                self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                self.metrics
+                    .bytes_sent
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 if let Some(q) = &self.qlog {
                     q.log_packet_sent("Data", &addr.to_string(), bytes.len(), 0);
                 }
@@ -1439,7 +1398,9 @@ impl Inner {
             SendAction::Hello(bytes, addr, iface) => {
                 self.ifaces.send_for(iface, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-                self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                self.metrics
+                    .bytes_sent
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 debug!("sent HELLO to {:?}", addr);
                 if let Some(q) = &self.qlog {
                     q.log_packet_sent("Hello", &addr.to_string(), bytes.len(), 0);
@@ -1450,11 +1411,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn run_recv_loop_for(
-        self: Arc<Self>,
-        tx: mpsc::Sender<Received>,
-        iface_idx: usize,
-    ) {
+    async fn run_recv_loop_for(self: Arc<Self>, tx: mpsc::Sender<Received>, iface_idx: usize) {
         let iface = match self.ifaces.get(iface_idx) {
             Some(io) => io.clone(),
             None => return,
@@ -1469,12 +1426,14 @@ impl Inner {
                 }
             };
 
-            self.metrics.packets_received.fetch_add(1, Ordering::Relaxed);
-            self.metrics.bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+            self.metrics
+                .packets_received
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .bytes_received
+                .fetch_add(n as u64, Ordering::Relaxed);
             if ecn_ce {
-                self.metrics
-                    .ecn_ce_received
-                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.ecn_ce_received.fetch_add(1, Ordering::Relaxed);
             }
             let received_at = Instant::now();
             let data = &buf[..n];
@@ -1500,7 +1459,10 @@ impl Inner {
             // peer, decrypt, and deliver without touching the
             // full long-header parser.
             if crate::short_header::is_short_header(data) {
-                match self.process_short_header(data, src, received_at, ecn_ce).await {
+                match self
+                    .process_short_header(data, src, received_at, ecn_ce)
+                    .await
+                {
                     Ok(Some(r)) => {
                         if tx.send(r).await.is_err() {
                             debug!("recv channel closed (short)");
@@ -1518,7 +1480,10 @@ impl Inner {
                 continue;
             }
 
-            match self.process_incoming(data, src, received_at, ecn_ce, iface_idx).await {
+            match self
+                .process_incoming(data, src, received_at, ecn_ce, iface_idx)
+                .await
+            {
                 Ok(Some(r)) => {
                     if tx.send(r).await.is_err() {
                         debug!("recv channel closed");
@@ -1536,10 +1501,14 @@ impl Inner {
                             self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                         }
                         DriftError::DeadlineExpired => {
-                            self.metrics.deadline_dropped.fetch_add(1, Ordering::Relaxed);
+                            self.metrics
+                                .deadline_dropped
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                         DriftError::UnknownPeer => {
-                            self.metrics.unknown_peer_drops.fetch_add(1, Ordering::Relaxed);
+                            self.metrics
+                                .unknown_peer_drops
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                         _ => {}
                     }
@@ -1573,22 +1542,17 @@ impl Inner {
         let (payload, probe) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let aad = &data[..crate::short_header::SHORT_HEADER_LEN];
             let plaintext = match rx.open(seq, PacketType::Data as u8, aad, body) {
                 Ok(pt) => pt,
                 Err(err) => {
                     // Rekey grace: try the prev rx if current fails.
                     let mut recovered = None;
-                    if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
-                        if let Some(p) = prev {
-                            if p.installed_at.elapsed() <= REKEY_GRACE {
-                                if let Ok(pt) = p.rx.open(seq, PacketType::Data as u8, aad, body) {
-                                    recovered = Some(pt);
-                                }
+                    if let HandshakeState::Established { prev: Some(p), .. } = &mut peer.handshake {
+                        if p.installed_at.elapsed() <= REKEY_GRACE {
+                            if let Ok(pt) = p.rx.open(seq, PacketType::Data as u8, aad, body) {
+                                recovered = Some(pt);
                             }
                         }
                     }
@@ -1621,13 +1585,9 @@ impl Inner {
                         challenge,
                         started: now,
                     });
-                    build_path_challenge_packet(
-                        self.local_peer_id,
-                        peer,
-                        &challenge,
-                    )
-                    .ok()
-                    .map(|bytes| (bytes, src))
+                    build_path_challenge_packet(self.local_peer_id, peer, &challenge)
+                        .ok()
+                        .map(|bytes| (bytes, src))
                 } else {
                     None
                 }
@@ -1640,12 +1600,20 @@ impl Inner {
         };
 
         if let Some((bytes, addr)) = probe {
-            if let Err(e) = self.ifaces.send_for(self.iface_for(&peer_id).await, &bytes, addr).await {
+            if let Err(e) = self
+                .ifaces
+                .send_for(self.iface_for(&peer_id).await, &bytes, addr)
+                .await
+            {
                 debug!(error = %e, "PathChallenge send failed (short hdr)");
             } else {
-                self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .path_probes_sent
+                    .fetch_add(1, Ordering::Relaxed);
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-                self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                self.metrics
+                    .bytes_sent
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             }
         }
 
@@ -1727,7 +1695,8 @@ impl Inner {
                 Ok(None)
             }
             PacketType::Beacon => {
-                self.handle_beacon(&header, data, body, src, iface_idx).await?;
+                self.handle_beacon(&header, data, body, src, iface_idx)
+                    .await?;
                 Ok(None)
             }
             PacketType::ResumeHello => {
@@ -1779,10 +1748,8 @@ impl Inner {
                         cookie,
                     } = &mut peer.handshake
                     {
-                        let wait = handshake_backoff_ms(
-                            self.config.handshake_retry_base_ms,
-                            *attempts,
-                        );
+                        let wait =
+                            handshake_backoff_ms(self.config.handshake_retry_base_ms, *attempts);
                         if last_sent.elapsed() < std::time::Duration::from_millis(wait) {
                             continue;
                         }
@@ -1812,15 +1779,18 @@ impl Inner {
                 if let Err(e) = self.ifaces.send_for(iface, &bytes, addr).await {
                     warn!(error = %e, "HELLO retransmit failed");
                 } else {
-                    self.metrics.handshake_retries.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .handshake_retries
+                        .fetch_add(1, Ordering::Relaxed);
                     self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    self.metrics
+                        .bytes_sent
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     debug!("retransmitted HELLO to {:?}", addr);
                 }
             }
         }
     }
-
 
     async fn handle_hello(
         &self,
@@ -1841,12 +1811,9 @@ impl Inner {
         let mut client_static_pub = [0u8; STATIC_KEY_LEN];
         client_static_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
         let mut client_ephemeral_pub = [0u8; STATIC_KEY_LEN];
-        client_ephemeral_pub
-            .copy_from_slice(&body[STATIC_KEY_LEN..STATIC_KEY_LEN * 2]);
+        client_ephemeral_pub.copy_from_slice(&body[STATIC_KEY_LEN..STATIC_KEY_LEN * 2]);
         let mut client_nonce = [0u8; NONCE_LEN];
-        client_nonce.copy_from_slice(
-            &body[STATIC_KEY_LEN * 2..STATIC_KEY_LEN * 2 + NONCE_LEN],
-        );
+        client_nonce.copy_from_slice(&body[STATIC_KEY_LEN * 2..STATIC_KEY_LEN * 2 + NONCE_LEN]);
 
         // SECURITY: reject obviously-weak pubkeys up front. An
         // all-zero pubkey (or any low-order point) would produce a
@@ -1872,7 +1839,8 @@ impl Inner {
         let has_cookie_tail = body.len() >= HELLO_WITH_COOKIE_LEN;
         if cookie_required {
             if !has_cookie_tail {
-                self.send_challenge(iface_idx,
+                self.send_challenge(
+                    iface_idx,
                     header.src_id,
                     src,
                     &client_static_pub,
@@ -1893,10 +1861,13 @@ impl Inner {
                 )
                 .await
             {
-                self.metrics.cookies_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .cookies_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 // Reply with a fresh challenge so a legitimate client
                 // whose cookie expired can recover without restarting.
-                self.send_challenge(iface_idx,
+                self.send_challenge(
+                    iface_idx,
                     header.src_id,
                     src,
                     &client_static_pub,
@@ -1906,7 +1877,9 @@ impl Inner {
                 .await?;
                 return Ok(());
             }
-            self.metrics.cookies_accepted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .cookies_accepted
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         let client_peer_id = derive_peer_id(&client_static_pub);
@@ -1928,21 +1901,18 @@ impl Inner {
                     // can't exhaust memory before the eviction
                     // reaper catches up. Explicit app-registered
                     // peers are unaffected.
-                    if peers.iter().filter(|p| p.auto_registered).count()
-                        >= self.config.max_peers
-                    {
+                    if peers.iter().filter(|p| p.auto_registered).count() >= self.config.max_peers {
                         return Err(DriftError::UnknownPeer);
                     }
-                    let mut new_peer = Peer::new(
-                        client_peer_id,
-                        src,
-                        client_static_pub,
-                        Direction::Responder,
-                    );
+                    let mut new_peer =
+                        Peer::new(client_peer_id, src, client_static_pub, Direction::Responder);
                     new_peer.auto_registered = true;
                     new_peer.interface_id = iface_idx;
                     peers.insert(new_peer);
-                    debug!("auto-registered new peer {:?} on iface {}", client_peer_id, iface_idx);
+                    debug!(
+                        "auto-registered new peer {:?} on iface {}",
+                        client_peer_id, iface_idx
+                    );
                 } else {
                     return Err(DriftError::UnknownPeer);
                 }
@@ -2001,7 +1971,7 @@ impl Inner {
                 } else {
                     // Different nonce → client restarted. Fall through to
                     // regenerate. Skip the outer block manually.
-                    let regen = regenerate_session(
+                    regenerate_session(
                         &self.identity,
                         peer,
                         client_static_pub,
@@ -2013,11 +1983,10 @@ impl Inner {
                         &self.metrics.handshakes_inflight,
                         header.hop_ttl,
                         iface_idx,
-                    )?;
-                    regen
+                    )?
                 }
             } else {
-                let regen = regenerate_session(
+                regenerate_session(
                     &self.identity,
                     peer,
                     client_static_pub,
@@ -2029,8 +1998,7 @@ impl Inner {
                     &self.metrics.handshakes_inflight,
                     header.hop_ttl,
                     iface_idx,
-                )?;
-                regen
+                )?
             }
         };
 
@@ -2069,9 +2037,13 @@ impl Inner {
         // This is critical for multi-interface nodes: if the
         // HELLO came in on TCP (iface 1), the ACK must go
         // out on TCP, not the default UDP (iface 0).
-        self.ifaces.send_via(iface_idx, &ack_bytes, ack_addr).await?;
+        self.ifaces
+            .send_via(iface_idx, &ack_bytes, ack_addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-        self.metrics.bytes_sent.fetch_add(ack_bytes.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .bytes_sent
+            .fetch_add(ack_bytes.len() as u64, Ordering::Relaxed);
         debug!("sent HELLO_ACK to {:?} via iface {}", ack_addr, iface_idx);
         Ok(())
     }
@@ -2093,7 +2065,10 @@ impl Inner {
         // Client looks up the peer by src_id = the server's identity.
         let peer_id = header.src_id;
         let to_send: Vec<(Vec<u8>, SocketAddr, usize)>;
-        let mut cid_key_for_install: Option<[u8; 32]> = None;
+        // Definite assignment verified by the compiler: the inner
+        // block either hits the early `return Ok(())` (no use) or
+        // assigns via the `Established` path before falling out.
+        let cid_key_for_install: Option<[u8; 32]>;
         let mesh_next_hop = self.routes.lock().await.lookup(&peer_id);
         {
             let mut peers = self.peers.lock_for(&peer_id).await;
@@ -2101,8 +2076,7 @@ impl Inner {
 
             // Pattern match by value via std::mem::replace to consume the
             // ephemeral secret (it's not Copy).
-            let old_state =
-                std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
+            let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
             let (client_nonce, ephemeral, hello_sent_at) = match old_state {
                 HandshakeState::AwaitingAck {
                     client_nonce,
@@ -2140,12 +2114,8 @@ impl Inner {
                 .dh(&server_ephemeral_pub)
                 .ok_or(DriftError::AuthFailed)?;
             drop(ephemeral); // zeroize client ephemeral secret
-            let session_key_bytes = derive_session_key(
-                &static_dh,
-                &ephemeral_dh,
-                &client_nonce,
-                &server_nonce,
-            );
+            let session_key_bytes =
+                derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce);
 
             let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
             let rx = SessionKey::new(&session_key_bytes, Direction::Responder);
@@ -2172,7 +2142,9 @@ impl Inner {
             if mesh_next_hop.is_some() {
                 peer.via_mesh = true;
             }
-            self.metrics.handshakes_completed.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .handshakes_completed
+                .fetch_add(1, Ordering::Relaxed);
             debug!("handshake complete with peer {:?}", peer_id);
             if let Some(q) = &self.qlog {
                 q.log_handshake_complete(&format!("{:?}", peer_id), false);
@@ -2206,7 +2178,9 @@ impl Inner {
         for (bytes, target, iface) in to_send {
             self.ifaces.send_for(iface, &bytes, target).await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-            self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            self.metrics
+                .bytes_sent
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -2228,8 +2202,7 @@ impl Inner {
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            let cutoff =
-                std::time::Duration::from_secs(self.config.awaiting_data_timeout_secs);
+            let cutoff = std::time::Duration::from_secs(self.config.awaiting_data_timeout_secs);
             let now = Instant::now();
             let mut evicted: u64 = 0;
             let mut to_remove: Vec<PeerId> = Vec::new();
@@ -2299,6 +2272,7 @@ impl Inner {
         // transitions to Established on the first inbound
         // DATA) into a local variable and emit them AFTER we
         // drop the lock.
+        #[allow(clippy::type_complexity)]
         let (received, probe_to_send, just_established_after, flushed_pending, established_key): (
             Option<Received>,
             Option<(Vec<u8>, SocketAddr)>,
@@ -2309,10 +2283,7 @@ impl Inner {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
 
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
@@ -2330,12 +2301,9 @@ impl Inner {
                     if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
                         if let Some(p) = prev {
                             if p.installed_at.elapsed() <= REKEY_GRACE {
-                                if let Ok(pt) = p.rx.open(
-                                    header.seq,
-                                    PacketType::Data as u8,
-                                    &aad,
-                                    body,
-                                ) {
+                                if let Ok(pt) =
+                                    p.rx.open(header.seq, PacketType::Data as u8, &aad, body)
+                                {
                                     recovered = Some(pt);
                                 }
                             } else {
@@ -2354,7 +2322,9 @@ impl Inner {
             peer.check_and_update_replay(header.seq)?;
 
             if !peer.deadline_ok(header, received_at) {
-                self.metrics.deadline_dropped.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .deadline_dropped
+                    .fetch_add(1, Ordering::Relaxed);
                 debug!(
                     seq = header.seq,
                     deadline_ms = header.deadline_ms,
@@ -2364,12 +2334,10 @@ impl Inner {
             }
 
             if !peer.coalesce_accept(header) {
-                self.metrics.coalesce_dropped.fetch_add(1, Ordering::Relaxed);
-                debug!(
-                    seq = header.seq,
-                    group = header.supersedes,
-                    "dropped stale"
-                );
+                self.metrics
+                    .coalesce_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!(seq = header.seq, group = header.supersedes, "dropped stale");
                 return Ok(None);
             }
 
@@ -2378,10 +2346,7 @@ impl Inner {
             let mut flushed: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::new();
             if matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
                 if let HandshakeState::AwaitingData {
-                    tx,
-                    rx,
-                    key_bytes,
-                    ..
+                    tx, rx, key_bytes, ..
                 } = std::mem::replace(&mut peer.handshake, HandshakeState::Pending)
                 {
                     peer.handshake = HandshakeState::Established {
@@ -2390,7 +2355,9 @@ impl Inner {
                         key_bytes,
                         prev: None,
                     };
-                    self.metrics.handshakes_completed.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .handshakes_completed
+                        .fetch_add(1, Ordering::Relaxed);
                     self.metrics
                         .handshakes_inflight
                         .fetch_sub(1, Ordering::Relaxed);
@@ -2417,11 +2384,7 @@ impl Inner {
                     // side. Mirrors the initiator-side flush
                     // in `handle_hello_ack`.
                     let pending = std::mem::take(&mut peer.pending);
-                    let flush_mesh = if peer.via_mesh {
-                        Some(peer.addr)
-                    } else {
-                        None
-                    };
+                    let flush_mesh = if peer.via_mesh { Some(peer.addr) } else { None };
                     for ps in pending {
                         if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
                             self.local_peer_id,
@@ -2462,13 +2425,9 @@ impl Inner {
                         challenge,
                         started: now,
                     });
-                    build_path_challenge_packet(
-                        self.local_peer_id,
-                        peer,
-                        &challenge,
-                    )
-                    .ok()
-                    .map(|bytes| (bytes, src))
+                    build_path_challenge_packet(self.local_peer_id, peer, &challenge)
+                        .ok()
+                        .map(|bytes| (bytes, src))
                 } else {
                     None
                 }
@@ -2523,12 +2482,20 @@ impl Inner {
         }
 
         if let Some((bytes, addr)) = probe_to_send {
-            if let Err(e) = self.ifaces.send_for(self.iface_for(&peer_id).await, &bytes, addr).await {
+            if let Err(e) = self
+                .ifaces
+                .send_for(self.iface_for(&peer_id).await, &bytes, addr)
+                .await
+            {
                 debug!(error = %e, "PathChallenge send failed");
             } else {
-                self.metrics.path_probes_sent.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .path_probes_sent
+                    .fetch_add(1, Ordering::Relaxed);
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-                self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                self.metrics
+                    .bytes_sent
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             }
         }
 
@@ -2540,22 +2507,14 @@ impl Inner {
     /// (auto-registered) or reset its handshake state (explicitly
     /// registered). Decrements `handshakes_inflight` if the peer
     /// was in AwaitingData when the close arrived.
-    async fn handle_close(
-        &self,
-        header: &Header,
-        full_packet: &[u8],
-        body: &[u8],
-    ) -> Result<()> {
+    async fn handle_close(&self, header: &Header, full_packet: &[u8], body: &[u8]) -> Result<()> {
         if header.dst_id != self.local_peer_id {
             return Err(DriftError::UnknownPeer);
         }
         let peer_id = header.src_id;
         let mut peers = self.peers.lock_for(&peer_id).await;
         let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-        let (_, rx) = peer
-            .handshake
-            .session()
-            .ok_or(DriftError::UnknownPeer)?;
+        let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
         let mut hbuf = [0u8; HEADER_LEN];
         hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
@@ -2564,8 +2523,7 @@ impl Inner {
         // the session key, so this is safe to act on immediately.
         let _ = rx.open(header.seq, PacketType::Close as u8, &aad, body)?;
 
-        let was_awaiting_data =
-            matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+        let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
         if peer.auto_registered {
             debug!(peer_id = ?peer_id, "peer closed; removing auto-registered entry");
             peers.remove(&peer_id);
@@ -2583,7 +2541,6 @@ impl Inner {
         }
         Ok(())
     }
-
 }
 
 /// Build a `Close` wire packet: AEAD-sealed empty body, consuming
@@ -2652,8 +2609,8 @@ fn build_data_packet_with_cid(
 
     // Long header: full 36 bytes, all features available.
     let send_time_ms = peer.send_time_ms();
-    let mut header = Header::new(PacketType::Data, seq, local_peer_id, peer.id)
-        .with_deadline(deadline_ms);
+    let mut header =
+        Header::new(PacketType::Data, seq, local_peer_id, peer.id).with_deadline(deadline_ms);
     if coalesce_group != 0 {
         header = header.with_supersedes(coalesce_group);
     }
@@ -2688,6 +2645,7 @@ fn build_data_packet_with_cid(
 /// was NOT already `AwaitingData`. This keeps
 /// `handshakes_inflight` an accurate gauge across fresh starts
 /// and dual-init regenerations without ever double-counting.
+#[allow(clippy::too_many_arguments)]
 fn regenerate_session(
     identity: &Identity,
     peer: &mut Peer,
@@ -2701,8 +2659,7 @@ fn regenerate_session(
     incoming_hop_ttl: u8,
     iface_idx: usize,
 ) -> Result<(Vec<u8>, SocketAddr)> {
-    let was_awaiting_data =
-        matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+    let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
     let server_nonce = random_nonce();
     let server_ephemeral = Identity::generate();
     let server_ephemeral_pub = server_ephemeral.public_bytes();
@@ -2751,9 +2708,8 @@ fn regenerate_session(
         peer.via_mesh = true;
     }
 
-    let mut ack_header =
-        Header::new(PacketType::HelloAck, 1, local_peer_id, client_peer_id)
-            .with_hop_ttl(DEFAULT_MESH_TTL);
+    let mut ack_header = Header::new(PacketType::HelloAck, 1, local_peer_id, client_peer_id)
+        .with_hop_ttl(DEFAULT_MESH_TTL);
     ack_header.payload_len = HELLO_ACK_PAYLOAD_LEN as u16;
     let mut hbuf = [0u8; HEADER_LEN];
     ack_header.encode(&mut hbuf);

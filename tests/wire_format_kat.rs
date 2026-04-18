@@ -14,15 +14,10 @@ use drift::identity::{derive_session_key, Identity};
 /// specified DATA packet with every optional field set.
 #[test]
 fn header_kat_data_packet() {
-    let mut h = Header::new(
-        PacketType::Data,
-        0x12345678,
-        [0x11; 8],
-        [0x22; 8],
-    )
-    .with_deadline(500)
-    .with_supersedes(0xABCDEF01)
-    .with_hop_ttl(5);
+    let mut h = Header::new(PacketType::Data, 0x12345678, [0x11; 8], [0x22; 8])
+        .with_deadline(500)
+        .with_supersedes(0xABCDEF01)
+        .with_hop_ttl(5);
     h.send_time_ms = 0xDEADBEEF;
     h.payload_len = 42;
 
@@ -116,8 +111,8 @@ fn aead_kat_fixed_inputs() {
     // Nonce = [0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 1]
     let aad: [u8; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7];
     let plaintext: [u8; 16] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
-        0x0E, 0x0F,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F,
     ];
 
     let ct = k.seal(1, PacketType::Data as u8, &aad, &plaintext).unwrap();
@@ -129,8 +124,8 @@ fn aead_kat_fixed_inputs() {
     // tuple. Any change means either the cipher crate regressed or the
     // nonce construction function was modified.
     let expected_ct: [u8; 32] = [
-        205, 144, 41, 62, 45, 235, 34, 200, 196, 142, 210, 164, 47, 203, 74, 120, 221, 78,
-        203, 47, 33, 51, 207, 7, 212, 87, 164, 123, 40, 126, 30, 12,
+        205, 144, 41, 62, 45, 235, 34, 200, 196, 142, 210, 164, 47, 203, 74, 120, 221, 78, 203, 47,
+        33, 51, 207, 7, 212, 87, 164, 123, 40, 126, 30, 12,
     ];
     assert_eq!(
         ct.as_slice(),
