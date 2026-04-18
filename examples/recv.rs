@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let transport = Transport::bind("0.0.0.0:9000".parse()?, server_identity).await?;
     println!("receiver bound to {}", transport.local_addr()?);
+    println!("server peer_id: {}", hex(&transport.local_peer_id()));
     println!("server pubkey: {}", hex(&transport.local_public()));
 
     // Responder: we wait for the client's HELLO rather than initiate.
