@@ -286,10 +286,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> W
     /// for server-accepted connections, use the client's TCP
     /// peer address; for client connections, use the server's
     /// address.
-    pub fn new(
-        ws: tokio_tungstenite::WebSocketStream<S>,
-        addr: SocketAddr,
-    ) -> Self {
+    pub fn new(ws: tokio_tungstenite::WebSocketStream<S>, addr: SocketAddr) -> Self {
         use futures_util::StreamExt;
         let (writer, reader) = ws.split();
         Self {
@@ -301,17 +298,14 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> W
 }
 
 #[async_trait]
-impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>
-    PacketIO for WsPacketIO<S>
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static> PacketIO
+    for WsPacketIO<S>
 {
     async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
         use futures_util::SinkExt;
-        let msg = tokio_tungstenite::tungstenite::Message::Binary(buf.to_vec().into());
+        let msg = tokio_tungstenite::tungstenite::Message::Binary(buf.to_vec());
         let mut writer = self.writer.lock().await;
-        writer
-            .send(msg)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        writer.send(msg).await.map_err(io::Error::other)?;
         Ok(buf.len())
     }
 
@@ -327,7 +321,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'st
                 }
                 Some(Ok(_)) => continue, // skip text, ping, pong, close frames
                 Some(Err(e)) => {
-                    return Err(io::Error::new(io::ErrorKind::Other, e));
+                    return Err(io::Error::other(e));
                 }
                 None => {
                     return Err(io::Error::new(
@@ -372,10 +366,7 @@ impl WebRTCPacketIO {
     /// placeholder for the `PacketIO` trait's SocketAddr
     /// requirement — WebRTC connections aren't addressed by
     /// ip:port at the peer level.
-    pub fn new(
-        dc: std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
-        addr: SocketAddr,
-    ) -> Self {
+    pub fn new(dc: std::sync::Arc<webrtc::data_channel::RTCDataChannel>, addr: SocketAddr) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
         let tx_arc = std::sync::Arc::new(tx);
         let tx_hook = tx_arc.clone();
@@ -408,18 +399,13 @@ impl PacketIO for WebRTCPacketIO {
         self.dc
             .send(&bytes)
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(buf.len())
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let data = self
-            .rx
-            .lock()
-            .await
-            .recv()
-            .await
-            .ok_or_else(|| {
+        let data =
+            self.rx.lock().await.recv().await.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::ConnectionReset, "data channel closed")
             })?;
         let n = data.len().min(buf.len());
@@ -473,6 +459,11 @@ impl InterfaceSet {
         self.interfaces.read().unwrap().len()
     }
 
+    /// True when no interfaces have been registered.
+    pub fn is_empty(&self) -> bool {
+        self.interfaces.read().unwrap().is_empty()
+    }
+
     /// Send a packet via a specific interface by index.
     /// Clones the Arc under the read lock, releases the
     /// lock, then awaits the send — the lock is never
@@ -488,21 +479,16 @@ impl InterfaceSet {
             ifaces
                 .get(interface_id)
                 .map(|(_, io)| io.clone())
-                .ok_or_else(|| io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "interface index out of range",
-                ))?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "interface index out of range")
+                })?
         };
         io.send_to(buf, dest).await
     }
 
     /// Send via interface 0 (default). Convenience for code
     /// paths that don't (yet) track per-peer interfaces.
-    pub async fn send_default(
-        &self,
-        buf: &[u8],
-        dest: SocketAddr,
-    ) -> io::Result<usize> {
+    pub async fn send_default(&self, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
         self.send_via(0, buf, dest).await
     }
 
@@ -533,21 +519,14 @@ impl InterfaceSet {
     /// interface 0 if the index is out of range. This is
     /// the safe version that doesn't error on bad indices
     /// — it just degrades to the default path.
-    pub async fn send_for(
-        &self,
-        iface: usize,
-        buf: &[u8],
-        dest: SocketAddr,
-    ) -> io::Result<usize> {
+    pub async fn send_for(&self, iface: usize, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
         let io = {
             let ifaces = self.interfaces.read().unwrap();
             ifaces
                 .get(iface)
                 .or_else(|| ifaces.first())
                 .map(|(_, io)| io.clone())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "no interfaces")
-                })?
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
         };
         io.send_to(buf, dest).await
     }
@@ -570,14 +549,8 @@ mod tests {
         let server_io = TcpPacketIO::new(server_stream).unwrap();
 
         // Send a few packets from client to server.
-        client_io
-            .send_to(b"hello-drift", addr)
-            .await
-            .unwrap();
-        client_io
-            .send_to(b"second-packet", addr)
-            .await
-            .unwrap();
+        client_io.send_to(b"hello-drift", addr).await.unwrap();
+        client_io.send_to(b"second-packet", addr).await.unwrap();
 
         // Receive on the server side.
         let mut buf = vec![0u8; 1400];

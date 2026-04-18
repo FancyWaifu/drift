@@ -55,11 +55,17 @@ async fn out_of_order_flood_cannot_exhaust_victim_memory() {
 
     // Pre-register each side so the handshake completes.
     victim_transport
-        .add_peer(attacker_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            attacker_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let victim_peer = attacker_transport
         .add_peer(victim_pub, victim_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Wrap victim with a StreamManager so it will accept() the stream.
     let victim_mgr = StreamManager::bind(victim_transport.clone()).await;
@@ -68,10 +74,7 @@ async fn out_of_order_flood_cannot_exhaust_victim_memory() {
 
     // Open a stream attacker → victim. This drives the DRIFT
     // handshake and hands the victim a real StreamState to target.
-    let stream = attacker_mgr
-        .open(victim_peer)
-        .await
-        .expect("open stream");
+    let stream = attacker_mgr.open(victim_peer).await.expect("open stream");
     let stream_id = {
         // Force the victim to actually accept the stream, which
         // allocates the recv_buf we're about to attack.

@@ -66,10 +66,8 @@ async fn duplicate_hello_from_new_addr_cannot_hijack_peer_addr() {
     let alice_addr = alice_sock.local_addr().unwrap();
 
     // Alice's identity — we hand-build her HELLO.
-    let alice_static =
-        Identity::from_secret_bytes([0x71; 32]).public_bytes();
-    let alice_ephemeral =
-        Identity::from_secret_bytes([0x72; 32]).public_bytes();
+    let alice_static = Identity::from_secret_bytes([0x71; 32]).public_bytes();
+    let alice_ephemeral = Identity::from_secret_bytes([0x72; 32]).public_bytes();
     let nonce = [0x99u8; 16];
 
     let hello = build_hello(alice_static, alice_ephemeral, nonce, bob_pub);
@@ -80,13 +78,10 @@ async fn duplicate_hello_from_new_addr_cannot_hijack_peer_addr() {
     // socket so it doesn't pollute later recv calls.
     alice_sock.send_to(&hello, bob_addr).await.unwrap();
     let mut buf = [0u8; 1500];
-    let (n, from) = tokio::time::timeout(
-        Duration::from_secs(2),
-        alice_sock.recv_from(&mut buf),
-    )
-    .await
-    .expect("Bob never sent HELLO_ACK to Alice")
-    .unwrap();
+    let (n, from) = tokio::time::timeout(Duration::from_secs(2), alice_sock.recv_from(&mut buf))
+        .await
+        .expect("Bob never sent HELLO_ACK to Alice")
+        .unwrap();
     assert_eq!(from, bob_addr, "first ACK must come from Bob");
     assert!(n >= HEADER_LEN);
 
@@ -100,11 +95,8 @@ async fn duplicate_hello_from_new_addr_cannot_hijack_peer_addr() {
     // Step 3: the cached ACK must go back to Alice, NOT to
     // Mallory. Alice's socket should receive it; Mallory's should
     // NOT.
-    let alice_got = tokio::time::timeout(
-        Duration::from_millis(500),
-        alice_sock.recv_from(&mut buf),
-    )
-    .await;
+    let alice_got =
+        tokio::time::timeout(Duration::from_millis(500), alice_sock.recv_from(&mut buf)).await;
     assert!(
         alice_got.is_ok(),
         "Alice's socket must receive the cached-ACK replay"

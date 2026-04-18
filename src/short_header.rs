@@ -53,10 +53,10 @@
 //! — still uses the long header. The send path checks these
 //! conditions and falls back to long header automatically.
 
-use blake2::{digest::consts::U32, Blake2b, Digest};
 use crate::crypto::SessionKey;
 use crate::error::{DriftError, Result};
 use crate::header::AUTH_TAG_LEN;
+use blake2::{digest::consts::U32, Blake2b, Digest};
 
 /// Short-header length: version+flags (1) + CID (2) + seq (4).
 pub const SHORT_HEADER_LEN: usize = 7;
@@ -88,12 +88,7 @@ fn derive_cid(session_key: &[u8; 32], tag: &[u8]) -> u16 {
 
 /// Encode a short-header DATA packet. Returns the full wire
 /// bytes (header + sealed ciphertext + tag).
-pub fn encode_short(
-    cid: u16,
-    seq: u32,
-    tx: &SessionKey,
-    payload: &[u8],
-) -> Result<Vec<u8>> {
+pub fn encode_short(cid: u16, seq: u32, tx: &SessionKey, payload: &[u8]) -> Result<Vec<u8>> {
     // Build the 7-byte header as a stack array so we have
     // a stable AAD reference while extending `wire`.
     let mut hdr = [0u8; SHORT_HEADER_LEN];
@@ -136,10 +131,7 @@ pub fn decode_short(data: &[u8]) -> Result<(u16, u32, &[u8])> {
 
 /// Full decryption of a short-header packet given the
 /// session's rx key. Returns the plaintext payload.
-pub fn open_short(
-    data: &[u8],
-    rx: &SessionKey,
-) -> Result<(u16, u32, Vec<u8>)> {
+pub fn open_short(data: &[u8], rx: &SessionKey) -> Result<(u16, u32, Vec<u8>)> {
     let (cid, seq, body) = decode_short(data)?;
     let aad = &data[..SHORT_HEADER_LEN];
     let plaintext = rx.open(seq, 3, aad, body)?;

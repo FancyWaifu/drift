@@ -90,13 +90,14 @@ impl Inner {
                 header.encode(&mut hbuf);
                 let aad = canonical_aad(&hbuf);
                 let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
-                let mut wire =
-                    Vec::with_capacity(HEADER_LEN + PING_NONCE_LEN + AUTH_TAG_LEN);
+                let mut wire = Vec::with_capacity(HEADER_LEN + PING_NONCE_LEN + AUTH_TAG_LEN);
                 wire.extend_from_slice(&hbuf);
                 tx.seal_into(seq, PacketType::Ping as u8, &aad, &nonce, &mut wire)?;
                 wire
             };
-            self.ifaces.send_for(self.iface_for(&dst_id).await, &wire, addr).await?;
+            self.ifaces
+                .send_for(self.iface_for(&dst_id).await, &wire, addr)
+                .await?;
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_sent
@@ -145,17 +146,13 @@ impl Inner {
         let pong_wire = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
             // Decrypt the Ping body to retrieve the nonce.
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
-            let nonce_vec =
-                rx.open(header.seq, PacketType::Ping as u8, &aad, body)?;
+            let nonce_vec = rx.open(header.seq, PacketType::Ping as u8, &aad, body)?;
             if nonce_vec.len() != PING_NONCE_LEN {
                 return Err(DriftError::PacketTooShort {
                     got: nonce_vec.len(),
@@ -175,14 +172,15 @@ impl Inner {
             pong_header.encode(&mut pong_hbuf);
             let pong_aad = canonical_aad(&pong_hbuf);
             let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
-            let mut wire =
-                Vec::with_capacity(HEADER_LEN + PING_NONCE_LEN + AUTH_TAG_LEN);
+            let mut wire = Vec::with_capacity(HEADER_LEN + PING_NONCE_LEN + AUTH_TAG_LEN);
             wire.extend_from_slice(&pong_hbuf);
             tx.seal_into(seq, PacketType::Pong as u8, &pong_aad, &nonce, &mut wire)?;
             wire
         };
 
-        self.ifaces.send_for(self.iface_for(&peer_id).await, &pong_wire, src).await?;
+        self.ifaces
+            .send_for(self.iface_for(&peer_id).await, &pong_wire, src)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -210,10 +208,7 @@ impl Inner {
 
         let mut peers = self.peers.lock_for(&peer_id).await;
         let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-        let (_, rx) = peer
-            .handshake
-            .session()
-            .ok_or(DriftError::UnknownPeer)?;
+        let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
         let mut hbuf = [0u8; HEADER_LEN];
         hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);

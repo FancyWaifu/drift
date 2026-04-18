@@ -26,16 +26,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = Transport::bind("0.0.0.0:0".parse()?, client).await?;
     let peer = transport
         .add_peer(server_pub, addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     println!("big-send: addr={} size={}", addr, size);
 
     let payload = vec![0xABu8; size];
     for i in 0..30u32 {
-        transport
-            .send_data(&peer, &payload, 0, 0)
-            .await
-            .unwrap();
+        transport.send_data(&peer, &payload, 0, 0).await.unwrap();
         println!("sent #{}, {} bytes", i + 1, size);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

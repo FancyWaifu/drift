@@ -53,8 +53,7 @@ pub const MAX_ROUTES: usize = 4096;
 /// HYSTERESIS_DENOMINATOR`). Prevents rapid flapping when a
 /// neighbor's RTT estimate oscillates around the hold-down
 /// boundary.
-pub(crate) const ROUTE_HOLDDOWN: std::time::Duration =
-    std::time::Duration::from_secs(2);
+pub(crate) const ROUTE_HOLDDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Hysteresis threshold: a competing advertised cost must be
 /// at most this fraction of the current cost to supplant it
@@ -67,8 +66,7 @@ pub(crate) const HYSTERESIS_DENOMINATOR: u64 = 100;
 /// this long is presumed dead and purged on the next sweep.
 /// Must be > 2 × beacon interval so a single dropped BEACON
 /// doesn't wipe otherwise-live routes.
-pub(crate) const ROUTE_STALENESS: std::time::Duration =
-    std::time::Duration::from_secs(15);
+pub(crate) const ROUTE_STALENESS: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Cost sentinel used to represent an unknown / not-yet-
 /// measured RTT. Any advertised cost at or above this value
@@ -99,16 +97,9 @@ pub struct RouteEntry {
 
 /// Mesh routing table: destination peer id → (next-hop address, metric).
 /// Updated statically via `add_route` and dynamically via BEACON packets.
+#[derive(Default)]
 pub struct RoutingTable {
     routes: HashMap<PeerId, RouteEntry>,
-}
-
-impl Default for RoutingTable {
-    fn default() -> Self {
-        Self {
-            routes: HashMap::new(),
-        }
-    }
 }
 
 impl RoutingTable {
@@ -142,7 +133,7 @@ impl RoutingTable {
     ///
     /// For peer migration — where the same peer announces itself
     /// from a new address at equal cost — use
-    /// [`force_migration`]. The plain cost comparison here
+    /// [`Self::force_migration`]. The plain cost comparison here
     /// can't distinguish "peer moved to a new addr" from
     /// "an inferior alternate route just got advertised," so
     /// self-advertisements are routed through a separate path.
@@ -173,8 +164,8 @@ impl RoutingTable {
                 // Hysteresis: during hold-down only a
                 // SIGNIFICANTLY better cost can preempt.
                 let beats_hysteresis = {
-                    let threshold = (existing.cost_us as u64 * HYSTERESIS_NUMERATOR)
-                        / HYSTERESIS_DENOMINATOR;
+                    let threshold =
+                        (existing.cost_us as u64 * HYSTERESIS_NUMERATOR) / HYSTERESIS_DENOMINATOR;
                     (cost_us as u64) <= threshold
                 };
                 if !beats_hold_down && !beats_hysteresis {
@@ -237,9 +228,7 @@ impl RoutingTable {
             return false;
         }
         match self.routes.get(&dst) {
-            Some(existing)
-                if existing.next_hop == next_hop && existing.interface_id == iface =>
-            {
+            Some(existing) if existing.next_hop == next_hop && existing.interface_id == iface => {
                 // Same path, no migration — fall through to
                 // normal cost logic to preserve anti-flap.
                 return self.update_if_better(dst, next_hop, metric, cost_us, iface);
@@ -307,9 +296,8 @@ impl RoutingTable {
     pub(crate) fn sweep_stale(&mut self) -> usize {
         let now = std::time::Instant::now();
         let before = self.routes.len();
-        self.routes.retain(|_, entry| {
-            now.saturating_duration_since(entry.updated_at) < ROUTE_STALENESS
-        });
+        self.routes
+            .retain(|_, entry| now.saturating_duration_since(entry.updated_at) < ROUTE_STALENESS);
         before - self.routes.len()
     }
 
@@ -366,7 +354,7 @@ impl Inner {
                 if matches!(peer.handshake, HandshakeState::Established { .. })
                     && !existing.contains(&peer.id)
                 {
-                    entries.push((peer.id, 1, peer.neighbor_rtt_us() as u32));
+                    entries.push((peer.id, 1, peer.neighbor_rtt_us()));
                 }
             }
         }
@@ -401,9 +389,7 @@ impl Inner {
             peers
                 .iter_mut()
                 .filter_map(|p| {
-                    if matches!(p.handshake, HandshakeState::Established { .. })
-                        && !p.via_mesh
-                    {
+                    if matches!(p.handshake, HandshakeState::Established { .. }) && !p.via_mesh {
                         p.next_seq_checked().map(|seq| (p.id, p.addr, seq))
                     } else {
                         None
@@ -431,10 +417,14 @@ impl Inner {
                 wire.extend_from_slice(&sealed);
                 wire
             };
-            self.ifaces.send_for(self.iface_for(&dst_id).await, &bytes, addr).await?;
+            self.ifaces
+                .send_for(self.iface_for(&dst_id).await, &bytes, addr)
+                .await?;
             self.metrics.beacons_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-            self.metrics.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            self.metrics
+                .bytes_sent
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             debug!(dst = ?dst_id, n = payload.len(), "sent BEACON");
         }
         Ok(())
@@ -455,10 +445,7 @@ impl Inner {
         let plaintext = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);

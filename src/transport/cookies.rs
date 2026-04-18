@@ -137,10 +137,7 @@ impl Inner {
         if self.config.cookie_threshold == u32::MAX {
             return false;
         }
-        let inflight = self
-            .metrics
-            .handshakes_inflight
-            .load(Ordering::Relaxed);
+        let inflight = self.metrics.handshakes_inflight.load(Ordering::Relaxed);
         inflight >= self.config.cookie_threshold as usize
     }
 
@@ -170,8 +167,7 @@ impl Inner {
             cookie_mac(&cookies.current, &input)
         };
 
-        let mut header =
-            Header::new(PacketType::Challenge, 0, self.local_peer_id, client_peer_id);
+        let mut header = Header::new(PacketType::Challenge, 0, self.local_peer_id, client_peer_id);
         header.payload_len = COOKIE_BLOB_LEN as u16;
         let mut hbuf = [0u8; HEADER_LEN];
         header.encode(&mut hbuf);
@@ -182,7 +178,9 @@ impl Inner {
         wire.extend_from_slice(&mac);
 
         self.ifaces.send_for(iface_idx, &wire, src).await?;
-        self.metrics.challenges_issued.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .challenges_issued
+            .fetch_add(1, Ordering::Relaxed);
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -242,11 +240,7 @@ impl Inner {
     /// retransmit HELLO with the cookie appended — same
     /// client_nonce and ephemeral key, so the server recognizes
     /// this as a retry of the same handshake.
-    pub(crate) async fn handle_challenge(
-        &self,
-        header: &Header,
-        body: &[u8],
-    ) -> Result<()> {
+    pub(crate) async fn handle_challenge(&self, header: &Header, body: &[u8]) -> Result<()> {
         if body.len() < COOKIE_BLOB_LEN {
             return Err(DriftError::PacketTooShort {
                 got: body.len(),

@@ -29,8 +29,7 @@ const CLIENT_SECRET: [u8; 32] = [0x52; 32];
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -91,9 +90,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     // depends_on only guarantees start order, not readiness.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let t = Arc::new(
-        Transport::bind("0.0.0.0:0".parse()?, client_id).await?,
-    );
+    let t = Arc::new(Transport::bind("0.0.0.0:0".parse()?, client_id).await?);
     let server_peer = t
         .add_peer(server_pub, server_addr, Direction::Initiator)
         .await?;
@@ -154,6 +151,9 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[client] FAIL replays_caught={}", m.replays_caught);
         std::process::exit(5);
     }
-    println!("[client] OK — 1 full handshake + {} 1-RTT resumptions", cycles - 1);
+    println!(
+        "[client] OK — 1 full handshake + {} 1-RTT resumptions",
+        cycles - 1
+    );
     Ok(())
 }

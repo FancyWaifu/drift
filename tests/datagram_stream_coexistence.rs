@@ -28,7 +28,11 @@ async fn heavy_datagrams_do_not_starve_stream() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -109,11 +113,8 @@ async fn heavy_datagrams_do_not_starve_stream() {
     let datagram_drainer = tokio::spawn(async move {
         let mut seen = 0usize;
         while seen < DATAGRAM_COUNT {
-            match tokio::time::timeout(
-                Duration::from_secs(10),
-                bob_mgr_drainer.recv_datagram(),
-            )
-            .await
+            match tokio::time::timeout(Duration::from_secs(10), bob_mgr_drainer.recv_datagram())
+                .await
             {
                 Ok(Some(_)) => seen += 1,
                 _ => break,
@@ -134,11 +135,10 @@ async fn heavy_datagrams_do_not_starve_stream() {
         .await
         .expect("stream drain timed out")
         .unwrap();
-    let datagram_count =
-        tokio::time::timeout(Duration::from_secs(10), datagram_drainer)
-            .await
-            .expect("datagram drain timed out")
-            .unwrap();
+    let datagram_count = tokio::time::timeout(Duration::from_secs(10), datagram_drainer)
+        .await
+        .expect("datagram drain timed out")
+        .unwrap();
 
     // Stream must be byte-for-byte intact.
     assert_eq!(

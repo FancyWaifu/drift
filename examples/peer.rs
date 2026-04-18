@@ -137,8 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[{}] listening on {}", name, transport.local_addr()?);
 
     // Local phonebook — start with just ourselves.
-    let phonebook: Arc<Mutex<HashMap<[u8; 32], PeerEntry>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let phonebook: Arc<Mutex<HashMap<[u8; 32], PeerEntry>>> = Arc::new(Mutex::new(HashMap::new()));
     {
         let mut pb = phonebook.lock().await;
         pb.insert(
@@ -181,15 +180,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     DirMessage::Lookup => {
-                        let entries: Vec<_> =
-                            pb_bg.lock().await.values().cloned().collect();
+                        let entries: Vec<_> = pb_bg.lock().await.values().cloned().collect();
                         let count = entries.len();
                         let reply = DirMessage::Listing(entries).encode();
                         match transport_bg.send_data(&pkt.peer_id, &reply, 0, 0).await {
-                            Ok(_) => println!(
-                                "[{}] served LOOKUP → returned {} entries",
-                                name_bg, count
-                            ),
+                            Ok(_) => {
+                                println!("[{}] served LOOKUP → returned {} entries", name_bg, count)
+                            }
                             Err(e) => {
                                 eprintln!("[{}] LOOKUP reply failed: {}", name_bg, e)
                             }
@@ -231,7 +228,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let seed_pubkey = identity_from_name(seed_name).public_bytes();
             let peer_id = transport
                 .add_peer(seed_pubkey, *seed_addr, Direction::Initiator)
-                .await.unwrap();
+                .await
+                .unwrap();
             seed_peer_ids.push(peer_id);
             phonebook.lock().await.insert(
                 seed_pubkey,
@@ -306,7 +304,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let peer_id = transport
                 .add_peer(entry.pubkey, addr, Direction::Initiator)
-                .await.unwrap();
+                .await
+                .unwrap();
             let msg = format!("hello {} from {}", entry.nickname, name);
             match transport.send_data(&peer_id, msg.as_bytes(), 0, 0).await {
                 Ok(_) => {

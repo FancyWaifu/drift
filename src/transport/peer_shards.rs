@@ -118,9 +118,7 @@ impl<'a> AllPeersGuard<'a> {
         self.guards.iter().flat_map(|g| g.iter())
     }
 
-    pub(crate) fn iter_mut(
-        &mut self,
-    ) -> impl Iterator<Item = &mut Peer> + use<'_, 'a> {
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Peer> + use<'_, 'a> {
         self.guards.iter_mut().flat_map(|g| g.iter_mut())
     }
 }

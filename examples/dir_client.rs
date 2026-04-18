@@ -42,10 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args: Vec<String> = env::args().collect();
-    let nickname = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "anon".to_string());
+    let nickname = args.get(1).cloned().unwrap_or_else(|| "anon".to_string());
     let listen: SocketAddr = args
         .get(2)
         .map(|s| s.as_str())
@@ -79,7 +76,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay_pubkey = Identity::from_secret_bytes([0xAA; 32]).public_bytes();
     let relay_peer = transport
         .add_peer(relay_pubkey, relay_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Wait briefly so all clients can start before the registration
     // storm, then register ourselves.
@@ -113,9 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(500), transport.recv()).await {
                 Ok(Some(pkt)) => {
-                    if let Some(DirMessage::Listing(entries)) =
-                        DirMessage::decode(&pkt.payload)
-                    {
+                    if let Some(DirMessage::Listing(entries)) = DirMessage::decode(&pkt.payload) {
                         result = Some(entries);
                         break;
                     }
@@ -137,12 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listing.len()
     );
     for e in &listing {
-        println!(
-            "  - {} @ {} ({})",
-            e.nickname,
-            e.addr,
-            hex(&e.pubkey[..8])
-        );
+        println!("  - {} @ {} ({})", e.nickname, e.addr, hex(&e.pubkey[..8]));
     }
 
     // Establish direct sessions with each non-self peer in the listing
@@ -158,7 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let peer = transport
             .add_peer(entry.pubkey, addr, Direction::Initiator)
-            .await.unwrap();
+            .await
+            .unwrap();
         direct_peer_ids.push((entry.nickname.clone(), peer));
     }
 

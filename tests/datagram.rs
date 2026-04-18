@@ -21,7 +21,11 @@ async fn datagrams_round_trip_alongside_streams() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -49,10 +53,7 @@ async fn datagrams_round_trip_alongside_streams() {
     // Send a few datagrams in rapid succession. Each is
     // self-contained — no setup, no acks, no ordering guarantee.
     for i in 0..5u8 {
-        alice_mgr
-            .send_datagram(bob_peer, &[0xDA, i])
-            .await
-            .unwrap();
+        alice_mgr.send_datagram(bob_peer, &[0xDA, i]).await.unwrap();
     }
 
     // Drain on Bob's side. We expect 5 datagrams to land on
@@ -60,13 +61,10 @@ async fn datagrams_round_trip_alongside_streams() {
     // API. Collect by counting the first byte.
     let mut seen: Vec<u8> = Vec::new();
     for _ in 0..5 {
-        let (peer, body) = tokio::time::timeout(
-            Duration::from_secs(2),
-            bob_mgr.recv_datagram(),
-        )
-        .await
-        .expect("datagram recv timeout")
-        .expect("datagram channel closed");
+        let (peer, body) = tokio::time::timeout(Duration::from_secs(2), bob_mgr.recv_datagram())
+            .await
+            .expect("datagram recv timeout")
+            .expect("datagram channel closed");
         assert_eq!(peer, alice_t.local_peer_id());
         assert_eq!(body.len(), 2);
         assert_eq!(body[0], 0xDA);
@@ -98,13 +96,10 @@ async fn datagrams_round_trip_alongside_streams() {
         .send_datagram(bob_peer, b"final-datagram")
         .await
         .unwrap();
-    let (_, body) = tokio::time::timeout(
-        Duration::from_secs(2),
-        bob_mgr.recv_datagram(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (_, body) = tokio::time::timeout(Duration::from_secs(2), bob_mgr.recv_datagram())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(body, b"final-datagram");
 }
 
@@ -121,7 +116,11 @@ async fn empty_datagram_is_valid() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -146,12 +145,9 @@ async fn empty_datagram_is_valid() {
     let bob_mgr = StreamManager::bind(bob_t.clone()).await;
 
     alice_mgr.send_datagram(bob_peer, b"").await.unwrap();
-    let (_, body) = tokio::time::timeout(
-        Duration::from_secs(2),
-        bob_mgr.recv_datagram(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (_, body) = tokio::time::timeout(Duration::from_secs(2), bob_mgr.recv_datagram())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(body, b"");
 }

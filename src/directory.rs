@@ -61,7 +61,9 @@ impl PeerEntry {
         if buf.len() < 34 + addr_len + 1 {
             return None;
         }
-        let addr = std::str::from_utf8(&buf[34..34 + addr_len]).ok()?.to_string();
+        let addr = std::str::from_utf8(&buf[34..34 + addr_len])
+            .ok()?
+            .to_string();
         let nick_len_off = 34 + addr_len;
         let nick_len = buf[nick_len_off] as usize;
         let nick_off = nick_len_off + 1;
@@ -72,7 +74,11 @@ impl PeerEntry {
             .ok()?
             .to_string();
         Some((
-            Self { pubkey, addr, nickname },
+            Self {
+                pubkey,
+                addr,
+                nickname,
+            },
             nick_off + nick_len,
         ))
     }

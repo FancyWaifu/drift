@@ -47,10 +47,16 @@ fn bench_aead(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::new("seal", size), &size, |b, _| {
-            b.iter(|| sender.seal(1, PacketType::Data as u8, &aad, &payload).unwrap());
+            b.iter(|| {
+                sender
+                    .seal(1, PacketType::Data as u8, &aad, &payload)
+                    .unwrap()
+            });
         });
 
-        let ct = sender.seal(1, PacketType::Data as u8, &aad, &payload).unwrap();
+        let ct = sender
+            .seal(1, PacketType::Data as u8, &aad, &payload)
+            .unwrap();
         group.bench_with_input(BenchmarkId::new("open", size), &size, |b, _| {
             b.iter(|| receiver.open(1, PacketType::Data as u8, &aad, &ct).unwrap());
         });
@@ -81,8 +87,13 @@ fn bench_loopback(c: &mut Criterion) {
                 let bob = Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), bob_id)
                     .await
                     .unwrap();
-                bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-                    .await.unwrap();
+                bob.add_peer(
+                    alice_pub,
+                    "0.0.0.0:0".parse().unwrap(),
+                    Direction::Responder,
+                )
+                .await
+                .unwrap();
                 let bob_addr = bob.local_addr().unwrap();
 
                 let alice = Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), alice_id)
@@ -90,15 +101,16 @@ fn bench_loopback(c: &mut Criterion) {
                     .unwrap();
                 let bob_peer = alice
                     .add_peer(bob_pub, bob_addr, Direction::Initiator)
-                    .await.unwrap();
+                    .await
+                    .unwrap();
 
                 // Warm up handshake with one packet.
-                alice.send_data(&bob_peer, &vec![0u8; size], 0, 0).await.unwrap();
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
-                    bob.recv(),
-                )
-                .await;
+                alice
+                    .send_data(&bob_peer, &vec![0u8; size], 0, 0)
+                    .await
+                    .unwrap();
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), bob.recv()).await;
 
                 let payload = vec![0x55u8; size];
                 let start = std::time::Instant::now();

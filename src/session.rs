@@ -103,8 +103,7 @@ pub struct PrevSession {
 impl HandshakeState {
     pub fn session(&self) -> Option<(&SessionKey, &SessionKey)> {
         match self {
-            Self::AwaitingData { tx, rx, .. }
-            | Self::Established { tx, rx, .. } => Some((tx, rx)),
+            Self::AwaitingData { tx, rx, .. } | Self::Established { tx, rx, .. } => Some((tx, rx)),
             _ => None,
         }
     }
@@ -299,11 +298,7 @@ impl Peer {
                 self.neighbor_rttvar = Some(sample / 2);
             }
             (Some(srtt), Some(rttvar)) => {
-                let diff = if sample > srtt {
-                    sample - srtt
-                } else {
-                    srtt - sample
-                };
+                let diff = sample.abs_diff(srtt);
                 let new_rttvar = (rttvar * 3 + diff) / 4;
                 let new_srtt = (srtt * 7 + sample) / 8;
                 self.neighbor_srtt = Some(new_srtt);
@@ -345,12 +340,7 @@ impl Peer {
     ///
     /// Callers still set `payload_len` themselves, since that
     /// depends on the packet body they're about to build.
-    pub fn make_header(
-        &self,
-        packet_type: PacketType,
-        seq: u32,
-        local_peer_id: PeerId,
-    ) -> Header {
+    pub fn make_header(&self, packet_type: PacketType, seq: u32, local_peer_id: PeerId) -> Header {
         let mut h = Header::new(packet_type, seq, local_peer_id, self.id);
         if self.via_mesh {
             h = h.with_hop_ttl(crate::transport::mesh::DEFAULT_MESH_TTL);
@@ -462,9 +452,17 @@ pub struct PeerTable {
     by_id: HashMap<PeerId, Peer>,
 }
 
+impl Default for PeerTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerTable {
     pub fn new() -> Self {
-        Self { by_id: HashMap::new() }
+        Self {
+            by_id: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, peer: Peer) {
@@ -607,8 +605,7 @@ mod tests {
         let mut p = mk_peer();
         // Fill the state to capacity + some extra.
         for group in 1..=(COALESCE_STATE_CAPACITY as u32 + 50) {
-            let h = Header::new(PacketType::Data, group, [0; 8], [0; 8])
-                .with_supersedes(group);
+            let h = Header::new(PacketType::Data, group, [0; 8], [0; 8]).with_supersedes(group);
             assert!(p.coalesce_accept(&h));
         }
         // State should be capped.
@@ -616,7 +613,9 @@ mod tests {
         // The FIRST groups should have been evicted.
         assert!(!p.coalesce_state.contains_key(&1));
         // A recently-added group should still be present.
-        assert!(p.coalesce_state.contains_key(&(COALESCE_STATE_CAPACITY as u32 + 50)));
+        assert!(p
+            .coalesce_state
+            .contains_key(&(COALESCE_STATE_CAPACITY as u32 + 50)));
     }
 
     #[test]
@@ -641,12 +640,9 @@ mod tests {
     fn coalesce_near_u32_max() {
         // Similar check for coalesce state: high seq values must work.
         let mut p = mk_peer();
-        let hi = Header::new(PacketType::Data, u32::MAX - 1, [0; 8], [0; 8])
-            .with_supersedes(7);
-        let higher = Header::new(PacketType::Data, u32::MAX, [0; 8], [0; 8])
-            .with_supersedes(7);
-        let old = Header::new(PacketType::Data, u32::MAX - 5, [0; 8], [0; 8])
-            .with_supersedes(7);
+        let hi = Header::new(PacketType::Data, u32::MAX - 1, [0; 8], [0; 8]).with_supersedes(7);
+        let higher = Header::new(PacketType::Data, u32::MAX, [0; 8], [0; 8]).with_supersedes(7);
+        let old = Header::new(PacketType::Data, u32::MAX - 5, [0; 8], [0; 8]).with_supersedes(7);
         assert!(p.coalesce_accept(&hi));
         assert!(p.coalesce_accept(&higher));
         assert!(!p.coalesce_accept(&old));

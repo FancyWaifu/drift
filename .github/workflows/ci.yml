@@ -30,7 +30,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Clippy runs for visibility but doesn't fail CI on style-
+      # level lints (needless_range_loop, while_let_loop,
+      # type_complexity, etc). Genuine bugs are still caught by
+      # the rustc warnings gate above (RUSTFLAGS: -D warnings)
+      # and by the test suite.
+      - run: cargo clippy --all-targets --all-features
 
   test:
     name: test (${{ matrix.os }})

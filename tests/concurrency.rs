@@ -32,7 +32,8 @@ async fn many_senders_one_receiver() {
         let cpub = cid.public_bytes();
         server
             .add_peer(cpub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-            .await.unwrap();
+            .await
+            .unwrap();
         clients.push((cid, cpub));
     }
 
@@ -45,7 +46,8 @@ async fn many_senders_one_receiver() {
                 .unwrap();
             let bob = c
                 .add_peer(server_pub_copy, server_addr, Direction::Initiator)
-                .await.unwrap();
+                .await
+                .unwrap();
             for seq in 0..PACKETS_PER_SENDER {
                 let mut payload = Vec::new();
                 payload.extend_from_slice(&(i as u32).to_be_bytes());
@@ -95,8 +97,13 @@ async fn burst_no_internal_drops() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
@@ -104,7 +111,8 @@ async fn burst_no_internal_drops() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     const N: u32 = 500;
     for i in 0..N {

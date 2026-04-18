@@ -59,25 +59,17 @@ async fn four_mediums_all_talk_through_bridge() {
 
     // ---- Bridge: starts with UDP (interface 0) ----
     let bridge = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bridge_id,
-            fast_cfg.clone(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     let bridge_udp_addr = bridge.local_addr().unwrap();
 
     // ---- Alice: UDP ----
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            fast_cfg.clone(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     alice
         .add_peer(bridge_pub, bridge_udp_addr, Direction::Initiator)
@@ -152,8 +144,7 @@ async fn four_mediums_all_talk_through_bridge() {
 
     // ---- Every peer adds every other (via bridge) ----
     let all_pubs = [alice_pub, bob_pub, carol_pub, dave_pub];
-    let transports: [Arc<Transport>; 4] =
-        [alice.clone(), bob.clone(), carol.clone(), dave.clone()];
+    let transports: [Arc<Transport>; 4] = [alice.clone(), bob.clone(), carol.clone(), dave.clone()];
     for (i, t) in transports.iter().enumerate() {
         for (j, pub_bytes) in all_pubs.iter().enumerate() {
             if i == j {
@@ -233,7 +224,11 @@ async fn four_mediums_all_talk_through_bridge() {
     }
 
     let total_data: usize = data_got.values().map(|g| g.len()).sum();
-    assert_eq!(total_data, 12, "expected 12/12 data deliveries, got {}", total_data);
+    assert_eq!(
+        total_data, 12,
+        "expected 12/12 data deliveries, got {}",
+        total_data
+    );
 
     // Verify every directed medium pair delivered.
     for i in 0..4 {
@@ -245,7 +240,10 @@ async fn four_mediums_all_talk_through_bridge() {
             assert!(
                 data_got[&j].contains(&expected),
                 "missing {} → {} ({}→{})",
-                NAMES[i], NAMES[j], MEDIUMS[i], MEDIUMS[j]
+                NAMES[i],
+                NAMES[j],
+                MEDIUMS[i],
+                MEDIUMS[j]
             );
         }
     }
@@ -358,18 +356,36 @@ async fn four_mediums_all_talk_through_bridge() {
     }
 
     println!("\n=== Phase 4: Streams ===");
-    println!("  Alice→Dave (UDP→WS):   {}/{} segments", dave_recv.len(), segments);
-    println!("  Carol→Bob  (Mem→TCP):  {}/{} segments", bob_recv.len(), segments);
+    println!(
+        "  Alice→Dave (UDP→WS):   {}/{} segments",
+        dave_recv.len(),
+        segments
+    );
+    println!(
+        "  Carol→Bob  (Mem→TCP):  {}/{} segments",
+        bob_recv.len(),
+        segments
+    );
 
     assert_eq!(dave_recv.len(), segments, "UDP→WS stream incomplete");
     assert_eq!(bob_recv.len(), segments, "Mem→TCP stream incomplete");
 
     // Verify ordering.
     for (seq, msg) in dave_recv.iter().enumerate() {
-        assert_eq!(msg, &format!("udp-ws-seg-{:04}", seq), "UDP→WS out of order at {}", seq);
+        assert_eq!(
+            msg,
+            &format!("udp-ws-seg-{:04}", seq),
+            "UDP→WS out of order at {}",
+            seq
+        );
     }
     for (seq, msg) in bob_recv.iter().enumerate() {
-        assert_eq!(msg, &format!("mem-tcp-seg-{:04}", seq), "Mem→TCP out of order at {}", seq);
+        assert_eq!(
+            msg,
+            &format!("mem-tcp-seg-{:04}", seq),
+            "Mem→TCP out of order at {}",
+            seq
+        );
     }
 
     // Close streams cleanly.
@@ -381,8 +397,14 @@ async fn four_mediums_all_talk_through_bridge() {
     // ===========================================================
     //  Bob (TCP) → Alice (UDP) and Dave (WS) → Carol (Memory).
 
-    bob_sm.send_datagram(alice_pid, b"dgram-tcp-to-udp").await.unwrap();
-    dave_sm.send_datagram(carol_pid, b"dgram-ws-to-mem").await.unwrap();
+    bob_sm
+        .send_datagram(alice_pid, b"dgram-tcp-to-udp")
+        .await
+        .unwrap();
+    dave_sm
+        .send_datagram(carol_pid, b"dgram-ws-to-mem")
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -424,8 +446,12 @@ async fn four_mediums_all_talk_through_bridge() {
     let bm = bridge.metrics();
     println!(
         "  Bridge: hs={} fwd={} auth_fail={} beacons={} pkts_tx={} pkts_rx={}",
-        bm.handshakes_completed, bm.forwarded, bm.auth_failures,
-        bm.beacons_sent, bm.packets_sent, bm.packets_received
+        bm.handshakes_completed,
+        bm.forwarded,
+        bm.auth_failures,
+        bm.beacons_sent,
+        bm.packets_sent,
+        bm.packets_received
     );
 
     assert!(bm.handshakes_completed >= 4, "bridge needs 4+ handshakes");
@@ -437,14 +463,30 @@ async fn four_mediums_all_talk_through_bridge() {
         let m = t.metrics();
         println!(
             "  {} ({}): hs={} retries={} auth_fail={} pkts_tx={} pkts_rx={}",
-            NAMES[i], MEDIUMS[i],
-            m.handshakes_completed, m.handshake_retries,
-            m.auth_failures, m.packets_sent, m.packets_received
+            NAMES[i],
+            MEDIUMS[i],
+            m.handshakes_completed,
+            m.handshake_retries,
+            m.auth_failures,
+            m.packets_sent,
+            m.packets_received
         );
-        assert!(m.handshakes_completed >= 4, "{} needs 4+ handshakes", NAMES[i]);
-        assert_eq!(m.auth_failures, 0, "{} should have 0 auth failures", NAMES[i]);
+        assert!(
+            m.handshakes_completed >= 4,
+            "{} needs 4+ handshakes",
+            NAMES[i]
+        );
+        assert_eq!(
+            m.auth_failures, 0,
+            "{} should have 0 auth failures",
+            NAMES[i]
+        );
         assert!(m.packets_sent > 0, "{} must have sent packets", NAMES[i]);
-        assert!(m.packets_received > 0, "{} must have received packets", NAMES[i]);
+        assert!(
+            m.packets_received > 0,
+            "{} must have received packets",
+            NAMES[i]
+        );
     }
 
     // Stream managers should have no lingering state after close.

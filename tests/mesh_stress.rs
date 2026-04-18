@@ -27,8 +27,13 @@ async fn three_hop_chain() {
         .await
         .unwrap();
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     // r3 forwards to Bob.
@@ -69,7 +74,8 @@ async fn three_hop_chain() {
 
     let bob_peer_handle = alice_t
         .add_peer(bob_pub, "0.0.0.0:0".parse().unwrap(), Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
     alice_t.add_route(bob_peer_id, r1_addr).await;
 
     // Keep relays alive.
@@ -87,16 +93,18 @@ async fn three_hop_chain() {
 
     let mut received = 0;
     for _ in 0..5 {
-        if let Ok(Some(p)) =
-            tokio::time::timeout(Duration::from_secs(3), bob_t.recv()).await
-        {
+        if let Ok(Some(p)) = tokio::time::timeout(Duration::from_secs(3), bob_t.recv()).await {
             assert_eq!(p.payload.len(), 4);
             received += 1;
         } else {
             break;
         }
     }
-    assert!(received >= 4, "only {} packets traversed 3-hop chain", received);
+    assert!(
+        received >= 4,
+        "only {} packets traversed 3-hop chain",
+        received
+    );
 }
 
 /// Five-hop chain: A → R1 → R2 → R3 → R4 → B. Verifies that crypto
@@ -124,7 +132,8 @@ async fn five_hop_chain() {
         .unwrap();
     bob_t
         .add_peer(pubs[0], "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     let r4_t = Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), r4)
@@ -164,7 +173,8 @@ async fn five_hop_chain() {
 
     let bob_peer_handle = alice_t
         .add_peer(pubs[5], "0.0.0.0:0".parse().unwrap(), Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
     alice_t.add_route(peer_ids[5], r1_addr).await;
 
     // Keep relays alive.
@@ -180,9 +190,7 @@ async fn five_hop_chain() {
 
     let mut received = 0;
     for _ in 0..5 {
-        if let Ok(Some(_)) =
-            tokio::time::timeout(Duration::from_secs(3), bob_t.recv()).await
-        {
+        if let Ok(Some(_)) = tokio::time::timeout(Duration::from_secs(3), bob_t.recv()).await {
             received += 1;
         } else {
             break;

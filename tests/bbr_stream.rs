@@ -25,7 +25,11 @@ async fn bbr_stream_pushes_64k_intact() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
@@ -49,8 +53,7 @@ async fn bbr_stream_pushes_64k_intact() {
         .unwrap();
 
     // Explicitly opt in to BBR-lite.
-    let alice_mgr =
-        StreamManager::bind_with_cc(alice_t.clone(), CongestionControlMode::Bbr).await;
+    let alice_mgr = StreamManager::bind_with_cc(alice_t.clone(), CongestionControlMode::Bbr).await;
     let bob_mgr = StreamManager::bind(bob_t.clone()).await;
 
     let stream_a = alice_mgr.open(bob_peer).await.unwrap();
@@ -90,8 +93,5 @@ async fn bbr_stream_pushes_64k_intact() {
     // default initial (meaning BBR actually computed a
     // BDP-backed window).
     let snap = alice_mgr.congestion_snapshot(&bob_peer).await.unwrap();
-    assert!(
-        snap.cwnd > 0,
-        "BBR snapshot should have a non-zero cwnd"
-    );
+    assert!(snap.cwnd > 0, "BBR snapshot should have a non-zero cwnd");
 }

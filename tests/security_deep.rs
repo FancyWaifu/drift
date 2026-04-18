@@ -67,8 +67,13 @@ async fn replay_flood_caught() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     // Spawn a sniff-proxy: it forwards everything Alice sends to Bob,
@@ -116,7 +121,8 @@ async fn replay_flood_caught() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Handshake + one DATA.
     alice_t
@@ -144,12 +150,7 @@ async fn replay_flood_caught() {
     // short timeout — any Ok(Some(_)) is a replay bypass.
     let mut extra = 0;
     for _ in 0..5 {
-        if let Ok(Some(_)) = tokio::time::timeout(
-            Duration::from_millis(100),
-            bob_t.recv(),
-        )
-        .await
-        {
+        if let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(100), bob_t.recv()).await {
             extra += 1;
         }
     }
@@ -174,8 +175,13 @@ async fn src_id_spoofing_rejected() {
             .unwrap(),
     );
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await.unwrap();
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
     // Alice handshakes normally.
@@ -184,7 +190,8 @@ async fn src_id_spoofing_rejected() {
         .unwrap();
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
     alice_t.send_data(&bob_peer, b"legit", 0, 0).await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_t.recv())
         .await
@@ -271,23 +278,26 @@ async fn header_bit_flip_rejected() {
                 .unwrap(),
         );
         bob_t
-            .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-            .await.unwrap();
+            .add_peer(
+                alice_pub,
+                "0.0.0.0:0".parse().unwrap(),
+                Direction::Responder,
+            )
+            .await
+            .unwrap();
         let bob_addr = bob_t.local_addr().unwrap();
         let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
             .await
             .unwrap();
         let bp = alice_t
             .add_peer(bob_pub, bob_addr, Direction::Initiator)
-            .await.unwrap();
+            .await
+            .unwrap();
         (alice_t, bob_t, bp)
     };
 
     // Warm up so Bob has a session.
-    alice_t
-        .send_data(&bob_peer, b"warm", 0, 0)
-        .await
-        .unwrap();
+    alice_t.send_data(&bob_peer, b"warm", 0, 0).await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_t.recv())
         .await
         .unwrap();

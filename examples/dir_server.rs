@@ -52,8 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[relay] bound on {}", transport.local_addr()?);
 
     // Directory: pubkey → PeerEntry
-    let directory: Arc<Mutex<HashMap<[u8; 32], PeerEntry>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let directory: Arc<Mutex<HashMap<[u8; 32], PeerEntry>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Periodic summary printer so we can see the directory grow.
     let dir_snap = directory.clone();
@@ -88,8 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[relay] REGISTER {} @ {}", nick, addr);
             }
             DirMessage::Lookup => {
-                let listing: Vec<PeerEntry> =
-                    directory.lock().await.values().cloned().collect();
+                let listing: Vec<PeerEntry> = directory.lock().await.values().cloned().collect();
                 let count = listing.len();
                 let reply = DirMessage::Listing(listing).encode();
                 match transport.send_data(&pkt.peer_id, &reply, 0, 0).await {

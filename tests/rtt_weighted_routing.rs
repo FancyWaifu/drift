@@ -203,10 +203,7 @@ async fn rtt_weighted_picks_fast_two_hop_over_slow_one_hop() {
         "A should have learned a route to C via beacons"
     );
     let (next_hop, cost_us) = route_for_c.unwrap();
-    println!(
-        "A's route to C: next_hop={} cost_us={}",
-        next_hop, cost_us
-    );
+    println!("A's route to C: next_hop={} cost_us={}", next_hop, cost_us);
 
     // The next hop must be B1's direct address — NOT the
     // proxy in front of B2. A hears beacons from both B1

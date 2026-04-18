@@ -26,7 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Responder: we wait for the client's HELLO rather than initiate.
     transport
         .add_peer(client_pub, "0.0.0.0:0".parse()?, Direction::Responder)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     loop {
         let pkt = match transport.recv().await {

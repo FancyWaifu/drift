@@ -32,7 +32,8 @@ async fn random_stream_frames_no_panic_bounded_state() {
             "0.0.0.0:0".parse().unwrap(),
             Direction::Responder,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     let victim_addr = victim_t.local_addr().unwrap();
 
     let attacker_t = Arc::new(
@@ -42,7 +43,8 @@ async fn random_stream_frames_no_panic_bounded_state() {
     );
     let victim_peer = attacker_t
         .add_peer(victim_pub, victim_addr, Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     let victim_mgr = StreamManager::bind(victim_t.clone()).await;
 
@@ -51,7 +53,10 @@ async fn random_stream_frames_no_panic_bounded_state() {
     let mut buf = vec![0u8; 9];
     buf[0] = 0x10; // TAG_OPEN
     buf[1..5].copy_from_slice(&1u32.to_be_bytes());
-    attacker_t.send_data(&victim_peer, &buf, 0, 0).await.unwrap();
+    attacker_t
+        .send_data(&victim_peer, &buf, 0, 0)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Now fire 2000 random frames at the victim's stream layer.

@@ -30,7 +30,6 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
     let alice_id = Identity::from_secret_bytes([0xA0; 32]);
     let bridge_id = Identity::from_secret_bytes([0xBB; 32]);
     let bob_id = Identity::from_secret_bytes([0xC0; 32]);
-    let alice_pub = alice_id.public_bytes();
     let bridge_pub = bridge_id.public_bytes();
     let bob_pub = bob_id.public_bytes();
 
@@ -43,13 +42,9 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
     };
 
     let bridge = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bridge_id,
-            fast_cfg.clone(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     let bridge_udp_addr = bridge.local_addr().unwrap();
 
@@ -59,12 +54,8 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
 
     // ---- Alice: UDP-only peer ----
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            fast_cfg.clone(),
-        )
-        .await
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, fast_cfg.clone())
+            .await
             .unwrap(),
     );
     // Alice knows the bridge and Bob. She'll handshake with
@@ -95,8 +86,7 @@ async fn udp_peer_talks_to_tcp_peer_through_bridge() {
     let _tcp_iface_idx = bridge.add_interface("tcp", bridge_tcp_io);
 
     // Bob's transport runs entirely over TCP.
-    let bob_tcp_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
+    let bob_tcp_io: Arc<dyn drift::io::PacketIO> = Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
     let bob = Arc::new(
         Transport::bind_with_io(bob_tcp_io, bob_id, fast_cfg.clone())
             .await

@@ -55,26 +55,18 @@ async fn udp_tcp_memory_all_talk_to_each_other() {
 
     // ---- Bridge: starts with UDP ----
     let bridge = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bridge_id,
-            fast_cfg.clone(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     let bridge_udp_addr = bridge.local_addr().unwrap();
     let bridge_pid = drift::crypto::derive_peer_id(&bridge_pub);
 
     // ---- Alice: UDP ----
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            fast_cfg.clone(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     alice
         .add_peer(bridge_pub, bridge_udp_addr, Direction::Initiator)
@@ -90,8 +82,7 @@ async fn udp_tcp_memory_all_talk_to_each_other() {
         Arc::new(TcpPacketIO::new(bridge_tcp).unwrap());
     bridge.add_interface("tcp", bridge_tcp_io);
 
-    let bob_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
+    let bob_io: Arc<dyn drift::io::PacketIO> = Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
     let bob = Arc::new(
         Transport::bind_with_io(bob_io, bob_id, fast_cfg.clone())
             .await
@@ -139,15 +130,9 @@ async fn udp_tcp_memory_all_talk_to_each_other() {
     }
 
     // ---- Warm up: everyone handshakes with bridge ----
-    alice
-        .send_data(&bridge_pid, b"warmup", 0, 0)
-        .await
-        .unwrap();
+    alice.send_data(&bridge_pid, b"warmup", 0, 0).await.unwrap();
     bob.send_data(&bridge_pid, b"warmup", 0, 0).await.unwrap();
-    carol
-        .send_data(&bridge_pid, b"warmup", 0, 0)
-        .await
-        .unwrap();
+    carol.send_data(&bridge_pid, b"warmup", 0, 0).await.unwrap();
     for _ in 0..3 {
         let _ = tokio::time::timeout(Duration::from_secs(3), bridge.recv()).await;
     }
@@ -191,23 +176,17 @@ async fn udp_tcp_memory_all_talk_to_each_other() {
     let mut carol_got = Vec::new();
 
     for _ in 0..10 {
-        if let Ok(Some(p)) =
-            tokio::time::timeout(Duration::from_millis(500), alice.recv()).await
-        {
+        if let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(500), alice.recv()).await {
             alice_got.push(String::from_utf8_lossy(&p.payload).to_string());
         }
     }
     for _ in 0..10 {
-        if let Ok(Some(p)) =
-            tokio::time::timeout(Duration::from_millis(500), bob.recv()).await
-        {
+        if let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(500), bob.recv()).await {
             bob_got.push(String::from_utf8_lossy(&p.payload).to_string());
         }
     }
     for _ in 0..10 {
-        if let Ok(Some(p)) =
-            tokio::time::timeout(Duration::from_millis(500), carol.recv()).await
-        {
+        if let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(500), carol.recv()).await {
             carol_got.push(String::from_utf8_lossy(&p.payload).to_string());
         }
     }

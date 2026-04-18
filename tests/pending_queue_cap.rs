@@ -36,7 +36,8 @@ async fn pending_queue_full_stops_memory_growth() {
     let dead_addr = "127.0.0.1:1"; // privileged / unreachable
     let peer_id = client
         .add_peer(dead_pub, dead_addr.parse().unwrap(), Direction::Initiator)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // First 8 sends should queue; the 9th must be QueueFull.
     let mut last_err = None;
@@ -86,8 +87,13 @@ async fn handshake_exhausted_returns_fast_error() {
 
     let dead_pub = Identity::from_secret_bytes([0x12; 32]).public_bytes();
     let peer_id = client
-        .add_peer(dead_pub, "127.0.0.1:1".parse().unwrap(), Direction::Initiator)
-        .await.unwrap();
+        .add_peer(
+            dead_pub,
+            "127.0.0.1:1".parse().unwrap(),
+            Direction::Initiator,
+        )
+        .await
+        .unwrap();
 
     // First send triggers the initial HELLO (attempt 1 of 2).
     client.send_data(&peer_id, b"kick", 0, 0).await.unwrap();

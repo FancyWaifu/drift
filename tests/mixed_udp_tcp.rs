@@ -41,13 +41,9 @@ async fn three_udp_and_three_tcp_all_pairs() {
     let bridge_id = Identity::from_secret_bytes([0xBB; 32]);
     let bridge_pub = bridge_id.public_bytes();
     let bridge = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bridge_id,
-            fast_cfg.clone(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_id, fast_cfg.clone())
+            .await
+            .unwrap(),
     );
     let bridge_udp_addr = bridge.local_addr().unwrap();
 
@@ -64,13 +60,9 @@ async fn three_udp_and_three_tcp_all_pairs() {
         let pubkey = id.public_bytes();
         peer_ids.push(drift::crypto::derive_peer_id(&pubkey));
         let t = Arc::new(
-            Transport::bind_with_config(
-                "127.0.0.1:0".parse().unwrap(),
-                id,
-                fast_cfg.clone(),
-            )
-            .await
-            .unwrap(),
+            Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), id, fast_cfg.clone())
+                .await
+                .unwrap(),
         );
         // Each UDP peer knows the bridge.
         t.add_peer(bridge_pub, bridge_udp_addr, Direction::Initiator)
@@ -94,10 +86,7 @@ async fn three_udp_and_three_tcp_all_pairs() {
         // Attach bridge side to the bridge.
         let bridge_tcp_io: Arc<dyn drift::io::PacketIO> =
             Arc::new(TcpPacketIO::new(bridge_side).unwrap());
-        bridge.add_interface(
-            &format!("tcp-{}", i),
-            bridge_tcp_io,
-        );
+        bridge.add_interface(&format!("tcp-{}", i), bridge_tcp_io);
 
         // Peer's transport runs over TCP.
         let peer_tcp_io: Arc<dyn drift::io::PacketIO> =
@@ -186,8 +175,7 @@ async fn three_udp_and_three_tcp_all_pairs() {
             if tokio::time::Instant::now() >= deadline {
                 break;
             }
-            match tokio::time::timeout(Duration::from_millis(500), peers[i].recv()).await
-            {
+            match tokio::time::timeout(Duration::from_millis(500), peers[i].recv()).await {
                 Ok(Some(pkt)) => {
                     results.get_mut(&i).unwrap().push(pkt.payload);
                 }

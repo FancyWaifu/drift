@@ -145,7 +145,9 @@ impl Inner {
             build_path_challenge_packet(self.local_peer_id, peer, &challenge)?
         };
 
-        self.ifaces.send_for(self.iface_for(peer_id).await, &wire, candidate_addr).await?;
+        self.ifaces
+            .send_for(self.iface_for(peer_id).await, &wire, candidate_addr)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -180,16 +182,12 @@ impl Inner {
         let response_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
-            let challenge =
-                rx.open(header.seq, PacketType::PathChallenge as u8, &aad, body)?;
+            let challenge = rx.open(header.seq, PacketType::PathChallenge as u8, &aad, body)?;
             if challenge.len() != PATH_CHALLENGE_LEN {
                 return Err(DriftError::PacketTooShort {
                     got: challenge.len(),
@@ -202,7 +200,9 @@ impl Inner {
             build_path_response_packet(self.local_peer_id, peer, &challenge_bytes)?
         };
 
-        self.ifaces.send_for(self.iface_for(&peer_id).await, &response_bytes, src).await?;
+        self.ifaces
+            .send_for(self.iface_for(&peer_id).await, &response_bytes, src)
+            .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_sent
@@ -228,10 +228,7 @@ impl Inner {
 
         let mut peers = self.peers.lock_for(&peer_id).await;
         let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-        let (_, rx) = peer
-            .handshake
-            .session()
-            .ok_or(DriftError::UnknownPeer)?;
+        let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
         let mut hbuf = [0u8; HEADER_LEN];
         hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);

@@ -37,10 +37,8 @@ async fn handshake_and_data_over_tcp() {
     let (bob_tcp, _) = listener.accept().await.unwrap();
 
     // Wrap both sides in TcpPacketIO.
-    let alice_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(TcpPacketIO::new(alice_tcp).unwrap());
-    let bob_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
+    let alice_io: Arc<dyn drift::io::PacketIO> = Arc::new(TcpPacketIO::new(alice_tcp).unwrap());
+    let bob_io: Arc<dyn drift::io::PacketIO> = Arc::new(TcpPacketIO::new(bob_tcp).unwrap());
 
     // Build DRIFT transports on top of the TCP adapters.
     // Note: we use bind_with_io instead of bind/bind_with_config.
@@ -55,7 +53,11 @@ async fn handshake_and_data_over_tcp() {
     // mostly a placeholder — on a point-to-point TCP link
     // there's only one possible peer.
     bob_t
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
 

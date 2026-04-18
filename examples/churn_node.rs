@@ -35,8 +35,7 @@ fn client_secret(cid: u8) -> [u8; 32] {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -57,9 +56,7 @@ async fn run_hub() -> Result<(), Box<dyn std::error::Error>> {
         ..TransportConfig::default()
     };
     let id = Identity::from_secret_bytes(HUB_SECRET);
-    let t = Arc::new(
-        Transport::bind_with_config("0.0.0.0:9400".parse()?, id, cfg).await?,
-    );
+    let t = Arc::new(Transport::bind_with_config("0.0.0.0:9400".parse()?, id, cfg).await?);
     println!("[hub] bound {}", t.local_addr()?);
 
     // Background metrics printer.
@@ -108,12 +105,8 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     let id = Identity::from_secret_bytes(client_secret(cid));
     let hub_pub = Identity::from_secret_bytes(HUB_SECRET).public_bytes();
-    let t = Arc::new(
-        Transport::bind("0.0.0.0:0".parse()?, id).await?,
-    );
-    let hub_peer = t
-        .add_peer(hub_pub, hub_addr, Direction::Initiator)
-        .await?;
+    let t = Arc::new(Transport::bind("0.0.0.0:0".parse()?, id).await?);
+    let hub_peer = t.add_peer(hub_pub, hub_addr, Direction::Initiator).await?;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(cid as u64);
     let mut sends_ok = 0u32;
@@ -143,12 +136,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     let m = t.metrics();
     println!(
         "[client-{}] DONE sends_ok={} reconnects={} handshakes={} auth_fail={} replays={}",
-        cid,
-        sends_ok,
-        reconnects,
-        m.handshakes_completed,
-        m.auth_failures,
-        m.replays_caught
+        cid, sends_ok, reconnects, m.handshakes_completed, m.auth_failures, m.replays_caught
     );
 
     // Sanity: each reconnect should have triggered a fresh

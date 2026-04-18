@@ -64,13 +64,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("routing via relay {}", relay);
         let id = transport
             .add_peer(server_pub, target, Direction::Initiator)
-            .await.unwrap();
+            .await
+            .unwrap();
         transport.add_route(server_peer_id, relay).await;
         id
     } else {
         transport
             .add_peer(server_pub, target, Direction::Initiator)
-            .await.unwrap()
+            .await
+            .unwrap()
     };
 
     let mut x: f32 = 0.0;
@@ -86,7 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         payload.extend_from_slice(&y.to_be_bytes());
         payload.extend_from_slice(&seq_count.to_be_bytes());
 
-        transport.send_data(&peer_id, &payload, deadline_ms, 1).await?;
+        transport
+            .send_data(&peer_id, &payload, deadline_ms, 1)
+            .await?;
 
         println!("sent tick={} pos=({:.2},{:.2})", seq_count, x, y);
         tokio::time::sleep(Duration::from_millis(100)).await;

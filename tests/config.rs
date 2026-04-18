@@ -22,38 +22,35 @@ async fn iot_preset_works() {
     let bob = Identity::from_secret_bytes([0xA0; 32]);
     let alice = Identity::from_secret_bytes([0xA1; 32]);
 
-    let bob_t = Transport::bind_with_config(
-        "127.0.0.1:0".parse().unwrap(),
-        bob,
-        cfg.clone(),
-    )
-    .await
-    .unwrap();
+    let bob_t = Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bob, cfg.clone())
+        .await
+        .unwrap();
     bob_t
         .add_peer(
             alice.public_bytes(),
             "0.0.0.0:0".parse().unwrap(),
             Direction::Responder,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
-    let alice_t = Transport::bind_with_config(
-        "127.0.0.1:0".parse().unwrap(),
-        alice,
-        cfg,
-    )
-    .await
-    .unwrap();
+    let alice_t = Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice, cfg)
+        .await
+        .unwrap();
     let bob_peer = alice_t
         .add_peer(
             Identity::from_secret_bytes([0xA0; 32]).public_bytes(),
             bob_addr,
             Direction::Initiator,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
-    alice_t.send_data(&bob_peer, b"iot hello", 0, 0).await.unwrap();
+    alice_t
+        .send_data(&bob_peer, b"iot hello", 0, 0)
+        .await
+        .unwrap();
     let pkt = tokio::time::timeout(Duration::from_secs(3), bob_t.recv())
         .await
         .expect("timed out")
@@ -70,39 +67,36 @@ async fn realtime_preset_works() {
     let bob = Identity::from_secret_bytes([0xB0; 32]);
     let alice = Identity::from_secret_bytes([0xB1; 32]);
 
-    let bob_t = Transport::bind_with_config(
-        "127.0.0.1:0".parse().unwrap(),
-        bob,
-        cfg.clone(),
-    )
-    .await
-    .unwrap();
+    let bob_t = Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bob, cfg.clone())
+        .await
+        .unwrap();
     bob_t
         .add_peer(
             alice.public_bytes(),
             "0.0.0.0:0".parse().unwrap(),
             Direction::Responder,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     let bob_addr = bob_t.local_addr().unwrap();
 
-    let alice_t = Transport::bind_with_config(
-        "127.0.0.1:0".parse().unwrap(),
-        alice,
-        cfg,
-    )
-    .await
-    .unwrap();
+    let alice_t = Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice, cfg)
+        .await
+        .unwrap();
     let bob_peer = alice_t
         .add_peer(
             Identity::from_secret_bytes([0xB0; 32]).public_bytes(),
             bob_addr,
             Direction::Initiator,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
     for i in 0..5u32 {
-        alice_t.send_data(&bob_peer, &i.to_be_bytes(), 0, 0).await.unwrap();
+        alice_t
+            .send_data(&bob_peer, &i.to_be_bytes(), 0, 0)
+            .await
+            .unwrap();
     }
     let mut got = 0;
     for _ in 0..5 {

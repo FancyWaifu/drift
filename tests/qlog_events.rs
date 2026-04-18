@@ -13,8 +13,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn qlog_writes_packet_and_handshake_events() {
-    let tmp = std::env::temp_dir()
-        .join(format!("drift_qlog_int_{}.jsonl", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("drift_qlog_int_{}.jsonl", std::process::id()));
 
     let alice_id = Identity::from_secret_bytes([0xA1; 32]);
     let bob_id = Identity::from_secret_bytes([0xB1; 32]);
@@ -26,9 +25,13 @@ async fn qlog_writes_packet_and_handshake_events() {
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     // Alice's transport has qlog enabled.
@@ -46,7 +49,10 @@ async fn qlog_writes_packet_and_handshake_events() {
         .await
         .unwrap();
 
-    alice.send_data(&bob_peer, b"qlog-hello", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"qlog-hello", 0, 0)
+        .await
+        .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv())
         .await
         .unwrap()
@@ -68,7 +74,11 @@ async fn qlog_writes_packet_and_handshake_events() {
 
     // Every line must be valid-looking JSON (starts '{', ends '}').
     for line in &lines {
-        assert!(line.starts_with('{') && line.ends_with('}'), "bad line: {}", line);
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "bad line: {}",
+            line
+        );
         assert!(line.contains("\"time\":"), "missing time: {}", line);
         assert!(line.contains("\"category\":"), "missing category: {}", line);
     }

@@ -33,10 +33,18 @@ const UDP_PEER_IP: &str = "127.0.0.1:0";
 const TCP_PEER_IP: &str = "127.0.0.2:0";
 const WS_PEER_IP: &str = "127.0.0.3:0";
 
-fn bridge_id() -> Identity { Identity::from_secret_bytes([0xBB; 32]) }
-fn udp_id() -> Identity { Identity::from_secret_bytes([0xA1; 32]) }
-fn tcp_id() -> Identity { Identity::from_secret_bytes([0xB2; 32]) }
-fn ws_id() -> Identity { Identity::from_secret_bytes([0xC3; 32]) }
+fn bridge_id() -> Identity {
+    Identity::from_secret_bytes([0xBB; 32])
+}
+fn udp_id() -> Identity {
+    Identity::from_secret_bytes([0xA1; 32])
+}
+fn tcp_id() -> Identity {
+    Identity::from_secret_bytes([0xB2; 32])
+}
+fn ws_id() -> Identity {
+    Identity::from_secret_bytes([0xC3; 32])
+}
 
 fn cfg() -> TransportConfig {
     TransportConfig {
@@ -74,12 +82,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Copy, Clone)]
-enum Medium { Udp, Tcp, Ws }
+enum Medium {
+    Udp,
+    Tcp,
+    Ws,
+}
 
 async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
-    let bridge = Arc::new(
-        Transport::bind_with_config(BRIDGE_UDP.parse()?, bridge_id(), cfg()).await?,
-    );
+    let bridge =
+        Arc::new(Transport::bind_with_config(BRIDGE_UDP.parse()?, bridge_id(), cfg()).await?);
     println!("[bridge] UDP  iface 0 on {}", BRIDGE_UDP);
 
     let tcp_listener = TcpListener::bind(BRIDGE_TCP).await?;
@@ -150,19 +161,28 @@ async fn run_peer(medium: Medium) -> Result<(), Box<dyn std::error::Error>> {
         Medium::Udp => (
             "udp",
             udp_id(),
-            vec![("tcp", tcp_id().public_bytes()), ("ws", ws_id().public_bytes())],
+            vec![
+                ("tcp", tcp_id().public_bytes()),
+                ("ws", ws_id().public_bytes()),
+            ],
             BRIDGE_UDP.parse()?,
         ),
         Medium::Tcp => (
             "tcp",
             tcp_id(),
-            vec![("udp", udp_id().public_bytes()), ("ws", ws_id().public_bytes())],
+            vec![
+                ("udp", udp_id().public_bytes()),
+                ("ws", ws_id().public_bytes()),
+            ],
             BRIDGE_TCP.parse()?,
         ),
         Medium::Ws => (
             "ws",
             ws_id(),
-            vec![("udp", udp_id().public_bytes()), ("tcp", tcp_id().public_bytes())],
+            vec![
+                ("udp", udp_id().public_bytes()),
+                ("tcp", tcp_id().public_bytes()),
+            ],
             BRIDGE_WS.parse()?,
         ),
     };
@@ -171,9 +191,9 @@ async fn run_peer(medium: Medium) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the transport with the right medium.
     let transport = match medium {
-        Medium::Udp => Arc::new(
-            Transport::bind_with_config(UDP_PEER_IP.parse()?, self_id, cfg()).await?,
-        ),
+        Medium::Udp => {
+            Arc::new(Transport::bind_with_config(UDP_PEER_IP.parse()?, self_id, cfg()).await?)
+        }
         Medium::Tcp => {
             let sock = TcpSocket::new_v4()?;
             sock.bind(TCP_PEER_IP.parse()?)?;
@@ -231,7 +251,13 @@ async fn run_peer(medium: Medium) -> Result<(), Box<dyn std::error::Error>> {
         match tokio::time::timeout(Duration::from_millis(500), transport.recv()).await {
             Ok(Some(pkt)) => {
                 let s = String::from_utf8_lossy(&pkt.payload).to_string();
-                println!("[{}] recv from peer={} {}B: {:?}", name, hex8(&pkt.peer_id), pkt.payload.len(), s);
+                println!(
+                    "[{}] recv from peer={} {}B: {:?}",
+                    name,
+                    hex8(&pkt.peer_id),
+                    pkt.payload.len(),
+                    s
+                );
                 got.push(s);
             }
             Ok(None) => break,

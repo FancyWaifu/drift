@@ -35,7 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pubkey = Identity::from_secret_bytes(secret).public_bytes();
         transport
             .add_peer(pubkey, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-            .await.unwrap();
+            .await
+            .unwrap();
     }
     println!("registered {} client identities", n_clients);
 
