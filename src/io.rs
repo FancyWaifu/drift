@@ -344,6 +344,94 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'st
     }
 }
 
+/// WebRTC data channel packet I/O. Each DRIFT packet becomes
+/// one WebRTC `DataChannelMessage` (binary). Unlike TCP/WS,
+/// WebRTC is peer-to-peer — there's no "server" in the classic
+/// sense; both ends establish an SDP exchange (usually via a
+/// signaling server) and then talk directly through a
+/// DTLS-over-SCTP-over-ICE stack. The big win: this works
+/// browser-to-browser, punching through NAT automatically with
+/// STUN/TURN, with no server in the data path.
+///
+/// Incoming messages are delivered through an mpsc channel
+/// because the underlying `on_message` hook is callback-style
+/// rather than async-read style. The channel buffer is sized to
+/// absorb short bursts; sustained overrun causes the callback
+/// to drop packets (matching UDP-like semantics for a fair
+/// comparison with DRIFT's other datagram adapters).
+pub struct WebRTCPacketIO {
+    dc: std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    addr: SocketAddr,
+}
+
+impl WebRTCPacketIO {
+    /// Wrap an already-open data channel. Installs an
+    /// `on_message` handler that forwards incoming bytes into
+    /// an mpsc channel drained by `recv_from`. `addr` is a
+    /// placeholder for the `PacketIO` trait's SocketAddr
+    /// requirement — WebRTC connections aren't addressed by
+    /// ip:port at the peer level.
+    pub fn new(
+        dc: std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
+        addr: SocketAddr,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let tx_arc = std::sync::Arc::new(tx);
+        let tx_hook = tx_arc.clone();
+        dc.on_message(Box::new(
+            move |msg: webrtc::data_channel::data_channel_message::DataChannelMessage| {
+                let tx = tx_hook.clone();
+                Box::pin(async move {
+                    // Binary messages only; string payloads are
+                    // not part of DRIFT's wire format. A
+                    // full-buffer try_send drops the packet to
+                    // stay callback-non-blocking.
+                    if !msg.is_string {
+                        let _ = tx.try_send(msg.data.to_vec());
+                    }
+                })
+            },
+        ));
+        Self {
+            dc,
+            rx: tokio::sync::Mutex::new(rx),
+            addr,
+        }
+    }
+}
+
+#[async_trait]
+impl PacketIO for WebRTCPacketIO {
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+        let bytes = bytes::Bytes::copy_from_slice(buf);
+        self.dc
+            .send(&bytes)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(buf.len())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let data = self
+            .rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::ConnectionReset, "data channel closed")
+            })?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        Ok((n, self.addr))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.addr)
+    }
+}
+
 /// A set of named packet I/O interfaces that a single DRIFT
 /// transport listens on simultaneously. Incoming packets
 /// from ANY interface are multiplexed into a single recv
