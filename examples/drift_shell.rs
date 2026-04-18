@@ -47,19 +47,23 @@ const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_CONVERGENCE_WAIT: Duration = Duration::from_millis(600);
 
 fn bridge_id() -> Identity { Identity::from_secret_bytes([0xBB; 32]) }
-fn server_id() -> Identity { Identity::from_secret_bytes([0x55; 32]) }
 
-// Client identity is seeded from its bind IP so clients from different
-// IPs don't collide in the server's peer table.
-fn client_id_for(ip: &str) -> Identity {
+// Identity derived from a role tag + IP string. Lets the demo
+// give each local IP its own stable server and client identities
+// without any runtime key exchange — both sides of a request can
+// compute the same peer_id from the same inputs.
+fn identity_for(role: u8, ip: &str) -> Identity {
     let mut seed = [0u8; 32];
-    seed[0] = 0xC1;
+    seed[0] = role;
     let bytes = ip.as_bytes();
     for (i, b) in bytes.iter().take(30).enumerate() {
         seed[i + 1] = *b;
     }
     Identity::from_secret_bytes(seed)
 }
+
+fn server_id_for(ip: &str) -> Identity { identity_for(0x55, ip) }
+fn client_id_for(ip: &str) -> Identity { identity_for(0xC1, ip) }
 
 fn cfg() -> TransportConfig {
     TransportConfig {
@@ -89,12 +93,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_server(&bind, rotation as u32).await
         }
         "client" => {
-            let bind = args.get(2).ok_or("client <bind_ip> <cmd...>")?.to_string();
-            if args.len() < 4 {
-                return Err("client <bind_ip> <cmd...>".into());
+            // client <bind_ip> --target <ip>  <cmd...>
+            // client <bind_ip> --any              <cmd...>   (iterates known server IPs)
+            let bind = args.get(2).ok_or("client <bind_ip> --target <ip>|--any <cmd...>")?.to_string();
+            let mode_flag = args.get(3).map(String::as_str).unwrap_or("");
+            let (targets, cmd_start) = match mode_flag {
+                "--target" => {
+                    let t = args.get(4).ok_or("--target <ip>")?.to_string();
+                    (vec![t], 5)
+                }
+                "--any" => (
+                    vec!["127.0.0.1".into(), "127.0.0.2".into(), "127.0.0.3".into()],
+                    4,
+                ),
+                _ => return Err("expected --target <ip> or --any".into()),
+            };
+            if args.len() <= cmd_start {
+                return Err("missing command".into());
             }
-            let cmd = args[3..].join(" ");
-            run_client(&bind, &cmd).await
+            let cmd = args[cmd_start..].join(" ");
+            run_client(&bind, &targets, &cmd).await
         }
         _ => {
             eprintln!("usage: drift-shell <bridge|server|client> ...");
@@ -153,7 +171,7 @@ impl ServerState {
 }
 
 async fn run_server(bind_ip: &str, rotation: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = server_id();
+    let identity = server_id_for(bind_ip);
     let my_pid_hex = hex_full(&derive_peer_id(&identity.public_bytes()));
     let bind_addr: SocketAddr = format!("{}:0", bind_ip).parse()?;
     let transport = Arc::new(
@@ -244,7 +262,11 @@ fn bump_counter() -> u64 {
     next
 }
 
-async fn run_client(bind_ip: &str, cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_client(
+    bind_ip: &str,
+    targets: &[String],
+    cmd: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client_id_for(bind_ip);
     let bind_addr: SocketAddr = format!("{}:0", bind_ip).parse()?;
     let transport = Arc::new(
@@ -252,48 +274,59 @@ async fn run_client(bind_ip: &str, cmd: &str) -> Result<(), Box<dyn std::error::
     );
     let bridge_pub = bridge_id().public_bytes();
     let bridge_pid = derive_peer_id(&bridge_pub);
-    let server_pub = server_id().public_bytes();
-    let server_pid = derive_peer_id(&server_pub);
 
     transport
         .add_peer(bridge_pub, BRIDGE_ADDR.parse()?, Direction::Initiator)
         .await?;
-    transport
-        .add_peer(server_pub, BRIDGE_ADDR.parse()?, Direction::Initiator)
-        .await?;
 
-    // Handshake with the bridge.
+    // Register every candidate target so we can address each by peer_id.
+    let mut target_pids: Vec<(String, [u8; 8])> = Vec::with_capacity(targets.len());
+    for ip in targets {
+        let pub_bytes = server_id_for(ip).public_bytes();
+        let pid = derive_peer_id(&pub_bytes);
+        transport
+            .add_peer(pub_bytes, BRIDGE_ADDR.parse()?, Direction::Initiator)
+            .await?;
+        target_pids.push((ip.clone(), pid));
+    }
+
+    // Handshake with the bridge and let beacons converge.
     transport.send_data(&bridge_pid, b"warmup", 0, 0).await?;
-    // Let the bridge's beacon advertise the server's current route
-    // into our routing table.
     tokio::time::sleep(CLIENT_CONVERGENCE_WAIT).await;
 
-    // Send the command (triggers cross-peer handshake with server on first send).
-    transport.send_data(&server_pid, cmd.as_bytes(), 0, 0).await?;
+    // Fire the command at every candidate target. Only the one
+    // whose server is currently running will reply.
+    for (_, pid) in &target_pids {
+        let _ = transport.send_data(pid, cmd.as_bytes(), 0, 0).await;
+    }
 
-    // Wait for the reply.
+    // Collect replies until we've heard from every live server
+    // or the deadline fires.
     let deadline = Instant::now() + CLIENT_RESPONSE_TIMEOUT;
-    loop {
-        if Instant::now() >= deadline {
-            println!("[client/{}] TIMEOUT waiting for server reply ({})", bind_ip, cmd);
-            std::process::exit(1);
-        }
+    let mut heard: Vec<String> = Vec::new();
+    while Instant::now() < deadline && heard.len() < target_pids.len() {
         match tokio::time::timeout(Duration::from_millis(200), transport.recv()).await {
             Ok(Some(pkt)) => {
-                if pkt.peer_id == server_pid {
+                if let Some((ip, _)) = target_pids.iter().find(|(_, p)| *p == pkt.peer_id) {
                     let resp = String::from_utf8_lossy(&pkt.payload);
-                    print!("[client/{}] {}", bind_ip, resp);
-                    if !resp.ends_with('\n') {
-                        println!();
-                    }
-                    return Ok(());
+                    let resp = resp.trim_end_matches('\n');
+                    println!("[client/{}] target={} -> {}", bind_ip, ip, resp);
+                    heard.push(ip.clone());
                 }
-                // Stray packet (bridge warmup echo etc); ignore.
             }
-            Ok(None) => return Ok(()),
+            Ok(None) => break,
             Err(_) => {}
         }
     }
+    let silent: Vec<_> = target_pids
+        .iter()
+        .filter(|(ip, _)| !heard.contains(ip))
+        .map(|(ip, _)| ip.as_str())
+        .collect();
+    if !silent.is_empty() {
+        println!("[client/{}] silent: {}", bind_ip, silent.join(", "));
+    }
+    Ok(())
 }
 
 fn hex8(b: &[u8]) -> String {
