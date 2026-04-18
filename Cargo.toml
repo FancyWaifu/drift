@@ -112,3 +112,7 @@ path = "examples/churn_node.rs"
 [[example]]
 name = "drift-medium-demo"
 path = "examples/medium_demo.rs"
+
+[[example]]
+name = "drift-shell"
+path = "examples/drift_shell.rs"
