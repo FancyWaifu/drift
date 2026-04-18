@@ -158,11 +158,22 @@ async fn emit_beacons_skips_via_mesh_peers() {
     );
 
     // The bridge should not register any auth failures during
-    // this window — `UnknownPeer` drops don't touch auth_failures,
-    // so this just rules out unrelated regressions.
+    // this window.
     assert_eq!(
         b_auth_before, b_auth_after,
         "bridge auth_failures moved during steady-state beacons",
+    );
+
+    // No unknown-peer drops at the bridge across the full run —
+    // catches the beacon bug (wrong filter), the ResumptionTicket
+    // bug (missing hop_ttl for mesh peers), and any future
+    // control-packet emitter that forgets to honor via_mesh.
+    let bridge_metrics = bridge.metrics();
+    assert_eq!(
+        bridge_metrics.unknown_peer_drops, 0,
+        "bridge dropped {} packets as UnknownPeer — a control-packet \
+         emitter is shipping `hop_ttl=1` to a mesh-routed peer",
+        bridge_metrics.unknown_peer_drops,
     );
 
     // Sanity: the cross-medium session is still alive — send one
