@@ -18,7 +18,7 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry.
 
-**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), and in-memory channels. Plug in serial, BLE, or anything else.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebRTC data channels (browser-to-browser, no server in the data path), and in-memory channels. Plug in TLS, QUIC, serial, BLE, or anything else.
 
 **Observability** — 30+ runtime metrics. Structured NDJSON qlog. XOR-based FEC for lossy links.
 
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Non-UDP Transports
 
 ```rust
-use drift::io::{TcpPacketIO, WsPacketIO};
+use drift::io::{TcpPacketIO, WebRTCPacketIO, WsPacketIO};
 
 // TCP (firewall traversal)
 let tcp = tokio::net::TcpStream::connect("10.0.0.5:443").await?;
@@ -59,18 +59,29 @@ let transport = Transport::bind_with_io(Arc::new(TcpPacketIO::new(tcp)?), identi
 // WebSocket (browser-to-server, CDN-friendly)
 let (ws, _) = tokio_tungstenite::connect_async("ws://10.0.0.5:8080").await?;
 let transport = Transport::bind_with_io(Arc::new(WsPacketIO::new(ws, addr)), identity, config).await?;
+
+// WebRTC (browser-to-browser after SDP exchange — no server in the data path)
+let dc: Arc<RTCDataChannel> = /* exchange SDP offer/answer, open data channel */;
+let transport = Transport::bind_with_io(Arc::new(WebRTCPacketIO::new(dc, addr)), identity, config).await?;
 ```
 
 ### Multi-Interface Bridging
 
-A single node can bridge across mediums — UDP peers talk to TCP peers talk to WebSocket peers through one bridge, zero medium-specific routing code:
+A single node can bridge across mediums — UDP peers talk to TCP peers talk to WebSocket peers talk to WebRTC peers through one bridge, zero medium-specific routing code:
 
 ```rust
 let bridge = Transport::bind("0.0.0.0:9000".parse()?, bridge_id).await?;
 bridge.add_interface("tcp", Arc::new(TcpPacketIO::new(tcp_stream)?));
 bridge.add_interface("websocket", Arc::new(WsPacketIO::new(ws_stream, addr)));
+bridge.add_interface("webrtc", Arc::new(WebRTCPacketIO::new(data_channel, addr)));
 // Packets route by identity, not by medium.
 ```
+
+### Runnable Examples
+
+- **`drift-chat`** (`examples/drift_chat.rs`) — four-node chat, one per medium (UDP / TCP / WebSocket / WebRTC) on distinct loopback IPs, all talking through a bridge. Auto mode or interactive stdin.
+- **`drift-shell`** (`examples/drift_shell.rs`) — tiny command server (`time`, `count`, `whoami`, `echo`, …) reachable over DRIFT. Used by `demo-shell.sh` to demonstrate server mobility: one identity migrates across IPs, clients keep reaching it by peer_id.
+- **`drift-medium-demo`** (`examples/medium_demo.rs`) — three distinct source IPs on three mediums bridged end to end.
 
 ## Wire Format
 
@@ -91,7 +102,7 @@ src/
   short_header.rs      7-byte compact header with Connection IDs
   session.rs           Handshake state machine, replay protection
   streams.rs           Reliable streams, NewReno + BBR congestion control
-  io.rs                PacketIO trait + UDP/TCP/WebSocket/Memory adapters
+  io.rs                PacketIO trait + UDP/TCP/WebSocket/WebRTC/Memory adapters
   pq.rs                Post-quantum hybrid (X25519 + ML-KEM-768)
   fec.rs               XOR forward error correction
   multipath.rs         RTT-weighted path selection
@@ -110,18 +121,20 @@ src/
 
 ## Testing
 
-~200 tests across 60+ files:
+~200 tests across 61 integration files + 68 lib tests:
 
-- **Correctness**: wire format KAT, header proptests, handshake state machine, rekey, resumption
+- **Correctness**: wire format KAT, header proptests, handshake state machine, rekey, resumption, route migration at equal cost
 - **Security**: 17+ attack scenarios (replay, hijack, amplification, flood, beacon poisoning, weak keys)
 - **Reliability**: 10–65% packet loss, 2s RTT satellite links, 10 Kbps bandwidth caps, intermittent connectivity
 - **Scale**: 1000 concurrent handshakes, 64-client fan-in, 5-node full mesh
-- **Cross-medium**: four-medium bridge (UDP + TCP + Memory + WebSocket) with streams, datagrams, and coalescing
+- **Cross-medium**: four-medium bridge (UDP + TCP + Memory + WebSocket) with streams, datagrams, and coalescing; five-medium extended via WebRTC through the `drift-chat` example
+- **Mesh mobility**: post-handshake beacon discipline, stale-route invalidation on send failure, peer self-migration at equal cost
 - **Docker**: 30+ compose scenarios (mesh, NAT, chaos, extreme loss)
 
 ```bash
 cargo test                # full suite
 cargo bench               # throughput benchmarks
+./demo-shell.sh           # live multi-IP rotation + multi-identity demo (needs lo0 aliases)
 ```
 
 ## vs Reticulum
@@ -134,7 +147,7 @@ cargo bench               # throughput benchmarks
 | **Reliable delivery** | Message-level | Multiplexed streams |
 | **Session resumption** | No | 1-RTT PSK |
 | **Post-quantum** | No | ML-KEM-768 hybrid |
-| **Transport mediums** | Any | Any (via PacketIO trait) |
+| **Transport mediums** | Any | Any (via PacketIO trait): UDP, TCP, WebSocket, WebRTC, memory, serial-ready |
 | **Implementation** | Python | Rust |
 
 ## Inspiration
