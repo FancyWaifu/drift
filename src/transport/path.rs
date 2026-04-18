@@ -48,11 +48,8 @@ pub(crate) fn build_path_challenge_packet(
     let seq = peer
         .next_seq_checked()
         .ok_or(DriftError::SessionExhausted)?;
-    let send_time_ms = peer.send_time_ms();
-    let mut header =
-        Header::new(PacketType::PathChallenge, seq, local_peer_id, peer.id);
+    let mut header = peer.make_header(PacketType::PathChallenge, seq, local_peer_id);
     header.payload_len = (PATH_CHALLENGE_LEN + AUTH_TAG_LEN) as u16;
-    header.send_time_ms = send_time_ms;
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
@@ -79,11 +76,8 @@ pub(crate) fn build_path_response_packet(
     let seq = peer
         .next_seq_checked()
         .ok_or(DriftError::SessionExhausted)?;
-    let send_time_ms = peer.send_time_ms();
-    let mut header =
-        Header::new(PacketType::PathResponse, seq, local_peer_id, peer.id);
+    let mut header = peer.make_header(PacketType::PathResponse, seq, local_peer_id);
     header.payload_len = (PATH_CHALLENGE_LEN + AUTH_TAG_LEN) as u16;
-    header.send_time_ms = send_time_ms;
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);

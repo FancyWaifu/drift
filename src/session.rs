@@ -1,6 +1,6 @@
 use crate::crypto::{Direction, PeerId, SessionKey};
 use crate::error::{DriftError, Result};
-use crate::header::Header;
+use crate::header::{Header, PacketType};
 use crate::identity::{Identity, NONCE_LEN};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -331,6 +331,32 @@ impl Peer {
             Some(epoch) => epoch.elapsed().as_millis().min(u32::MAX as u128) as u32,
             None => 0,
         }
+    }
+
+    /// Build a fresh outgoing long-header for a packet addressed
+    /// to this peer. Centralizes the three things every
+    /// post-handshake emitter needs to get right:
+    ///
+    ///   * `src_id = local_peer_id`, `dst_id = self.id`
+    ///   * `hop_ttl = DEFAULT_MESH_TTL` iff this peer is only
+    ///     reachable via mesh — without this, intermediate
+    ///     relays silently drop the packet at their forward gate
+    ///   * `send_time_ms` is stamped with our session epoch
+    ///
+    /// Callers still set `payload_len` themselves, since that
+    /// depends on the packet body they're about to build.
+    pub fn make_header(
+        &self,
+        packet_type: PacketType,
+        seq: u32,
+        local_peer_id: PeerId,
+    ) -> Header {
+        let mut h = Header::new(packet_type, seq, local_peer_id, self.id);
+        if self.via_mesh {
+            h = h.with_hop_ttl(crate::transport::mesh::DEFAULT_MESH_TTL);
+        }
+        h.send_time_ms = self.send_time_ms();
+        h
     }
 
     /// Check whether a received packet is still "live" according to its

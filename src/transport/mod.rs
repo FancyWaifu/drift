@@ -28,7 +28,7 @@ mod batch;
 mod cookies;
 #[cfg(unix)]
 mod ecn;
-mod mesh;
+pub(crate) mod mesh;
 mod path;
 mod peer_shards;
 mod qlog;
@@ -939,10 +939,8 @@ impl Inner {
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut header =
-                Header::new(PacketType::RekeyRequest, seq, self.local_peer_id, peer.id);
+            let mut header = peer.make_header(PacketType::RekeyRequest, seq, self.local_peer_id);
             header.payload_len = (32 + AUTH_TAG_LEN) as u16;
-            header.send_time_ms = peer.send_time_ms();
             let mut hbuf = [0u8; HEADER_LEN];
             header.encode(&mut hbuf);
             let aad = canonical_aad(&hbuf);
@@ -1062,10 +1060,8 @@ impl Inner {
             let ack_seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut ack_header =
-                Header::new(PacketType::RekeyAck, ack_seq, self.local_peer_id, peer_id);
+            let mut ack_header = peer.make_header(PacketType::RekeyAck, ack_seq, self.local_peer_id);
             ack_header.payload_len = AUTH_TAG_LEN as u16;
-            ack_header.send_time_ms = peer.send_time_ms();
             let mut ack_hbuf = [0u8; HEADER_LEN];
             ack_header.encode(&mut ack_hbuf);
             let ack_aad = canonical_aad(&ack_hbuf);
@@ -2594,10 +2590,8 @@ fn build_close_packet(local_peer_id: PeerId, peer: &mut Peer) -> Result<Vec<u8>>
     let seq = peer
         .next_seq_checked()
         .ok_or(DriftError::SessionExhausted)?;
-    let send_time_ms = peer.send_time_ms();
-    let mut header = Header::new(PacketType::Close, seq, local_peer_id, peer.id);
+    let mut header = peer.make_header(PacketType::Close, seq, local_peer_id);
     header.payload_len = AUTH_TAG_LEN as u16;
-    header.send_time_ms = send_time_ms;
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);

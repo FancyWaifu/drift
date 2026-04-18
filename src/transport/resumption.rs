@@ -35,7 +35,6 @@ use super::Inner;
 use crate::crypto::{Direction, PeerId, SessionKey};
 use crate::error::{DriftError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
-use crate::transport::mesh::DEFAULT_MESH_TTL;
 use crate::identity::{Identity, NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::{HandshakeState, PendingResumption, PrevSession};
 use blake2::{digest::consts::U32, Blake2b, Digest};
@@ -315,22 +314,12 @@ impl Inner {
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut header = Header::new(
+            let mut header = peer.make_header(
                 PacketType::ResumptionTicket,
                 seq,
                 self.local_peer_id,
-                peer_id,
             );
-            // Mesh-routed peers need hop_ttl set so intermediate
-            // relays forward the ticket. Without this, the relay's
-            // forward gate (hop_ttl > 1) fails, the packet falls
-            // through to `handle_resumption_ticket`, and the relay
-            // rejects it as UnknownPeer because dst != self.
-            if peer.via_mesh {
-                header = header.with_hop_ttl(DEFAULT_MESH_TTL);
-            }
             header.payload_len = (TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN) as u16;
-            header.send_time_ms = peer.send_time_ms();
             let mut hbuf = [0u8; HEADER_LEN];
             header.encode(&mut hbuf);
             let aad = canonical_aad(&hbuf);
@@ -513,11 +502,10 @@ impl Inner {
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;
-            let mut header = Header::new(
+            let mut header = peer.make_header(
                 PacketType::ResumeHello,
                 seq,
                 self.local_peer_id,
-                peer_id,
             );
             header.payload_len = RESUME_HELLO_BODY_LEN as u16;
             let mut hbuf = [0u8; HEADER_LEN];
@@ -649,11 +637,10 @@ impl Inner {
 
             // Build header.
             let seq = 1u32;
-            let mut header = Header::new(
+            let mut header = peer.make_header(
                 PacketType::ResumeAck,
                 seq,
                 self.local_peer_id,
-                client_peer_id,
             );
             header.payload_len = RESUME_ACK_BODY_LEN as u16;
             let mut hbuf = [0u8; HEADER_LEN];
