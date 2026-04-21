@@ -17,10 +17,8 @@
 
 mod ws_transport;
 
-use drift_core::crypto::{derive_peer_id, Direction, SessionKey};
-use drift_core::header::{Header, PacketType, HEADER_LEN};
-use drift_core::identity::{Identity, STATIC_KEY_LEN};
-use drift_core::session::{HandshakeState, Peer};
+use drift_core::crypto::derive_peer_id;
+use drift_core::identity::Identity;
 use wasm_bindgen::prelude::*;
 
 /// Hex-encode bytes.
