@@ -1,2 +1,4 @@
 */target/
 */pkg/
+drift-wasm/target/
+drift-wasm/pkg/
