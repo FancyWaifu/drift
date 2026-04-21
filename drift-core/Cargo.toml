@@ -1,0 +1,22 @@
+[package]
+name = "drift-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-independent DRIFT protocol primitives"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+blake2 = "0.10"
+siphasher = "1"
+ml-kem = "0.2"
+rand = "0.8"
+thiserror = "1"
+tracing = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+web-time = "1"
+
+[dev-dependencies]
+proptest = "1"
