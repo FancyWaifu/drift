@@ -23,7 +23,7 @@ web-sys = { version = "0.3", features = [
     "RtcPeerConnectionIceEvent", "RtcIceCandidate", "RtcIceCandidateInit",
     "RtcOfferOptions",
     # WebTransport (QUIC over HTTP/3, UDP-like datagrams in the browser)
-    "WebTransport", "WebTransportOptions",
+    "WebTransport", "WebTransportOptions", "WebTransportHash",
     "WebTransportDatagramDuplexStream",
     "ReadableStream", "WritableStream",
     "ReadableStreamDefaultReader", "WritableStreamDefaultWriter",

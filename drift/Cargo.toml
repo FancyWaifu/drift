@@ -20,6 +20,10 @@ ml-kem = "0.2"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 webrtc = "0.11"
+# Native WebTransport server (QUIC/HTTP3). Matches the wasm-side
+# `wire_webtransport.rs` adapter so browsers can hit a DRIFT
+# node over WebTransport for UDP-like datagram semantics.
+wtransport = "0.6"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +37,11 @@ libc = "0.2"
 tokio = { version = "1", features = ["full"] }
 proptest = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
+# Re-enable wtransport with `dangerous-configuration` for tests
+# (unlocks with_no_cert_validation, avoiding cert-hash plumbing
+# for self-signed localhost certs). Production code uses the
+# non-dev-features wtransport from [dependencies] above.
+wtransport = { version = "0.6", features = ["dangerous-configuration"] }
 
 [[bench]]
 name = "throughput"

@@ -26,22 +26,38 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    ReadableStreamDefaultReader, WebTransport, WritableStreamDefaultWriter,
+    ReadableStreamDefaultReader, WebTransport, WebTransportHash, WebTransportOptions,
+    WritableStreamDefaultWriter,
 };
 
 /// Connect to a DRIFT server over WebTransport, perform the
 /// cryptographic handshake with it, and return a ready Session.
 ///
 /// `url` must be an `https://` URL pointing at a WebTransport-
-/// capable HTTP/3 endpoint. On localhost you can pass a
-/// `WebTransportOptions` with `serverCertificateHashes` set,
-/// but the default here uses the system CA pool.
+/// capable HTTP/3 endpoint. If `cert_hash_sha256` is `Some`,
+/// it's added to the browser's `serverCertificateHashes` list,
+/// letting the client pin a self-signed localhost / dev cert
+/// without plumbing a CA. If `None`, the system CA pool is
+/// used (the right choice for public deployments).
 pub(crate) async fn connect(
     url: &str,
     secret: [u8; 32],
     server_pub: [u8; STATIC_KEY_LEN],
+    cert_hash_sha256: Option<&[u8]>,
 ) -> Result<Session, JsValue> {
-    let wt = WebTransport::new(url)?;
+    let wt = match cert_hash_sha256 {
+        None => WebTransport::new(url)?,
+        Some(hash) => {
+            let hash_obj = WebTransportHash::new();
+            hash_obj.set_algorithm("sha-256");
+            let hash_arr = js_sys::Uint8Array::from(hash);
+            hash_obj.set_value(&hash_arr);
+            let hashes = [hash_obj];
+            let opts = WebTransportOptions::new();
+            opts.set_server_certificate_hashes(&hashes);
+            WebTransport::new_with_options(url, &opts)?
+        }
+    };
 
     // Wait for the underlying HTTP/3 session to come up.
     wasm_bindgen_futures::JsFuture::from(wt.ready()).await?;
