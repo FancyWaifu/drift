@@ -195,14 +195,32 @@ impl DriftClient {
     /// DRIFT's UDP-like datagram semantics in the browser —
     /// no TCP retransmit tax on top of DRIFT's own CC. Needs
     /// an `https://` server URL (WebTransport is TLS-only).
+    ///
+    /// `cert_hash_sha256_hex` is optional. If provided (as a
+    /// 64-char hex string of the server cert's SHA-256), the
+    /// browser will pin to that specific cert via
+    /// `serverCertificateHashes` — essential for self-signed
+    /// dev certs. Leave `null` / `undefined` to use the system
+    /// CA pool for public deployments.
     #[wasm_bindgen(js_name = "connectWebTransport")]
     pub async fn connect_web_transport(
         url: &str,
         identity: &DriftIdentity,
         server_pub_hex: &str,
+        cert_hash_sha256_hex: Option<String>,
     ) -> Result<DriftClient, JsValue> {
         let server_pub = parse_pubkey(server_pub_hex)?;
-        let session = wire_webtransport::connect(url, identity.secret, server_pub).await?;
+        let cert_hash_bytes = match cert_hash_sha256_hex {
+            Some(ref h) => Some(from_hex(h)?),
+            None => None,
+        };
+        let session = wire_webtransport::connect(
+            url,
+            identity.secret,
+            server_pub,
+            cert_hash_bytes.as_deref(),
+        )
+        .await?;
         Ok(DriftClient { session })
     }
 

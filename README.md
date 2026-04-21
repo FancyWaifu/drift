@@ -18,7 +18,7 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry.
 
-**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebRTC data channels (browser-to-browser, no server in the data path), and in-memory channels. Plug in TLS, QUIC, serial, BLE, or anything else.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in TLS, serial, BLE, or anything else.
 
 **Observability** — 30+ runtime metrics. Structured NDJSON qlog. XOR-based FEC for lossy links.
 

@@ -28,7 +28,7 @@
 
 use drift::crypto::derive_peer_id;
 use drift::identity::Identity;
-use drift::io::{TcpPacketIO, WebRTCPacketIO, WsPacketIO};
+use drift::io::{TcpPacketIO, WebRTCPacketIO, WebTransportPacketIO, WsPacketIO};
 use drift::{Direction, Transport, TransportConfig};
 use std::env;
 use std::net::SocketAddr;
@@ -46,6 +46,7 @@ const BRIDGE_UDP: &str = "127.0.0.1:9200";
 const BRIDGE_TCP: &str = "127.0.0.1:9201";
 const BRIDGE_WS: &str = "127.0.0.1:9202";
 const BRIDGE_RTC_SIGNALING: &str = "127.0.0.1:9203";
+const BRIDGE_WEBTRANSPORT_PORT: u16 = 9204;
 
 const CHAT_IPS: [&str; 4] = ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4"];
 
@@ -202,6 +203,62 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+
+    // WebTransport (QUIC/HTTP3) — native adapter for browsers
+    // that connect with `new WebTransport(...)`. Uses a self-
+    // signed cert; the SHA-256 hash is printed so browser
+    // clients can pin it via `serverCertificateHashes`.
+    {
+        use wtransport::{Endpoint as WtEndpoint, Identity as WtIdentity, ServerConfig as WtCfg};
+        let identity_wt = WtIdentity::self_signed(["localhost", "127.0.0.1"])?;
+        let cert_hash = identity_wt.certificate_chain().as_slice()[0].hash();
+        let wt_cfg = WtCfg::builder()
+            .with_bind_default(BRIDGE_WEBTRANSPORT_PORT)
+            .with_identity(identity_wt)
+            .keep_alive_interval(Some(Duration::from_secs(3)))
+            .build();
+        let wt_server = WtEndpoint::server(wt_cfg)?;
+        println!(
+            "[bridge] WebTransport listening on 127.0.0.1:{}",
+            BRIDGE_WEBTRANSPORT_PORT
+        );
+        println!(
+            "[bridge] WebTransport cert sha256: {}",
+            cert_hash.fmt(wtransport::tls::Sha256DigestFmt::DottedHex)
+        );
+        let b = bridge.clone();
+        tokio::spawn(async move {
+            loop {
+                let incoming = wt_server.accept().await;
+                let b = b.clone();
+                tokio::spawn(async move {
+                    let session = match incoming.await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[bridge] WebTransport session: {}", e);
+                            return;
+                        }
+                    };
+                    let conn = match session.accept().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("[bridge] WebTransport accept: {}", e);
+                            return;
+                        }
+                    };
+                    let remote = conn.remote_address();
+                    let idx = b.add_interface(
+                        "webtransport",
+                        Arc::new(WebTransportPacketIO::new(conn, remote)),
+                    );
+                    println!(
+                        "[bridge] WebTransport iface {} wired (peer {})",
+                        idx, remote
+                    );
+                });
+            }
+        });
+    }
 
     // Drain recv so warmups don't back up the channel.
     let start = Instant::now();

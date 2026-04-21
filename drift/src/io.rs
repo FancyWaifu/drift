@@ -418,6 +418,65 @@ impl PacketIO for WebRTCPacketIO {
     }
 }
 
+/// WebTransport packet I/O. Wraps a `wtransport::Connection`
+/// and uses its datagram channel as the byte-mover. Each DRIFT
+/// packet becomes one QUIC datagram — unreliable, unordered,
+/// the real thing (no TCP retransmit tax). Matches the browser-
+/// side `drift-wasm::wire_webtransport` adapter exactly, so a
+/// browser WebTransport client can talk to a node running this.
+///
+/// Each instance handles ONE accepted WebTransport connection.
+/// The server-side accept loop wraps each new connection and
+/// calls `Transport::add_interface`, same pattern as the WS
+/// adapter.
+pub struct WebTransportPacketIO {
+    conn: Arc<wtransport::Connection>,
+    addr: SocketAddr,
+}
+
+impl WebTransportPacketIO {
+    /// Wrap an already-accepted `wtransport::Connection`. The
+    /// server's accept loop is the caller. `addr` is the
+    /// browser-side remote address, recorded for the trait's
+    /// SocketAddr requirement.
+    pub fn new(conn: wtransport::Connection, addr: SocketAddr) -> Self {
+        Self {
+            conn: Arc::new(conn),
+            addr,
+        }
+    }
+}
+
+#[async_trait]
+impl PacketIO for WebTransportPacketIO {
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+        // QUIC datagrams have a peer-negotiated max size; if buf
+        // exceeds it, wtransport returns an error. DRIFT's
+        // typical packets are well under 1500 B so this is
+        // rarely hit in practice.
+        self.conn
+            .send_datagram(buf.to_vec())
+            .map_err(io::Error::other)?;
+        Ok(buf.len())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let dgram = self
+            .conn
+            .receive_datagram()
+            .await
+            .map_err(io::Error::other)?;
+        let payload = dgram.payload();
+        let n = payload.len().min(buf.len());
+        buf[..n].copy_from_slice(&payload[..n]);
+        Ok((n, self.addr))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.addr)
+    }
+}
+
 /// A set of named packet I/O interfaces that a single DRIFT
 /// transport listens on simultaneously. Incoming packets
 /// from ANY interface are multiplexed into a single recv
