@@ -1,8 +1,8 @@
 use super::identity::{hex, save_identity};
 use super::{expand_path, KeygenArgs, OutputFormat};
+use anyhow::{bail, Result};
 use drift::crypto::derive_peer_id;
 use drift::identity::Identity;
-use anyhow::{bail, Result};
 
 pub fn run(args: &KeygenArgs, identity_path: &str, format: &OutputFormat) -> Result<()> {
     let path = match &args.output {

@@ -1,10 +1,10 @@
 use super::identity::{from_hex, hex, load_identity};
 use super::{expand_path, ListenArgs, TransportPreset};
+use anyhow::{bail, Result};
 use drift::identity::Identity;
 use drift::io::{TcpPacketIO, WsPacketIO};
 use drift::streams::{Stream, StreamManager};
 use drift::{Direction, Transport, TransportConfig};
-use anyhow::{bail, Result};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -23,17 +23,15 @@ pub async fn run(args: &ListenArgs, identity_path: &str) -> Result<()> {
     config.accept_any_peer = accept_any;
 
     // Bind UDP as the primary interface.
-    let transport: Arc<Transport> = Arc::new(
-        Transport::bind_with_config(args.bind, id, config).await?,
-    );
+    let transport: Arc<Transport> =
+        Arc::new(Transport::bind_with_config(args.bind, id, config).await?);
     let base_port = args.bind.port();
 
     eprintln!("adapters:");
     eprintln!("  [1] UDP  {}", transport.local_addr()?);
 
     // Bind TCP on base_port + 1.
-    let tcp_addr: std::net::SocketAddr =
-        format!("{}:{}", args.bind.ip(), base_port + 1).parse()?;
+    let tcp_addr: std::net::SocketAddr = format!("{}:{}", args.bind.ip(), base_port + 1).parse()?;
     let tcp_listener = TcpListener::bind(tcp_addr).await?;
     let tcp_local = tcp_listener.local_addr()?;
     eprintln!("  [2] TCP  {}", tcp_local);
@@ -64,8 +62,7 @@ pub async fn run(args: &ListenArgs, identity_path: &str) -> Result<()> {
     });
 
     // Bind WebSocket on base_port + 2.
-    let ws_addr: std::net::SocketAddr =
-        format!("{}:{}", args.bind.ip(), base_port + 2).parse()?;
+    let ws_addr: std::net::SocketAddr = format!("{}:{}", args.bind.ip(), base_port + 2).parse()?;
     let ws_listener = TcpListener::bind(ws_addr).await?;
     let ws_local = ws_listener.local_addr()?;
     eprintln!("  [3] WS   {}", ws_local);
@@ -86,10 +83,7 @@ pub async fn run(args: &ListenArgs, identity_path: &str) -> Result<()> {
             let name = format!("ws-{}", ws_count);
             match tokio_tungstenite::accept_async(tcp_stream).await {
                 Ok(ws) => {
-                    transport_ws.add_interface(
-                        &name,
-                        Arc::new(WsPacketIO::new(ws, peer_addr)),
-                    );
+                    transport_ws.add_interface(&name, Arc::new(WsPacketIO::new(ws, peer_addr)));
                     eprintln!("  [ws] accepted connection from {}", peer_addr);
                 }
                 Err(e) => eprintln!("ws upgrade error: {}", e),
@@ -178,15 +172,11 @@ pub async fn run(args: &ListenArgs, identity_path: &str) -> Result<()> {
 async fn handle_stream(stream: Stream, output_dir: Option<&Path>) -> Result<()> {
     let peer = stream.peer();
 
-    let header: Vec<u8> = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        stream.recv(),
-    )
-    .await
-    {
-        Ok(Some(data)) => data,
-        _ => bail!("stream closed before header"),
-    };
+    let header: Vec<u8> =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), stream.recv()).await {
+            Ok(Some(data)) => data,
+            _ => bail!("stream closed before header"),
+        };
 
     let (filename, has_header) = if header.len() >= 2 {
         let name_len = u16::from_be_bytes([header[0], header[1]]) as usize;

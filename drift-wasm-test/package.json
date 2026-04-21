@@ -1,0 +1,12 @@
+{
+  "name": "drift-wasm-test",
+  "version": "0.1.0",
+  "description": "End-to-end test: drift-wasm client handshaking with a native DRIFT server",
+  "type": "module",
+  "scripts": {
+    "test": "node test-wasm.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
+}
