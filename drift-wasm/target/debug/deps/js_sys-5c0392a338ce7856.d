@@ -1,0 +1,10 @@
+/Users/bryson.allen/projects/drift/drift-wasm/target/debug/deps/js_sys-5c0392a338ce7856.d: /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/lib.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/mod.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/queue.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/task/singlethread.rs
+
+/Users/bryson.allen/projects/drift/drift-wasm/target/debug/deps/libjs_sys-5c0392a338ce7856.rlib: /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/lib.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/mod.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/queue.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/task/singlethread.rs
+
+/Users/bryson.allen/projects/drift/drift-wasm/target/debug/deps/libjs_sys-5c0392a338ce7856.rmeta: /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/lib.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/mod.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/queue.rs /Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/task/singlethread.rs
+
+/Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/lib.rs:
+/Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/mod.rs:
+/Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/queue.rs:
+/Users/bryson.allen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.95/src/futures/task/singlethread.rs:

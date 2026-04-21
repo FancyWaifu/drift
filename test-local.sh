@@ -46,7 +46,7 @@ fail() { echo -e "${RED}${BOLD}  FAIL${RESET} $1"; }
 # ── Build ──────────────────────────────────────────────────
 
 log "Building examples (release)..."
-cargo build --release --examples 2>&1 | tail -1
+cargo build --release -p drift --examples 2>&1 | tail -1
 BIN=target/release/examples
 echo ""
 

@@ -1,0 +1,131 @@
+[package]
+name = "drift"
+version = "0.1.0"
+edition = "2021"
+description = "Deadline-aware, identity-based UDP transport with semantic coalescing"
+
+[dependencies]
+drift-core = { path = "../drift-core" }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "io-util", "signal"] }
+async-trait = "0.1"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+blake2 = "0.10"
+siphasher = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ml-kem = "0.2"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+webrtc = "0.11"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bin]]
+name = "drift"
+path = "src/main.rs"
+
+[[example]]
+name = "drift-send"
+path = "examples/send.rs"
+
+[[example]]
+name = "drift-recv"
+path = "examples/recv.rs"
+
+[[example]]
+name = "drift-mesh"
+path = "examples/mesh.rs"
+
+[[example]]
+name = "lossy-proxy"
+path = "examples/lossy_proxy.rs"
+
+[[example]]
+name = "drift-relay"
+path = "examples/relay.rs"
+
+[[example]]
+name = "big-send"
+path = "examples/big_send.rs"
+
+[[example]]
+name = "scale-client"
+path = "examples/scale_client.rs"
+
+[[example]]
+name = "scale-server"
+path = "examples/scale_server.rs"
+
+[[example]]
+name = "drift-ring"
+path = "examples/ring.rs"
+
+[[example]]
+name = "drift-dir-server"
+path = "examples/dir_server.rs"
+
+[[example]]
+name = "drift-dir-client"
+path = "examples/dir_client.rs"
+
+[[example]]
+name = "drift-peer"
+path = "examples/peer.rs"
+
+[[example]]
+name = "drift-tun"
+path = "examples/drift_tun.rs"
+
+[[example]]
+name = "resumption-server"
+path = "examples/resumption_server.rs"
+
+[[example]]
+name = "resumption-client"
+path = "examples/resumption_client.rs"
+
+[[example]]
+name = "drift-reconnect-node"
+path = "examples/reconnect_node.rs"
+
+[[example]]
+name = "drift-mesh-node-v2"
+path = "examples/mesh_node.rs"
+
+[[example]]
+name = "drift-churn-node"
+path = "examples/churn_node.rs"
+
+[[example]]
+name = "drift-medium-demo"
+path = "examples/medium_demo.rs"
+
+[[example]]
+name = "drift-shell"
+path = "examples/drift_shell.rs"
+
+[[example]]
+name = "drift-chat"
+path = "examples/drift_chat.rs"
+
+[[example]]
+name = "drift-kv"
+path = "examples/drift_kv.rs"
