@@ -1,0 +1,6 @@
+# web-sys's WebTransport bindings are gated behind this cfg
+# because the spec is still considered "unstable" upstream —
+# even though Chrome / Firefox / Safari all ship it. We only
+# apply this to wasm32 builds so native builds are unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

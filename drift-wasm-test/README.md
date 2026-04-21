@@ -17,6 +17,21 @@ Both sides execute the *same* `drift-core` code compiled to
 different targets. If the handshakes complete and the native
 peers decrypt the DATA packets, the two are wire-compatible.
 
+## Supported browser transports
+
+drift-wasm ships three wire adapters, all pluggable into the
+same `DriftClient`:
+
+| Wire | `DriftClient` constructor | Best for |
+|------|--------------------------|----------|
+| **WebSocket** | `connectWebSocket(url, id, serverPubHex)` | Universal, works everywhere |
+| **WebRTC data channel** | `connectWebRtc(dataChannel, id, peerPubHex)` | Browser↔browser, no server in data path |
+| **WebTransport** | `connectWebTransport(url, id, serverPubHex)` | UDP-like datagrams, preserves DRIFT's deadline/coalesce semantics |
+
+The Node-based test harness below only exercises the WebSocket
+adapter (Node's WebSocket polyfill is easiest to wire). A real
+browser harness would use any of the three.
+
 ## Prerequisites
 
 ```bash

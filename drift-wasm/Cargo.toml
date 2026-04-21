@@ -15,6 +15,18 @@ web-sys = { version = "0.3", features = [
     "WebSocket", "MessageEvent", "BinaryType",
     "ErrorEvent", "CloseEvent", "Event",
     "console",
+    # WebRTC data channel (browser-side P2P adapter)
+    "RtcPeerConnection", "RtcConfiguration", "RtcIceServer",
+    "RtcDataChannel", "RtcDataChannelInit", "RtcDataChannelEvent",
+    "RtcDataChannelType",
+    "RtcSessionDescription", "RtcSessionDescriptionInit", "RtcSdpType",
+    "RtcPeerConnectionIceEvent", "RtcIceCandidate", "RtcIceCandidateInit",
+    "RtcOfferOptions",
+    # WebTransport (QUIC over HTTP/3, UDP-like datagrams in the browser)
+    "WebTransport", "WebTransportOptions",
+    "WebTransportDatagramDuplexStream",
+    "ReadableStream", "WritableStream",
+    "ReadableStreamDefaultReader", "WritableStreamDefaultWriter",
 ] }
 js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
