@@ -15,6 +15,7 @@
 //! client.onMessage((data) => console.log(new TextDecoder().decode(data)));
 //! ```
 
+mod peer_session;
 mod ws_transport;
 
 use drift_core::crypto::derive_peer_id;
@@ -154,13 +155,52 @@ impl DriftClient {
         Ok(DriftClient { inner: transport })
     }
 
-    /// Send a datagram (raw bytes) to the connected peer.
+    /// Send a datagram (raw bytes) to the direct server (the
+    /// bridge/relay this client is connected to).
     pub async fn send(&self, data: &[u8]) -> Result<(), JsValue> {
-        self.inner.send_data(data).await
+        let server_pid = self.inner.server_peer_id();
+        self.inner.send_data_to(server_pid, data).await
     }
 
-    /// Register a callback for incoming messages.
-    /// The callback receives a `Uint8Array`.
+    /// Register an additional peer reachable through the server
+    /// via mesh routing. The handshake with that peer rides the
+    /// same WebSocket; the server forwards to wherever that peer
+    /// lives (UDP / TCP / WS / WebRTC). Resolves when the new
+    /// session is Established.
+    #[wasm_bindgen(js_name = "addPeer")]
+    pub async fn add_peer(&self, peer_pub_hex: &str) -> Result<String, JsValue> {
+        let bytes = from_hex(peer_pub_hex)?;
+        if bytes.len() != 32 {
+            return Err(JsValue::from_str("peer public key must be 64 hex chars"));
+        }
+        let mut peer_pub = [0u8; 32];
+        peer_pub.copy_from_slice(&bytes);
+        self.inner.add_peer(peer_pub).await?;
+        Ok(hex(&drift_core::crypto::derive_peer_id(&peer_pub)))
+    }
+
+    /// Send an AEAD-encrypted DATA packet to a specific peer
+    /// (either the server or a previously-added mesh peer).
+    /// The target is identified by its peer_id hex.
+    #[wasm_bindgen(js_name = "sendToPeer")]
+    pub async fn send_to_peer(
+        &self,
+        peer_id_hex: &str,
+        data: &[u8],
+    ) -> Result<(), JsValue> {
+        let bytes = from_hex(peer_id_hex)?;
+        if bytes.len() != 8 {
+            return Err(JsValue::from_str("peer_id must be 16 hex chars"));
+        }
+        let mut peer_id = [0u8; 8];
+        peer_id.copy_from_slice(&bytes);
+        self.inner.send_data_to(peer_id, data).await
+    }
+
+    /// Register a callback for incoming messages. The callback
+    /// is invoked as `cb(srcPeerIdHex, Uint8Array)` so the app
+    /// can tell which peer a message came from in a multi-peer
+    /// setup.
     #[wasm_bindgen(js_name = "onMessage")]
     pub fn on_message(&self, callback: js_sys::Function) {
         self.inner.set_on_message(callback);

@@ -1,14 +1,21 @@
 # drift-wasm-test
 
 End-to-end verification that **the drift-wasm crate, compiled to
-WebAssembly, can handshake and exchange encrypted data with a
-native DRIFT server** — by running the WASM under Node with a
-WebSocket polyfill and pointing it at a live `drift-chat bridge`.
+WebAssembly, interops with native DRIFT** — two scenarios:
+
+* `test-wasm.mjs` — WASM client handshakes with a native DRIFT
+  bridge over WebSocket and sends one encrypted DATA packet.
+  Proves WASM↔server interop.
+* `test-mesh.mjs` — WASM client connects to the bridge, then
+  mesh-handshakes with a **UDP peer** that's also connected to
+  the bridge. Sends a DATA packet addressed to that UDP peer.
+  Proves **WASM → bridge → UDP peer** end-to-end with DRIFT's
+  end-to-end crypto intact (the bridge never sees plaintext of
+  the mesh message).
 
 Both sides execute the *same* `drift-core` code compiled to
-different targets. If the handshake completes and the native
-server decrypts a DATA packet from the WASM client, the two
-are genuinely wire-compatible.
+different targets. If the handshakes complete and the native
+peers decrypt the DATA packets, the two are wire-compatible.
 
 ## Prerequisites
 
@@ -33,7 +40,7 @@ wasm-pack build drift-wasm --target nodejs --out-dir pkg-node
 This produces `drift-wasm/pkg-node/drift_wasm.js` and the
 companion `.wasm` that `test-wasm.mjs` loads.
 
-## Run the end-to-end test
+## Run test-wasm (WASM → bridge)
 
 ```bash
 # Terminal 1 — native DRIFT bridge with a WS listener.
@@ -45,8 +52,29 @@ cargo run -p drift --example drift-chat -- bridge
 
 # Terminal 2 — the wasm client connects + handshakes + sends.
 cd drift-wasm-test
-node test-wasm.mjs ws://127.0.0.1:9202 6b0b616d718e53691236d3be3ce6d44f9d28836426d81305d131f488206f8d2b
+node test-wasm.mjs ws://127.0.0.1:9202 <bridge-pub-hex>
 ```
+
+## Run test-mesh (WASM → bridge → UDP peer)
+
+```bash
+# Terminal 1 — bridge
+cargo run -p drift --example drift-chat -- bridge
+
+# Terminal 2 — a native UDP peer at 127.0.0.1 (connected to the bridge).
+cargo run -p drift --example drift-chat -- 127.0.0.1 --for 30
+
+# Terminal 3 — wasm client mesh-handshakes with the UDP peer
+# through the bridge and sends a DATA packet to it.
+cd drift-wasm-test
+node test-mesh.mjs ws://127.0.0.1:9202 <bridge-pub-hex>
+```
+
+Expected: the UDP peer's log shows
+`RECV <- ?peer=XXXXXXXX: hello-from-wasm-through-bridge-to-udp-peer`
+— the native UDP peer decrypted a payload sealed by the WASM,
+which never spoke UDP and only ever sent bytes over its one
+WebSocket to the bridge.
 
 Expected output:
 

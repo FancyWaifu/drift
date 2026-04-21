@@ -51,8 +51,8 @@ try {
     const client = await DriftClient.connect(url, id, serverPubHex);
     console.log(`[wasm-test] handshake OK (server peer_id=${client.serverPeerIdHex()})`);
 
-    client.onMessage((data) => {
-        console.log(`[wasm-test] recv: ${new TextDecoder().decode(data)}`);
+    client.onMessage((srcPeerIdHex, data) => {
+        console.log(`[wasm-test] recv from ${srcPeerIdHex}: ${new TextDecoder().decode(data)}`);
     });
 
     const payload = new TextEncoder().encode('hello from wasm!');
