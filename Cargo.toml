@@ -11,7 +11,7 @@ members = ["."]
 exclude = ["fuzz"]
 
 [dependencies]
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "io-util"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "io-util", "signal"] }
 async-trait = "0.1"
 chacha20poly1305 = "0.10"
 rand = "0.8"
@@ -26,8 +26,10 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 webrtc = "0.11"
 bytes = "1"
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+anyhow = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -40,6 +42,10 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bin]]
+name = "drift"
+path = "src/main.rs"
 
 [[example]]
 name = "drift-send"
