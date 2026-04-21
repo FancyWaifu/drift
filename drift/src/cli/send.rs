@@ -1,11 +1,11 @@
 use super::identity::{from_hex, hex, load_identity};
 use super::{expand_path, SendArgs};
+use anyhow::{bail, Context, Result};
 use drift::crypto::derive_peer_id;
 use drift::identity::Identity;
 use drift::io::{TcpPacketIO, WsPacketIO};
 use drift::streams::StreamManager;
 use drift::{Direction, Transport, TransportConfig};
-use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 
 pub async fn run(args: &SendArgs, identity_path: &str) -> Result<()> {
@@ -14,7 +14,10 @@ pub async fn run(args: &SendArgs, identity_path: &str) -> Result<()> {
 
     let peer_pub_bytes = from_hex(&args.peer_key)?;
     if peer_pub_bytes.len() != 32 {
-        bail!("--peer-key must be 64 hex chars (32 bytes), got {}", peer_pub_bytes.len());
+        bail!(
+            "--peer-key must be 64 hex chars (32 bytes), got {}",
+            peer_pub_bytes.len()
+        );
     }
     let mut peer_pub = [0u8; 32];
     peer_pub.copy_from_slice(&peer_pub_bytes);
@@ -80,8 +83,8 @@ pub async fn run(args: &SendArgs, identity_path: &str) -> Result<()> {
         sm.send_datagram(added_peer_id, msg.as_bytes()).await?;
         eprintln!("sent {} bytes to {}", msg.len(), hex(&peer_id));
     } else if let Some(ref file_path) = args.file {
-        let data = std::fs::read(file_path)
-            .with_context(|| format!("reading {}", file_path.display()))?;
+        let data =
+            std::fs::read(file_path).with_context(|| format!("reading {}", file_path.display()))?;
         let filename = file_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

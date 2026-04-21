@@ -14,8 +14,7 @@ pub fn save_identity(secret: &[u8; 32], path: &Path) -> Result<()> {
     let mut data = Vec::with_capacity(FILE_LEN);
     data.extend_from_slice(MAGIC);
     data.extend_from_slice(secret);
-    std::fs::write(path, &data)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, &data).with_context(|| format!("writing {}", path.display()))?;
 
     #[cfg(unix)]
     {
@@ -29,8 +28,7 @@ pub fn save_identity(secret: &[u8; 32], path: &Path) -> Result<()> {
 
 /// Load a 32-byte secret key from a DRIFT identity file.
 pub fn load_identity(path: &Path) -> Result<[u8; 32]> {
-    let data = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if data.len() != FILE_LEN {
         bail!(
             "invalid identity file: expected {} bytes, got {}",

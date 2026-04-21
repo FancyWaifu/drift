@@ -9,7 +9,6 @@
 use drift_core::crypto::{derive_peer_id, Direction, PeerId, SessionKey};
 use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use drift_core::identity::{derive_session_key, Identity, NONCE_LEN, STATIC_KEY_LEN};
-use drift_core::session::DEFAULT_MESH_TTL;
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -255,7 +254,7 @@ impl WsTransport {
 
     /// Process an incoming DATA packet: decode header, decrypt, deliver.
     fn handle_incoming(state: &Rc<RefCell<State>>, data: &[u8]) {
-        let mut s = state.borrow_mut();
+        let s = state.borrow();
 
         if data.len() < HEADER_LEN + AUTH_TAG_LEN {
             return; // too short

@@ -118,6 +118,12 @@ fn find_flag_u64(args: &[String], flag: &str) -> Option<u64> {
 async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
     let bridge =
         Arc::new(Transport::bind_with_config(BRIDGE_UDP.parse()?, bridge_id(), cfg()).await?);
+    let pub_hex: String = bridge_id()
+        .public_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    println!("[bridge] pubkey={}", pub_hex);
     println!("[bridge] UDP iface 0 on {}", BRIDGE_UDP);
 
     let tcp_listener = TcpListener::bind(BRIDGE_TCP).await?;
@@ -201,7 +207,18 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(3600) {
         match tokio::time::timeout(Duration::from_millis(500), bridge.recv()).await {
-            Ok(Some(_)) => {}
+            Ok(Some(pkt)) => {
+                let preview = String::from_utf8_lossy(&pkt.payload);
+                println!(
+                    "[bridge] recv from peer={:02x}{:02x}{:02x}{:02x} {}B: {:?}",
+                    pkt.peer_id[0],
+                    pkt.peer_id[1],
+                    pkt.peer_id[2],
+                    pkt.peer_id[3],
+                    pkt.payload.len(),
+                    preview
+                );
+            }
             Ok(None) => break,
             Err(_) => {}
         }

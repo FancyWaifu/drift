@@ -1,8 +1,8 @@
 use super::identity::hex;
 use super::RelayArgs;
+use anyhow::{bail, Context, Result};
 use drift::identity::Identity;
 use drift::{Transport, TransportConfig};
-use anyhow::{bail, Context, Result};
 use std::net::SocketAddr;
 
 pub async fn run(args: &RelayArgs) -> Result<()> {
@@ -53,29 +53,26 @@ pub async fn run(args: &RelayArgs) -> Result<()> {
     let m = transport.metrics();
     eprintln!(
         "final: pkts_tx={} pkts_rx={} fwd={} hs={} auth_fail={}",
-        m.packets_sent,
-        m.packets_received,
-        m.forwarded,
-        m.handshakes_completed,
-        m.auth_failures
+        m.packets_sent, m.packets_received, m.forwarded, m.handshakes_completed, m.auth_failures
     );
     Ok(())
 }
 
 fn parse_route(s: &str) -> Result<([u8; 8], SocketAddr)> {
-    let first_colon = s
-        .find(':')
-        .context("route format: PEERID_HEX:HOST:PORT")?;
+    let first_colon = s.find(':').context("route format: PEERID_HEX:HOST:PORT")?;
     let id_hex = &s[..first_colon];
     let addr_str = &s[first_colon + 1..];
 
     if id_hex.len() != 16 {
-        bail!("peer ID must be 16 hex chars (8 bytes), got {}", id_hex.len());
+        bail!(
+            "peer ID must be 16 hex chars (8 bytes), got {}",
+            id_hex.len()
+        );
     }
     let mut id = [0u8; 8];
     for i in 0..8 {
-        id[i] = u8::from_str_radix(&id_hex[i * 2..i * 2 + 2], 16)
-            .context("invalid hex in peer ID")?;
+        id[i] =
+            u8::from_str_radix(&id_hex[i * 2..i * 2 + 2], 16).context("invalid hex in peer ID")?;
     }
     let addr: SocketAddr = addr_str.parse().context("invalid address in route")?;
     Ok((id, addr))

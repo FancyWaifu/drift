@@ -2,9 +2,9 @@ use crate::crypto::{Direction, PeerId, SessionKey};
 use crate::error::{DriftError, Result};
 use crate::header::{Header, PacketType};
 use crate::identity::{Identity, NONCE_LEN};
+use crate::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use crate::time::{Duration, Instant};
 
 const REPLAY_WINDOW: u32 = 1024;
 const COALESCE_STATE_CAPACITY: usize = 256;
