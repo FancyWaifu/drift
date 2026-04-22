@@ -15,7 +15,7 @@
 
 use crate::{report::Report, Cli, Workload};
 use anyhow::{anyhow, Result};
-use boringtun::noise::{Tunn, TunnResult};
+use boringtun::noise::{errors::WireGuardError, Tunn, TunnResult};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -63,6 +63,13 @@ async fn handle_inbound(
             false
         }
         TunnResult::Done => false,
+        TunnResult::Err(WireGuardError::NoCurrentSession) => {
+            // Stale data packet from a prior session — the
+            // peer sent it before we rebuilt our Tunn. Drop
+            // it and keep reading. Common between iterations
+            // of the handshake bench.
+            false
+        }
         TunnResult::Err(e) => return Err(anyhow!("wg error: {:?}", e)),
     };
     if followup_needed {
@@ -101,35 +108,43 @@ async fn send_out(
 }
 
 pub async fn server(cli: &Cli) -> Result<Option<Report>> {
-    let server_sk = StaticSecret::from(SERVER_SEED);
     let client_pk = PublicKey::from(&StaticSecret::from(CLIENT_SEED));
-    let mut tunn = Tunn::new(server_sk, client_pk, None, None, 1, None);
 
     let listen: SocketAddr = cli.listen.parse()?;
     let sock = UdpSocket::bind(listen).await?;
     eprintln!("wg server listening on {}", listen);
 
     let mut buf = [0u8; BUF_LEN];
-    // The server learns the client's ephemeral UDP address
-    // from the first incoming HandshakeInit.
-    let mut peer_addr: Option<SocketAddr> = None;
 
     match cli.workload {
         Workload::Handshake => {
-            // Wait for first data packet (post-handshake) and
-            // echo so the client can time a full round trip.
-            loop {
-                let (n, src) = sock.recv_from(&mut buf).await?;
-                peer_addr = Some(src);
-                if let Some(data) =
-                    handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
-                {
-                    send_out(&mut tunn, &sock, src, &data).await?;
-                    break;
+            // N cold handshakes: rebuild the server-side Tunn
+            // on each iter so there's no session carryover.
+            // The UDP socket stays bound the whole time.
+            for iter in 0..cli.handshake_iters {
+                let server_sk = StaticSecret::from(SERVER_SEED);
+                let mut tunn =
+                    Tunn::new(server_sk, client_pk, None, None, iter as u32 + 1, None);
+                loop {
+                    let recv_timeout =
+                        tokio::time::timeout(Duration::from_secs(10), sock.recv_from(&mut buf))
+                            .await;
+                    let (n, src) = match recv_timeout {
+                        Ok(Ok(v)) => v,
+                        _ => return Ok(None),
+                    };
+                    if let Some(data) =
+                        handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
+                    {
+                        send_out(&mut tunn, &sock, src, &data).await?;
+                        break;
+                    }
                 }
             }
         }
         Workload::Rtt => {
+            let server_sk = StaticSecret::from(SERVER_SEED);
+            let mut tunn = Tunn::new(server_sk, client_pk, None, None, 1, None);
             loop {
                 let recv =
                     tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf))
@@ -138,7 +153,6 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                     Ok(Ok(v)) => v,
                     _ => break,
                 };
-                peer_addr = Some(src);
                 if let Some(data) =
                     handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
                 {
@@ -147,6 +161,8 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             }
         }
         Workload::Throughput => {
+            let server_sk = StaticSecret::from(SERVER_SEED);
+            let mut tunn = Tunn::new(server_sk, client_pk, None, None, 1, None);
             let mut total = 0u64;
             loop {
                 let recv =
@@ -156,7 +172,6 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                     Ok(Ok(v)) => v,
                     _ => break,
                 };
-                peer_addr = Some(src);
                 if let Some(data) =
                     handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
                 {
@@ -166,42 +181,52 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             eprintln!("wg server received {} bytes", total);
         }
     }
-    let _ = peer_addr;
     Ok(None)
 }
 
 pub async fn client(cli: &Cli) -> Result<Option<Report>> {
-    let client_sk = StaticSecret::from(CLIENT_SEED);
     let server_pk = PublicKey::from(&StaticSecret::from(SERVER_SEED));
-    let mut tunn = Tunn::new(client_sk, server_pk, None, None, 0, None);
-
-    let peer_addr: SocketAddr = cli.target.parse()?;
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    let peer_addr: SocketAddr = crate::resolve_target(&cli.target).await?;
 
     match cli.workload {
         Workload::Handshake => {
             let mut report = Report::new("wireguard", "handshake");
-            let start = Instant::now();
-            complete_handshake(&mut tunn, &sock, peer_addr, cli.payload_bytes).await?;
-            // Wait for the server's echo of our first data
-            // frame. Keeps the measurement semantics the same
-            // as DRIFT and QUIC.
-            let mut buf = [0u8; BUF_LEN];
-            loop {
-                let (n, src) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    sock.recv_from(&mut buf),
-                )
-                .await??;
-                if let Some(_) = handle_inbound(&mut tunn, &sock, src, &buf[..n]).await? {
-                    break;
+            let mut samples: Vec<u128> = Vec::with_capacity(cli.handshake_iters);
+            for iter in 0..cli.handshake_iters {
+                // Fresh Tunn + fresh UDP socket per iter: the
+                // socket gives us a new source port so the
+                // server sees this as a brand-new peer
+                // regardless of keepalive state.
+                let client_sk = StaticSecret::from(CLIENT_SEED);
+                let mut tunn =
+                    Tunn::new(client_sk, server_pk, None, None, iter as u32, None);
+                let sock = UdpSocket::bind("0.0.0.0:0").await?;
+
+                let start = Instant::now();
+                complete_handshake(&mut tunn, &sock, peer_addr, cli.payload_bytes).await?;
+                let mut buf = [0u8; BUF_LEN];
+                loop {
+                    let (n, src) = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        sock.recv_from(&mut buf),
+                    )
+                    .await??;
+                    if let Some(_) =
+                        handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
+                    {
+                        break;
+                    }
                 }
+                samples.push(start.elapsed().as_micros());
             }
-            report.handshake_us = Some(start.elapsed().as_micros() as u64);
+            crate::report::summarize_handshakes(&mut samples, &mut report);
             Ok(Some(report))
         }
         Workload::Rtt => {
             let mut report = Report::new("wireguard", "rtt");
+            let client_sk = StaticSecret::from(CLIENT_SEED);
+            let mut tunn = Tunn::new(client_sk, server_pk, None, None, 0, None);
+            let sock = UdpSocket::bind("0.0.0.0:0").await?;
             let payload = fake_ipv4(cli.payload_bytes.max(20));
             // Handshake + first data frame; also drains the
             // echo so timing starts cleanly.
@@ -237,6 +262,9 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
         }
         Workload::Throughput => {
             let mut report = Report::new("wireguard", "throughput");
+            let client_sk = StaticSecret::from(CLIENT_SEED);
+            let mut tunn = Tunn::new(client_sk, server_pk, None, None, 0, None);
+            let sock = UdpSocket::bind("0.0.0.0:0").await?;
             let payload = fake_ipv4(cli.payload_bytes.max(20));
             complete_handshake(&mut tunn, &sock, peer_addr, cli.payload_bytes).await?;
 

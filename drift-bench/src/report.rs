@@ -10,8 +10,14 @@ pub struct Report {
     pub protocol: String,
     pub workload: String,
 
-    // Handshake: cold connect → first byte acked.
-    pub handshake_us: Option<u64>,
+    // Handshake: cold connect → first byte acked. Distribution
+    // over `handshake_iters` cold reconnects.
+    pub handshake_samples: Option<usize>,
+    pub handshake_min_us: Option<u64>,
+    pub handshake_p50_us: Option<u64>,
+    pub handshake_p95_us: Option<u64>,
+    pub handshake_p99_us: Option<u64>,
+    pub handshake_max_us: Option<u64>,
 
     // Throughput: bytes moved / duration.
     pub bytes_moved: Option<u64>,
@@ -44,14 +50,33 @@ pub fn summarize_rtts(samples: &mut [u128], report: &mut Report) {
         return;
     }
     samples.sort_unstable();
-    let pct = |p: f64| -> u64 {
-        let idx = ((samples.len() as f64 - 1.0) * p).round() as usize;
-        samples[idx] as u64
-    };
+    let pct = pct_fn(samples);
     report.rtt_samples = Some(samples.len());
     report.rtt_min_us = Some(samples[0] as u64);
     report.rtt_p50_us = Some(pct(0.50));
     report.rtt_p95_us = Some(pct(0.95));
     report.rtt_p99_us = Some(pct(0.99));
     report.rtt_max_us = Some(samples[samples.len() - 1] as u64);
+}
+
+/// Like `summarize_rtts` but for cold-handshake samples.
+pub fn summarize_handshakes(samples: &mut [u128], report: &mut Report) {
+    if samples.is_empty() {
+        return;
+    }
+    samples.sort_unstable();
+    let pct = pct_fn(samples);
+    report.handshake_samples = Some(samples.len());
+    report.handshake_min_us = Some(samples[0] as u64);
+    report.handshake_p50_us = Some(pct(0.50));
+    report.handshake_p95_us = Some(pct(0.95));
+    report.handshake_p99_us = Some(pct(0.99));
+    report.handshake_max_us = Some(samples[samples.len() - 1] as u64);
+}
+
+fn pct_fn(sorted: &[u128]) -> impl Fn(f64) -> u64 + '_ {
+    move |p: f64| {
+        let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+        sorted[idx] as u64
+    }
 }
