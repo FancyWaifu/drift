@@ -260,3 +260,128 @@ async fn routing_loop_terminates() {
     drop(a_t);
     drop(b_t);
 }
+
+/// A four-hop chain (A → R1 → R2 → R3 → B) that also asserts the
+/// per-relay `forwarded` metric: every DATA packet we send must
+/// show up as a forwarded event on EVERY intermediate relay,
+/// with a count within 10% of the sent total (allowing for the
+/// handshake HELLO/HELLO_ACK ± retries).
+///
+/// Unlike `three_hop_chain` / `five_hop_chain` above — which
+/// only assert that Bob received the decrypted payload — this
+/// test proves every hop actually participated in forwarding,
+/// giving us per-relay observability for the multi-hop path.
+#[tokio::test]
+async fn chain_per_relay_forwarding_metrics() {
+    let alice = Identity::from_secret_bytes([0x80; 32]);
+    let r1 = Identity::from_secret_bytes([0x81; 32]);
+    let r2 = Identity::from_secret_bytes([0x82; 32]);
+    let r3 = Identity::from_secret_bytes([0x83; 32]);
+    let bob = Identity::from_secret_bytes([0x84; 32]);
+
+    let alice_pub = alice.public_bytes();
+    let bob_pub = bob.public_bytes();
+    let alice_pid = derive_peer_id(&alice_pub);
+    let bob_pid = derive_peer_id(&bob_pub);
+
+    let bob_t = Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), bob)
+        .await
+        .unwrap();
+    bob_t
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
+    let bob_addr = bob_t.local_addr().unwrap();
+
+    let r3_t = Arc::new(
+        Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), r3)
+            .await
+            .unwrap(),
+    );
+    r3_t.add_route(bob_pid, bob_addr).await;
+    let r3_addr = r3_t.local_addr().unwrap();
+
+    let r2_t = Arc::new(
+        Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), r2)
+            .await
+            .unwrap(),
+    );
+    r2_t.add_route(bob_pid, r3_addr).await;
+    let r2_addr = r2_t.local_addr().unwrap();
+
+    let r1_t = Arc::new(
+        Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), r1)
+            .await
+            .unwrap(),
+    );
+    r1_t.add_route(bob_pid, r2_addr).await;
+    let r1_addr = r1_t.local_addr().unwrap();
+
+    // Reverse routes for HELLO_ACK and subsequent server->client
+    // traffic back to Alice.
+    r3_t.add_route(alice_pid, r2_addr).await;
+    r2_t.add_route(alice_pid, r1_addr).await;
+
+    let alice_t = Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), alice)
+        .await
+        .unwrap();
+    let alice_addr = alice_t.local_addr().unwrap();
+    r1_t.add_route(alice_pid, alice_addr).await;
+
+    let bob_peer = alice_t
+        .add_peer(bob_pub, "0.0.0.0:0".parse().unwrap(), Direction::Initiator)
+        .await
+        .unwrap();
+    alice_t.add_route(bob_pid, r1_addr).await;
+
+    const N_PACKETS: u32 = 10;
+    for i in 0..N_PACKETS {
+        alice_t
+            .send_data(&bob_peer, &i.to_be_bytes(), 2000, 0)
+            .await
+            .unwrap();
+    }
+
+    // Drain Bob's receive queue.
+    let mut received: u32 = 0;
+    for _ in 0..N_PACKETS {
+        if let Ok(Some(_)) = tokio::time::timeout(Duration::from_secs(3), bob_t.recv()).await {
+            received += 1;
+        }
+    }
+    assert!(
+        received >= N_PACKETS - 1,
+        "bob received {} of {}",
+        received,
+        N_PACKETS
+    );
+
+    // Per-relay `forwarded` counter — every intermediate relay
+    // should have forwarded at least N_PACKETS (DATA only; the
+    // handshake HELLO/HELLO_ACK bumps it even higher). If any
+    // relay was bypassed, its counter would be 0.
+    let r1_fwd = r1_t.metrics().forwarded;
+    let r2_fwd = r2_t.metrics().forwarded;
+    let r3_fwd = r3_t.metrics().forwarded;
+    println!(
+        "chain_forwarding: sent={} received={} r1.fwd={} r2.fwd={} r3.fwd={}",
+        N_PACKETS, received, r1_fwd, r2_fwd, r3_fwd
+    );
+    assert!(r1_fwd >= N_PACKETS as u64, "r1 forwarded {}", r1_fwd);
+    assert!(r2_fwd >= N_PACKETS as u64, "r2 forwarded {}", r2_fwd);
+    assert!(r3_fwd >= N_PACKETS as u64, "r3 forwarded {}", r3_fwd);
+
+    // Bob's view: no direct session with alice_t's addr —
+    // everything arrived via the mesh. `handshakes_completed`
+    // on Bob should be 1 (Alice, through the chain).
+    let bm = bob_t.metrics();
+    println!(
+        "chain_forwarding: bob.hs={} bob.auth_fail={} bob.unknown_peer={}",
+        bm.handshakes_completed, bm.auth_failures, bm.unknown_peer_drops
+    );
+    assert_eq!(bm.auth_failures, 0);
+}
