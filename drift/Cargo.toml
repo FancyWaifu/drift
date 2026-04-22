@@ -56,6 +56,9 @@ boringtun = "0.7"
 # WireGuard identities are x25519 keys — the same primitive
 # DRIFT uses, so we don't pull in a separate curve lib.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Head-to-head AEAD bench: RustCrypto's chacha20poly1305 (what
+# DRIFT uses) vs ring's (what boringtun uses). Dev-only dep.
+ring = "0.17"
 
 [[bench]]
 name = "throughput"
