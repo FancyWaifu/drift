@@ -357,6 +357,49 @@ pub struct Transport {
     /// Kept so `add_interface` can clone it for new recv
     /// loops spawned after bind.
     recv_tx: mpsc::Sender<Received>,
+    /// Abort handles for all background tasks spawned during
+    /// bind + any `add_interface` calls. Aborting on drop is
+    /// what keeps a Transport from leaking its worker tasks:
+    /// each task holds an `Arc<Inner>`, so without explicit
+    /// abort the Inner would stay pinned in memory (and its
+    /// tickers would keep firing) for the entire process
+    /// lifetime.
+    tasks: TaskGuard,
+}
+
+/// Owns the `JoinHandle`s for a Transport's background tasks.
+/// On drop, aborts every handle so the futures are dropped,
+/// their captured `Arc<Inner>` references released, and the
+/// Inner freed promptly. Lives on `Transport` (not `Inner`)
+/// on purpose — `Inner` is what the tasks are keeping alive,
+/// so the guard has to outlive the tasks but be owned by
+/// whatever drops with the user-visible handle.
+#[derive(Default)]
+struct TaskGuard {
+    handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl TaskGuard {
+    fn push(&self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut v) = self.handles.lock() {
+            v.push(handle);
+        } else {
+            // Lock is poisoned only if a prior holder panicked
+            // while mutating. Safest path is to abort the new
+            // handle immediately so we don't silently leak.
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        if let Ok(v) = self.handles.get_mut() {
+            for h in v.drain(..) {
+                h.abort();
+            }
+        }
+    }
 }
 
 impl Transport {
@@ -438,6 +481,8 @@ impl Transport {
         // bind_inner, if the IO adapter is UDP.
 
         let (tx, rx) = mpsc::channel(recv_channel_capacity);
+        let tasks = TaskGuard::default();
+
         // Spawn one recv loop per interface so all adapters
         // feed into the same processing pipeline. When a
         // second interface is added later via add_interface,
@@ -446,21 +491,25 @@ impl Transport {
         for iface_idx in 0..num_ifaces {
             let bg = inner.clone();
             let tx_clone = tx.clone();
-            tokio::spawn(async move { bg.run_recv_loop_for(tx_clone, iface_idx).await });
+            tasks.push(tokio::spawn(async move {
+                bg.run_recv_loop_for(tx_clone, iface_idx).await
+            }));
         }
 
         let beacon_bg = inner.clone();
-        tokio::spawn(async move { beacon_bg.run_beacon_loop().await });
+        tasks.push(tokio::spawn(async move { beacon_bg.run_beacon_loop().await }));
 
         let retry_bg = inner.clone();
-        tokio::spawn(async move { retry_bg.run_handshake_retry_loop().await });
+        tasks.push(tokio::spawn(async move {
+            retry_bg.run_handshake_retry_loop().await
+        }));
 
         // RTT probe loop: only spawn when the user actually
         // wants active latency measurement. Skipping it when
         // disabled saves one timer per transport.
         if rtt_probe_interval_ms > 0 {
             let rtt_bg = inner.clone();
-            tokio::spawn(async move { rtt_bg.run_rtt_probe_loop().await });
+            tasks.push(tokio::spawn(async move { rtt_bg.run_rtt_probe_loop().await }));
         }
 
         // Route sweep loop: purges stale mesh routes whose
@@ -469,14 +518,16 @@ impl Transport {
         // correctness requirement for the RTT-weighted
         // router, not an optimization.
         let sweep_bg = inner.clone();
-        tokio::spawn(async move { sweep_bg.run_route_sweep_loop().await });
+        tasks.push(tokio::spawn(async move { sweep_bg.run_route_sweep_loop().await }));
 
         // Cookie rotation only matters when the cookie path can be
         // reached. Skip spawning the loop entirely in the default
         // fast-path config — it just wastes wake-ups.
         if cookie_always || cookie_threshold != u32::MAX {
             let cookie_bg = inner.clone();
-            tokio::spawn(async move { cookie_bg.run_cookie_rotate_loop().await });
+            tasks.push(tokio::spawn(async move {
+                cookie_bg.run_cookie_rotate_loop().await
+            }));
         }
 
         // The AwaitingData eviction reaper is only load-bearing when
@@ -487,13 +538,16 @@ impl Transport {
             && (accept_any_peer || cookie_always || cookie_threshold != u32::MAX)
         {
             let evict_bg = inner.clone();
-            tokio::spawn(async move { evict_bg.run_handshake_eviction_loop().await });
+            tasks.push(tokio::spawn(async move {
+                evict_bg.run_handshake_eviction_loop().await
+            }));
         }
 
         Ok(Self {
             inner,
             rx: Mutex::new(rx),
             recv_tx: tx,
+            tasks,
         })
     }
 
@@ -524,9 +578,9 @@ impl Transport {
         // into the same mpsc channel as the original.
         let bg = self.inner.clone();
         let tx = self.recv_tx.clone();
-        tokio::spawn(async move {
+        self.tasks.push(tokio::spawn(async move {
             bg.run_recv_loop_for(tx, idx).await;
-        });
+        }));
         idx
     }
 
@@ -1740,6 +1794,11 @@ impl Inner {
                 let mut peers = self.peers.lock_all().await;
                 let mut out = Vec::new();
                 for peer in peers.iter_mut() {
+                    // Snapshot pending_resumption before we
+                    // take &mut on peer.handshake — we need
+                    // both simultaneously (one to pick wire
+                    // type, one to bump attempts).
+                    let resumption_ctx = peer.pending_resumption.clone();
                     if let HandshakeState::AwaitingAck {
                         client_nonce,
                         ephemeral,
@@ -1760,15 +1819,32 @@ impl Inner {
                         *last_sent = Instant::now();
 
                         let mesh = routes.lookup(&peer.id);
-                        let wire = build_hello_wire(
-                            self.local_peer_id,
-                            peer.id,
-                            &self.identity,
-                            ephemeral.public_bytes(),
-                            *client_nonce,
-                            mesh.is_some(),
-                            cookie.as_ref(),
-                        );
+                        // If this AwaitingAck was entered via a
+                        // ResumeHello (pending_resumption set),
+                        // retransmit as ResumeHello — not HELLO.
+                        // Otherwise a single ResumeHello drop
+                        // silently downgrades the client to a
+                        // cold handshake and wastes the ticket.
+                        let wire = if let Some(res) = &resumption_ctx {
+                            build_resume_hello_wire(
+                                self.local_peer_id,
+                                peer.id,
+                                ephemeral.public_bytes(),
+                                *client_nonce,
+                                res.ticket_id,
+                                mesh.is_some(),
+                            )
+                        } else {
+                            build_hello_wire(
+                                self.local_peer_id,
+                                peer.id,
+                                &self.identity,
+                                ephemeral.public_bytes(),
+                                *client_nonce,
+                                mesh.is_some(),
+                                cookie.as_ref(),
+                            )
+                        };
                         let target = mesh.unwrap_or(peer.addr);
                         out.push((wire, target, peer.interface_id));
                     }
@@ -2777,6 +2853,37 @@ fn build_hello_wire(
     if let Some(c) = cookie {
         wire.extend_from_slice(c);
     }
+    wire
+}
+
+/// Rebuild a `ResumeHello` wire packet for the retransmit
+/// loop. Mirrors `send_resume_hello` but skips the peer-table
+/// mutation: the `AwaitingAck` state (ephemeral + client_nonce)
+/// and the `pending_resumption` (ticket_id + psk) already live
+/// on the peer from the first send — we're just re-emitting
+/// the same bytes after a timeout.
+fn build_resume_hello_wire(
+    local_peer_id: PeerId,
+    dst_id: PeerId,
+    client_eph_pub: [u8; STATIC_KEY_LEN],
+    client_nonce: [u8; NONCE_LEN],
+    ticket_id: [u8; crate::transport::resumption::TICKET_ID_LEN],
+    mesh: bool,
+) -> Vec<u8> {
+    use crate::transport::resumption::RESUME_HELLO_BODY_LEN;
+    let mut header = Header::new(PacketType::ResumeHello, 0, local_peer_id, dst_id);
+    if mesh {
+        header = header.with_hop_ttl(DEFAULT_MESH_TTL);
+    }
+    header.payload_len = RESUME_HELLO_BODY_LEN as u16;
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+
+    let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_HELLO_BODY_LEN);
+    wire.extend_from_slice(&hbuf);
+    wire.extend_from_slice(&ticket_id);
+    wire.extend_from_slice(&client_eph_pub);
+    wire.extend_from_slice(&client_nonce);
     wire
 }
 
