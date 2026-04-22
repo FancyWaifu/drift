@@ -17,6 +17,16 @@
 //! allocation), and it needs *one* long-lived server so the
 //! resumption ticket is recognized — so UDP works fine and
 //! we just re-bind Alice per iter.
+//!
+//! Caveat on the cold numbers: `Transport::bind` currently
+//! leaks its background tasks when the Transport is dropped
+//! (the tasks hold `Arc<Inner>` and keep it alive). Criterion's
+//! high-iter-count sampling accumulates those zombie tasks and
+//! inflates the per-iter number 50-100×. The numbers here are
+//! therefore upper-bound; `examples/bench_oneshot.rs` shows
+//! the actual per-handshake cost at low N (~200 µs on Apple
+//! Silicon). Fix the leak and the criterion numbers will drop
+//! to match.
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use drift::identity::Identity;
@@ -136,6 +146,14 @@ fn bench_resumption(c: &mut Criterion) {
             drop(alice0);
 
             let mut total = Duration::ZERO;
+            // Server-side tickets are single-use (replay
+            // protection), so we have to capture the new ticket
+            // the server issues after each successful resume.
+            // Otherwise iter N>1 would present a burned ticket,
+            // fail silently server-side, and fall through to the
+            // handshake retry loop's ~50 ms cold-HELLO fallback
+            // — which is what this bench used to measure.
+            let mut current_ticket = ticket;
             for _ in 0..iters {
                 let alice = Transport::bind(
                     "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
@@ -148,7 +166,7 @@ fn bench_resumption(c: &mut Criterion) {
                     .await
                     .unwrap();
                 alice
-                    .import_resumption_ticket(&bob_peer, &ticket)
+                    .import_resumption_ticket(&bob_peer, &current_ticket)
                     .await
                     .ok();
 
@@ -156,6 +174,23 @@ fn bench_resumption(c: &mut Criterion) {
                 alice.send_data(&bob_peer, b"go", 0, 0).await.unwrap();
                 let _ = bob.recv().await.unwrap();
                 total += start.elapsed();
+
+                // Ticket arrives from server *after* the first
+                // DATA is processed. Poll briefly for it; this
+                // sleep is outside the timer.
+                let mut next = None;
+                for _ in 0..20 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    if let Ok(t) = alice.export_resumption_ticket(&bob_peer).await {
+                        if t != current_ticket {
+                            next = Some(t);
+                            break;
+                        }
+                    }
+                }
+                if let Some(t) = next {
+                    current_ticket = t;
+                }
             }
             total
         });

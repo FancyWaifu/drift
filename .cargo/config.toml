@@ -4,3 +4,14 @@
 # apply this to wasm32 builds so native builds are unaffected.
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=web_sys_unstable_apis"]
+
+# chacha20 v0.9 gates its NEON backend behind this cfg on
+# aarch64 — without it, Apple Silicon falls through to the
+# portable soft backend and AEAD throughput drops ~2×. The
+# flag is safe: `target_feature = "neon"` is a compile-time
+# check inside the chacha20 crate that guards the intrinsics.
+[target.aarch64-apple-darwin]
+rustflags = ["--cfg=chacha20_force_neon"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["--cfg=chacha20_force_neon"]
