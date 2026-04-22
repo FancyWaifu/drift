@@ -1,4 +1,4 @@
 [workspace]
-members = ["drift-core", "drift", "drift-bench"]
+members = ["drift-core", "drift", "drift-bench", "drift-ffi"]
 exclude = ["fuzz", "drift-wasm"]
 resolver = "2"

@@ -1,0 +1,33 @@
+# cbindgen config — drives the auto-generated drift.h header.
+# See https://github.com/mozilla/cbindgen/blob/master/docs.md
+
+language = "C"
+include_guard = "DRIFT_FFI_H"
+tab_width = 4
+style = "tag"
+no_includes = false
+sys_includes = ["stdint.h", "stddef.h", "stdbool.h"]
+
+header = """
+/*
+ * drift-ffi — C ABI for the DRIFT identity-first transport.
+ * Auto-generated from drift-ffi/src/lib.rs by cbindgen; do not
+ * edit by hand.
+ *
+ * Opaque handle lifecycle: every `drift_X_new` (or bind/generate)
+ * function is paired with `drift_X_free`. Handles are not
+ * thread-safe unless explicitly noted; wrap in your own lock
+ * if sharing across threads.
+ */
+"""
+
+# The Rust types and functions are already `Drift`-prefixed, so
+# no cbindgen-level prefix needed. We just want the enum
+# variants to be emitted as their explicit `DRIFT_*` names
+# from the #[repr(C)] enum.
+[enum]
+prefix_with_name = false
+rename_variants = "None"
+
+[export.rename]
+"DriftResultCode" = "DriftResult"

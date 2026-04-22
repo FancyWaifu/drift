@@ -9,3 +9,5 @@ Cargo.lock
 *.iml
 # Per-run bench artifacts — regenerate with bench/docker/run.sh
 bench/docker/results/
+# drift-ffi C example binary — rebuild with `make hello`
+drift-ffi/examples/hello

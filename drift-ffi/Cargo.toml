@@ -1,0 +1,25 @@
+[package]
+name = "drift-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI for the DRIFT transport — callable from C, Python, Go, Swift, and anything else that speaks C"
+
+[lib]
+# `cdylib` → produces a dynamic shared object (libdrift_ffi.so /
+# .dylib / .dll). `staticlib` → produces a linkable archive
+# (libdrift_ffi.a) for apps that prefer a static link. Both
+# share the same extern "C" surface.
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+# Lazy one-time init of the shared tokio runtime. The FFI can't
+# afford to spin up a new runtime on every call — that would
+# torch the worker thread pool repeatedly and leak tasks; one
+# runtime for the life of the process is what WireGuard's
+# boringtun does too.
+once_cell = "1"
+
+[build-dependencies]
+cbindgen = "0.27"
