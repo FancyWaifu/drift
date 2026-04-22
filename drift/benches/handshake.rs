@@ -17,16 +17,6 @@
 //! allocation), and it needs *one* long-lived server so the
 //! resumption ticket is recognized — so UDP works fine and
 //! we just re-bind Alice per iter.
-//!
-//! Caveat on the cold numbers: `Transport::bind` currently
-//! leaks its background tasks when the Transport is dropped
-//! (the tasks hold `Arc<Inner>` and keep it alive). Criterion's
-//! high-iter-count sampling accumulates those zombie tasks and
-//! inflates the per-iter number 50-100×. The numbers here are
-//! therefore upper-bound; `examples/bench_oneshot.rs` shows
-//! the actual per-handshake cost at low N (~200 µs on Apple
-//! Silicon). Fix the leak and the criterion numbers will drop
-//! to match.
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use drift::identity::Identity;
