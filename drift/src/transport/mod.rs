@@ -8,7 +8,7 @@ use crate::session::{HandshakeState, PathProbe, Peer, PendingSend, PrevSession, 
 use rand::RngCore;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
@@ -321,7 +321,13 @@ pub(crate) struct Inner {
     pub(crate) identity: Arc<Identity>,
     pub(crate) local_peer_id: PeerId,
     pub(crate) peers: Arc<PeerShards>,
-    pub(crate) routes: Arc<Mutex<RoutingTable>>,
+    // routes, cid_map, peer_out_cid all use std::sync::Mutex
+    // rather than tokio's async Mutex: their critical sections
+    // are short HashMap/table ops with no await points, so the
+    // async machinery (Future, registration, scheduler yield)
+    // is pure overhead. Hot-path send_data acquires all three
+    // — every cycle counts.
+    pub(crate) routes: Arc<StdMutex<RoutingTable>>,
     pub(crate) metrics: MetricsInner,
     pub(crate) config: TransportConfig,
     /// Rotating secrets used to MAC stateless DoS cookies on the
@@ -344,11 +350,11 @@ pub(crate) struct Inner {
     /// Populated when a session reaches Established; cleared
     /// on close. The CID is derived deterministically from the
     /// session key so no extra wire exchange is needed.
-    pub(crate) cid_map: Arc<Mutex<StdHashMap<u16, PeerId>>>,
+    pub(crate) cid_map: Arc<StdMutex<StdHashMap<u16, PeerId>>>,
     /// Reverse map: PeerId → the CID that THIS side should
     /// put in outgoing short-header packets to that peer.
     /// (This is the PEER'S rx CID, not ours.)
-    pub(crate) peer_out_cid: Arc<Mutex<StdHashMap<PeerId, u16>>>,
+    pub(crate) peer_out_cid: Arc<StdMutex<StdHashMap<PeerId, u16>>>,
 }
 
 pub struct Transport {
@@ -466,15 +472,15 @@ impl Transport {
             identity: Arc::new(identity),
             local_peer_id,
             peers: Arc::new(PeerShards::default()),
-            routes: Arc::new(Mutex::new(RoutingTable::default())),
+            routes: Arc::new(StdMutex::new(RoutingTable::default())),
             metrics: MetricsInner::default(),
             config,
             cookies: Arc::new(Mutex::new(CookieSecrets::new())),
             resumption_store: Arc::new(Mutex::new(ResumptionStore::default())),
             client_tickets: Arc::new(Mutex::new(StdHashMap::new())),
             qlog: qlog_writer,
-            cid_map: Arc::new(Mutex::new(StdHashMap::new())),
-            peer_out_cid: Arc::new(Mutex::new(StdHashMap::new())),
+            cid_map: Arc::new(StdMutex::new(StdHashMap::new())),
+            peer_out_cid: Arc::new(StdMutex::new(StdHashMap::new())),
         });
 
         // ECN was set up by bind_with_config before calling
@@ -692,7 +698,7 @@ impl Transport {
         self.inner
             .routes
             .lock()
-            .await
+            .unwrap()
             .lookup_entry(dst)
             .map(|e| (e.next_hop, e.cost_us))
     }
@@ -732,7 +738,7 @@ impl Transport {
         self.inner
             .routes
             .lock()
-            .await
+            .unwrap()
             .insert_static(dst, next_hop_addr);
     }
 
@@ -1272,11 +1278,11 @@ impl Inner {
             return self.send_resume_hello(*dst).await;
         }
 
-        let learned_route = self.routes.lock().await.lookup(dst);
+        let learned_route = self.routes.lock().unwrap().lookup(dst);
         // Look up the outgoing CID for short-header path.
         // This is cheap (one hash-map lookup under a
         // separate lock from the peer table).
-        let out_cid = self.peer_out_cid.lock().await.get(dst).copied();
+        let out_cid = self.peer_out_cid.lock().unwrap().get(dst).copied();
 
         let action = {
             let mut peers = self.peers.lock_for(dst).await;
@@ -1433,8 +1439,8 @@ impl Inner {
             derive_initiator_rx_cid(session_key)
         };
 
-        self.cid_map.lock().await.insert(my_rx_cid, peer_id);
-        self.peer_out_cid.lock().await.insert(peer_id, peer_rx_cid);
+        self.cid_map.lock().unwrap().insert(my_rx_cid, peer_id);
+        self.peer_out_cid.lock().unwrap().insert(peer_id, peer_rx_cid);
     }
 
     async fn dispatch(&self, action: SendAction) -> Result<()> {
@@ -1589,7 +1595,7 @@ impl Inner {
         let (cid, seq, body) = crate::short_header::decode_short(data)?;
 
         let peer_id = {
-            let map = self.cid_map.lock().await;
+            let map = self.cid_map.lock().unwrap();
             *map.get(&cid).ok_or(DriftError::UnknownPeer)?
         };
 
@@ -1789,8 +1795,21 @@ impl Inner {
         ));
         loop {
             ticker.tick().await;
+            // Snapshot routes into a plain HashMap before
+            // taking the async peers lock — std::sync::MutexGuard
+            // isn't Send, so we can't hold `routes` across the
+            // `peers.lock_all().await` below.
+            let route_snapshot: StdHashMap<PeerId, SocketAddr> = {
+                let routes = self.routes.lock().unwrap();
+                routes
+                    .entries()
+                    .into_iter()
+                    .filter_map(|(id, _metric, _cost)| {
+                        routes.lookup(&id).map(|addr| (id, addr))
+                    })
+                    .collect()
+            };
             let to_retransmit: Vec<(Vec<u8>, SocketAddr, usize)> = {
-                let routes = self.routes.lock().await;
                 let mut peers = self.peers.lock_all().await;
                 let mut out = Vec::new();
                 for peer in peers.iter_mut() {
@@ -1818,7 +1837,7 @@ impl Inner {
                         *attempts += 1;
                         *last_sent = Instant::now();
 
-                        let mesh = routes.lookup(&peer.id);
+                        let mesh = route_snapshot.get(&peer.id).copied();
                         // If this AwaitingAck was entered via a
                         // ResumeHello (pending_resumption set),
                         // retransmit as ResumeHello — not HELLO.
@@ -2145,7 +2164,7 @@ impl Inner {
         // block either hits the early `return Ok(())` (no use) or
         // assigns via the `Established` path before falling out.
         let cid_key_for_install: Option<[u8; 32]>;
-        let mesh_next_hop = self.routes.lock().await.lookup(&peer_id);
+        let mesh_next_hop = self.routes.lock().unwrap().lookup(&peer_id);
         {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;

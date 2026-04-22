@@ -5,7 +5,6 @@ edition = "2021"
 description = "Platform-independent DRIFT protocol primitives"
 
 [dependencies]
-chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 blake2 = "0.10"
 siphasher = "1"
@@ -14,7 +13,18 @@ rand = "0.8"
 thiserror = "1"
 tracing = "0.1"
 
+# ring's AEAD implementation is ~2× faster than the RustCrypto
+# `chacha20poly1305` crate on Apple Silicon (measured via the
+# aead_head_to_head bench). Ring supports every native target
+# we care about, but not `wasm32-unknown-unknown` — so wasm
+# keeps using `chacha20poly1305` as a pure-Rust fallback. Same
+# wire format on both backends: IETF ChaCha20-Poly1305 is a
+# standard, not an implementation detail.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ring = "0.17"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+chacha20poly1305 = "0.10"
 getrandom = { version = "0.2", features = ["js"] }
 web-time = "1"
 

@@ -340,7 +340,7 @@ impl Inner {
         // the bridge without waiting for the TCP peer's own
         // beacons to propagate.
         let mut entries: Vec<(PeerId, u16, u32)> = {
-            let routes = self.routes.lock().await;
+            let routes = self.routes.lock().unwrap();
             routes.entries()
         };
         // Add self.
@@ -488,7 +488,7 @@ impl Inner {
         };
 
         let mut updated = 0;
-        let mut routes = self.routes.lock().await;
+        let mut routes = self.routes.lock().unwrap();
         for i in 0..count {
             let off = 2 + i * 14;
             let mut id = [0u8; 8];
@@ -545,7 +545,7 @@ impl Inner {
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            let purged = self.routes.lock().await.sweep_stale();
+            let purged = self.routes.lock().unwrap().sweep_stale();
             if purged > 0 {
                 debug!(purged, "purged stale routes");
             }
@@ -572,13 +572,20 @@ impl Inner {
         // the right interface, and sends. The destination peer
         // receives the bytes on their adapter and processes
         // them as if they arrived directly.
-        let (next_hop, fwd_iface) = {
-            // Try routing table first (has mesh cost info).
-            let routes = self.routes.lock().await;
-            if let Some(entry) = routes.lookup_entry(&header.dst_id) {
-                (entry.next_hop, entry.interface_id)
-            } else {
-                drop(routes);
+        // Try routing table first (has mesh cost info). Scope
+        // the std::sync Mutex guard tightly so it's released
+        // before any await — `MutexGuard` isn't Send, and
+        // holding it across `.await` would break the future's
+        // Send bound for `tokio::spawn`.
+        let route_hit = {
+            let routes = self.routes.lock().unwrap();
+            routes
+                .lookup_entry(&header.dst_id)
+                .map(|e| (e.next_hop, e.interface_id))
+        };
+        let (next_hop, fwd_iface) = match route_hit {
+            Some(v) => v,
+            None => {
                 // Fall back to peer table: if we have a direct
                 // session with the destination, forward to
                 // their addr via their interface.
@@ -610,7 +617,7 @@ impl Inner {
             // fallback above) is left in place: the peer may
             // re-handshake on a new addr and we want the session
             // state preserved for that path.
-            let mut routes = self.routes.lock().await;
+            let mut routes = self.routes.lock().unwrap();
             let was_present = routes.lookup_entry(&header.dst_id).is_some();
             routes.remove_if_matches(&header.dst_id, next_hop, fwd_iface);
             drop(routes);
