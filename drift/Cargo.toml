@@ -66,6 +66,10 @@ name = "drift"
 path = "src/main.rs"
 
 [[example]]
+name = "bench-oneshot"
+path = "examples/bench_oneshot.rs"
+
+[[example]]
 name = "drift-send"
 path = "examples/send.rs"
 
