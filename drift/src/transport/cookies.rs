@@ -254,7 +254,7 @@ impl Inner {
         let mut blob = [0u8; COOKIE_BLOB_LEN];
         blob.copy_from_slice(&body[..COOKIE_BLOB_LEN]);
 
-        let mesh_next_hop = self.routes.lock().await.lookup(&server_peer_id);
+        let mesh_next_hop = self.routes.lock().unwrap().lookup(&server_peer_id);
 
         let retry = {
             let mut peers = self.peers.lock_for(&server_peer_id).await;

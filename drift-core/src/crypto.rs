@@ -1,10 +1,21 @@
 use crate::error::{DriftError, Result};
 use crate::header::AUTH_TAG_LEN;
 use blake2::{digest::consts::U8, Blake2b, Digest};
-use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use siphasher::sip128::{Hasher128, SipHasher13};
 use std::hash::Hasher as _;
+
+// AEAD backend selection: `ring` on native (2× faster
+// ChaCha20-Poly1305), `chacha20poly1305` crate on wasm32
+// (ring doesn't support wasm32-unknown-unknown).
+#[cfg(not(target_arch = "wasm32"))]
+use ring::aead::{Aad as RingAad, LessSafeKey, Nonce as RingNonce, UnboundKey, CHACHA20_POLY1305};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+
+#[cfg(target_arch = "wasm32")]
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
+#[cfg(target_arch = "wasm32")]
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
 pub const KEY_LEN: usize = 32;
 pub const PEER_ID_LEN: usize = 8;
@@ -47,18 +58,123 @@ pub fn cookie_mac(secret: &[u8; 32], input: &[u8]) -> [u8; COOKIE_MAC_LEN] {
     mac
 }
 
-#[derive(Clone)]
-pub struct SessionKey {
-    cipher: ChaCha20Poly1305,
-    direction: Direction,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Initiator = 0,
     Responder = 1,
 }
 
+/// Our ChaCha20-Poly1305 nonce construction: 12 bytes laid out as
+/// `[dir, 0, 0, 0, packet_type, 0, 0, 0, seq_be...]`. The
+/// direction tag guarantees initiator and responder never reuse
+/// a nonce even if their seq counters overlap; the packet-type
+/// byte namespaces nonces across control vs data packets within
+/// one direction.
+fn nonce_bytes(direction: Direction, seq: u32, packet_type: u8) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[0] = direction as u8;
+    n[4] = packet_type;
+    n[8..12].copy_from_slice(&seq.to_be_bytes());
+    n
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct SessionKey {
+    key: Arc<LessSafeKey>,
+    direction: Direction,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SessionKey {
+    pub fn new(key: &[u8; KEY_LEN], direction: Direction) -> Self {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, key)
+            .expect("CHACHA20_POLY1305 key length matches KEY_LEN (32)");
+        Self {
+            key: Arc::new(LessSafeKey::new(unbound)),
+            direction,
+        }
+    }
+
+    /// Seal `plaintext` with arbitrary AAD, returning a freshly
+    /// allocated `Vec<u8>` containing ciphertext + tag.
+    pub fn seal(&self, seq: u32, packet_type: u8, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(plaintext.len() + AUTH_TAG_LEN);
+        out.extend_from_slice(plaintext);
+        let nonce =
+            RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
+        let tag = self
+            .key
+            .seal_in_place_separate_tag(nonce, RingAad::from(aad), &mut out)
+            .map_err(|_| DriftError::AuthFailed)?;
+        out.extend_from_slice(tag.as_ref());
+        Ok(out)
+    }
+
+    /// Seal `plaintext` into an already-allocated buffer, appending
+    /// ciphertext and the 16-byte Poly1305 tag. Saves one Vec
+    /// allocation per outgoing packet versus `seal` — hot-path
+    /// optimization used by `build_*_packet` helpers.
+    pub fn seal_into(
+        &self,
+        seq: u32,
+        packet_type: u8,
+        aad: &[u8],
+        plaintext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let start = out.len();
+        out.extend_from_slice(plaintext);
+        let nonce =
+            RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
+        let tag = self
+            .key
+            .seal_in_place_separate_tag(nonce, RingAad::from(aad), &mut out[start..])
+            .map_err(|_| DriftError::AuthFailed)?;
+        out.extend_from_slice(tag.as_ref());
+        Ok(())
+    }
+
+    /// Open ciphertext (payload || tag) with arbitrary AAD.
+    pub fn open(
+        &self,
+        seq: u32,
+        packet_type: u8,
+        aad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>> {
+        if ciphertext.len() < AUTH_TAG_LEN {
+            return Err(DriftError::PacketTooShort {
+                got: ciphertext.len(),
+                need: AUTH_TAG_LEN,
+            });
+        }
+        // Ring opens in-place and returns a slice of the plaintext
+        // portion of the buffer. Copy in, open, truncate to the
+        // plaintext length.
+        let mut buf = ciphertext.to_vec();
+        let nonce =
+            RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
+        let pt_len = self
+            .key
+            .open_in_place(nonce, RingAad::from(aad), &mut buf)
+            .map_err(|_| DriftError::AuthFailed)?
+            .len();
+        buf.truncate(pt_len);
+        Ok(buf)
+    }
+}
+
+// ──────────── wasm32 fallback: RustCrypto chacha20poly1305 ────────────
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+pub struct SessionKey {
+    cipher: ChaCha20Poly1305,
+    direction: Direction,
+}
+
+#[cfg(target_arch = "wasm32")]
 impl SessionKey {
     pub fn new(key: &[u8; KEY_LEN], direction: Direction) -> Self {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
@@ -66,15 +182,9 @@ impl SessionKey {
     }
 
     fn nonce_for(&self, seq: u32, packet_type: u8) -> Nonce {
-        let mut n = [0u8; 12];
-        n[0] = self.direction as u8;
-        n[4] = packet_type;
-        n[8..12].copy_from_slice(&seq.to_be_bytes());
-        *Nonce::from_slice(&n)
+        *Nonce::from_slice(&nonce_bytes(self.direction, seq, packet_type))
     }
 
-    /// Seal `plaintext` with arbitrary AAD, returning a freshly
-    /// allocated `Vec<u8>` containing ciphertext + tag.
     pub fn seal(&self, seq: u32, packet_type: u8, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let nonce = self.nonce_for(seq, packet_type);
         self.cipher
@@ -88,10 +198,6 @@ impl SessionKey {
             .map_err(|_| DriftError::AuthFailed)
     }
 
-    /// Seal `plaintext` into an already-allocated buffer, appending
-    /// ciphertext and the 16-byte Poly1305 tag. Saves one Vec
-    /// allocation per outgoing packet versus `seal` — hot-path
-    /// optimization used by `build_*_packet` helpers.
     pub fn seal_into(
         &self,
         seq: u32,
@@ -111,7 +217,6 @@ impl SessionKey {
         Ok(())
     }
 
-    /// Open ciphertext (payload || tag) with arbitrary AAD.
     pub fn open(
         &self,
         seq: u32,
