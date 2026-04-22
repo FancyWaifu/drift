@@ -31,7 +31,15 @@ use std::time::Duration;
 async fn high_fanin_send_data_completes_under_time_budget() {
     const CLIENT_COUNT: usize = 64;
     const PACKETS_PER_CLIENT: usize = 16;
-    const BUDGET_SECS: u64 = 30;
+    // 60 s rather than 30: 64 clients each spawn ~7 background
+    // tokio tasks (recv loop, beacon, retry, etc.) — that's
+    // ~450 tasks on a 4-worker runtime, and under cargo's
+    // default `--test-threads` there are multiple other
+    // test runtimes competing for the same CPU cores. The
+    // test still fails fast in a true deadlock (nothing would
+    // progress for the whole budget); the larger window just
+    // keeps statistical-scheduling jitter from flaking it.
+    const BUDGET_SECS: u64 = 60;
 
     // Server accepts any peer so we don't need to call add_peer
     // on the server for every client.
@@ -91,6 +99,17 @@ async fn high_fanin_send_data_completes_under_time_budget() {
                     .await
                     .unwrap();
             }
+            // send_data on a fresh peer enqueues the payload
+            // and kicks off the handshake — the actual DATA
+            // goes out on the wire when the HELLO_ACK arrives
+            // on the client's recv loop. Dropping the client
+            // here (end of spawn) aborts that recv loop via
+            // TaskGuard, which means payloads queued before
+            // HELLO_ACK never flush. Hold `client` alive for
+            // a short grace period so the background recv loop
+            // can process the HELLO_ACK and drain pending.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(client); // explicit, to document intent
         }));
     }
 

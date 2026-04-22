@@ -2159,11 +2159,19 @@ impl Inner {
 
         // Client looks up the peer by src_id = the server's identity.
         let peer_id = header.src_id;
-        let to_send: Vec<(Vec<u8>, SocketAddr, usize)>;
         // Definite assignment verified by the compiler: the inner
         // block either hits the early `return Ok(())` (no use) or
         // assigns via the `Established` path before falling out.
         let cid_key_for_install: Option<[u8; 32]>;
+        // Track how many bytes we shipped from the flush so we
+        // can update the metric after releasing the lock — lock
+        // is held during the sends themselves to serialize with
+        // any concurrent `close_peer` (otherwise a Close can
+        // race ahead of the pending DATAs and the server tears
+        // down the AwaitingData peer before the first DATA
+        // arrives, silently dropping it).
+        let mut flushed_bytes = 0u64;
+        let mut flushed_packets = 0u64;
         let mesh_next_hop = self.routes.lock().unwrap().lookup(&peer_id);
         {
             let mut peers = self.peers.lock_for(&peer_id).await;
@@ -2246,9 +2254,14 @@ impl Inner {
             }
             cid_key_for_install = Some(session_key_bytes);
 
-            // Flush pending.
+            // Flush pending. We do this WHILE STILL HOLDING
+            // the peer lock — see the race note above. The
+            // sends are serialized with any concurrent
+            // close_peer call on this same peer, which
+            // guarantees all queued DATAs hit the wire before
+            // any Close that the app layer issues immediately
+            // after the handshake completes.
             let pending = std::mem::take(&mut peer.pending);
-            let mut built = Vec::with_capacity(pending.len());
             for ps in pending {
                 if let SendAction::Data(bytes, target, iface) = build_data_packet(
                     self.local_peer_id,
@@ -2258,24 +2271,29 @@ impl Inner {
                     ps.coalesce_group,
                     mesh_next_hop,
                 )? {
-                    built.push((bytes, target, iface));
+                    self.ifaces.send_for(iface, &bytes, target).await?;
+                    flushed_packets += 1;
+                    flushed_bytes += bytes.len() as u64;
                 }
             }
-            to_send = built;
         }
 
         // Install CIDs for short-header send/recv now that the
-        // peer lock is released.
+        // peer lock is released. Safe to do after the flush —
+        // CID lookups are only needed by subsequent send_data
+        // calls, which can't race with handle_helloack's own
+        // flush because that's finished.
         if let Some(key) = &cid_key_for_install {
             self.install_cids(peer_id, key, true).await;
         }
 
-        for (bytes, target, iface) in to_send {
-            self.ifaces.send_for(iface, &bytes, target).await?;
-            self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
+        if flushed_packets > 0 {
+            self.metrics
+                .packets_sent
+                .fetch_add(flushed_packets, Ordering::Relaxed);
             self.metrics
                 .bytes_sent
-                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                .fetch_add(flushed_bytes, Ordering::Relaxed);
         }
         Ok(())
     }
