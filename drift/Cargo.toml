@@ -48,6 +48,14 @@ wtransport = { version = "0.6", features = ["dangerous-configuration"] }
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rcgen = "0.13"
+# Cloudflare's Rust WireGuard implementation. We use the
+# in-memory `noise::Tunn` API directly — no tun device, no
+# sockets — so the bench measures just the handshake crypto +
+# AEAD data plane, same as our DRIFT benches.
+boringtun = "0.7"
+# WireGuard identities are x25519 keys — the same primitive
+# DRIFT uses, so we don't pull in a separate curve lib.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [[bench]]
 name = "throughput"
