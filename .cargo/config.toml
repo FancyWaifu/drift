@@ -1,3 +1,5 @@
+# ──────────────────── WASM ────────────────────
+#
 # web-sys's WebTransport bindings are gated behind this cfg
 # because the spec is still considered "unstable" upstream —
 # even though Chrome / Firefox / Safari all ship it. We only
@@ -5,13 +7,25 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=web_sys_unstable_apis"]
 
-# chacha20 v0.9 gates its NEON backend behind this cfg on
-# aarch64 — without it, Apple Silicon falls through to the
-# portable soft backend and AEAD throughput drops ~2×. The
-# flag is safe: `target_feature = "neon"` is a compile-time
-# check inside the chacha20 crate that guards the intrinsics.
-[target.aarch64-apple-darwin]
+# ──────────────────── Native: aarch64 ────────────────────
+#
+# chacha20 v0.9 has a NEON backend but only compiles it in when
+# `chacha20_force_neon` is set. Without the flag, *every* aarch64
+# target — Apple Silicon, Linux (glibc/musl), Android, iOS,
+# Windows on ARM — falls through to the portable soft backend.
+# Measured: 298 → 615 MiB/s on Apple Silicon (~2×). NEON is
+# mandatory in ARMv8-A, so the `target_feature = "neon"` check
+# inside the crate is always true for stable aarch64 triples.
+#
+# cfg-style target selection matches every aarch64 target at
+# once — no need to enumerate apple-darwin, linux-gnu,
+# linux-musl, linux-android, windows-msvc, etc. individually.
+[target.'cfg(target_arch = "aarch64")']
 rustflags = ["--cfg=chacha20_force_neon"]
 
-[target.aarch64-unknown-linux-gnu]
-rustflags = ["--cfg=chacha20_force_neon"]
+# Note: no equivalent flag is needed for x86/x86_64. chacha20
+# and poly1305 both use runtime CPU-feature detection (via the
+# `cpufeatures` crate) to pick AVX2 / SSE2 backends on x86.
+# curve25519-dalek's build.rs auto-selects its SIMD backend on
+# capable x86_64 targets. So x86 builds already run on the
+# fastest backend without any toolchain flags.
