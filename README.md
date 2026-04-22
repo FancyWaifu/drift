@@ -207,6 +207,62 @@ cargo bench               # throughput benchmarks
 cd drift-wasm-test && npm install && node test-mesh.mjs ...  # WASM↔native E2E
 ```
 
+## Performance
+
+### Cross-protocol benchmark harness
+
+`drift-bench/` is a single binary that speaks DRIFT, QUIC ([quinn](https://docs.rs/quinn)), and WireGuard ([boringtun](https://docs.rs/boringtun)) with identical workloads (handshake, RTT ping-pong, sustained throughput). `bench/docker/run.sh` builds a two-container harness on a shared bridge network and reports each protocol's numbers side-by-side as a Markdown table.
+
+```bash
+cd bench/docker
+./run.sh                                    # default: 1024 B payload, 1000 RTT samples
+NETEM_DELAY=20ms NETEM_LOSS=1% ./run.sh     # simulate WAN with tc/netem
+```
+
+### Results (two Docker containers, shared bridge, Apple Silicon host)
+
+**Cold handshake** (connect → first byte acked, 30 samples):
+
+| Protocol   | p50      | p95      | p99      |
+|------------|----------|----------|----------|
+| **DRIFT**  | **330 µs** | 715 µs   | 795 µs   |
+| WireGuard  | 396 µs   | 826 µs   | 1,150 µs |
+| QUIC       | 2,832 µs | 3,847 µs | 4,208 µs |
+
+DRIFT's X25519-only handshake is 1.2× faster than WireGuard's Noise_IKpsk2 and 8.6× faster than QUIC's TLS 1.3 + transport-params negotiation.
+
+**RTT** (ping-pong, 1 KB payload, 1000 samples):
+
+| Protocol   | p50      | p95      | p99      |
+|------------|----------|----------|----------|
+| WireGuard  | 57 µs    | 115 µs   | 183 µs   |
+| **DRIFT**  | **93 µs** | 143 µs   | 275 µs   |
+| QUIC       | 152 µs   | 192 µs   | 338 µs   |
+
+DRIFT beats QUIC 1.6×; loses to WireGuard ~1.6× on the hot path — the gap is Tokio's mpsc + task-wakeup tax, not protocol work. A sync `poll_recv` variant is on the roadmap to close most of it.
+
+**Throughput** (sustained 1 KB sends, 10 s, real flow control):
+
+| Protocol   | Throughput   |
+|------------|--------------|
+| WireGuard  | 1,746 Mbps   |
+| **DRIFT**  | **1,672 Mbps** |
+| QUIC       | 1,020 Mbps   |
+
+DRIFT matches WireGuard on throughput (same AEAD primitive, same UDP-syscall rate); QUIC's per-packet ACK + stream flow-control machinery drops it ~40%.
+
+### Crypto micro-benchmarks
+
+With NEON-accelerated ChaCha20-Poly1305 from [ring](https://docs.rs/ring) (automatically enabled on every aarch64 target via workspace `.cargo/config.toml`):
+
+| Op                    | Size   | Throughput  |
+|-----------------------|--------|-------------|
+| AEAD seal             | 1 KB   | 1.41 GiB/s  |
+| AEAD open             | 1 KB   | 1.31 GiB/s  |
+| DRIFT loopback short-hdr RTT | 1 KB | 13.9 µs |
+
+The bench suite also includes `cargo bench --bench throughput` (header encode/decode, AEAD seal/open, loopback RTT short vs long header), `cargo bench --bench handshake` (cold + 1-RTT PSK resumption), and `cargo bench --bench comparative` (DRIFT vs raw UDP vs QUIC vs WireGuard entirely in-process via criterion).
+
 ## vs Reticulum
 
 | | Reticulum | DRIFT |

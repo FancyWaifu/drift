@@ -48,32 +48,39 @@ async fn four_clients_churning_against_one_hub() {
     let total_sent = Arc::new(AtomicUsize::new(0));
     let total_reconnects = Arc::new(AtomicUsize::new(0));
 
+    // Per-client delivery counter: needed for the "every
+    // client gets at least one packet through" assertion,
+    // which is what the test actually wants to prove.
+    let per_client_delivered: Arc<[AtomicUsize; CLIENTS]> =
+        Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+
     // Spawn hub drain task.
     let hub_drain = hub.clone();
     let total_expected = total_sent.clone();
+    let per_client_drain = per_client_delivered.clone();
     let drainer = tokio::spawn(async move {
         let mut got = 0usize;
-        // Keep draining until we see no packet for 500ms AND
-        // the global sent-counter has stabilized. The shutdown
-        // signal: we get a timeout AND the expected count has
-        // stopped growing.
         let mut last_sent = 0usize;
         let mut quiet_rounds = 0;
         loop {
             match tokio::time::timeout(Duration::from_millis(500), hub_drain.recv()).await {
-                Ok(Some(_)) => {
+                Ok(Some(msg)) => {
                     got += 1;
                     quiet_rounds = 0;
+                    // Payload is [cid, step]; cid tags the
+                    // sender uniquely.
+                    if let Some(&cid_byte) = msg.payload.first() {
+                        let cid = cid_byte as usize;
+                        if cid < CLIENTS {
+                            per_client_drain[cid].fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    // Timeout: maybe we're done.
                     let now_sent = total_expected.load(Ordering::Relaxed);
                     if now_sent == last_sent && now_sent > 0 {
                         quiet_rounds += 1;
-                        // Two consecutive quiet rounds after
-                        // the sender tasks have stopped → we're
-                        // done.
                         if quiet_rounds >= 2 {
                             break;
                         }
@@ -128,16 +135,23 @@ async fn four_clients_churning_against_one_hub() {
                     // will re-handshake implicitly.
                     let _ = client.close_peer(&hub_peer).await;
                     total_reconnects_c.fetch_add(1, Ordering::Relaxed);
-                    // A brief pause so the close packet
-                    // reaches the hub before the next send.
+                    // A brief pause so the close packet reaches
+                    // the hub before the next send.
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                // Small yield so the hub has a chance to
-                // process inbound packets.
-                tokio::task::yield_now().await;
+                // A small sleep (not just a yield) between
+                // actions. Pure yield_now lets the spawn task
+                // run 30 actions in a tight burst before the
+                // recv loop gets any time — the HELLO_ACK may
+                // arrive after the task's actions are done,
+                // and a session that the spawn task thought
+                // was live never actually finishes on the hub
+                // side. 1 ms isn't visible in wallclock terms
+                // but is enough for the recv-task to drain a
+                // few packets between our bursts.
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            // Explicit final close so the hub sees an
-            // orderly shutdown.
+            // Explicit final close so the hub sees an orderly shutdown.
             let _ = client.close_peer(&hub_peer).await;
             let _ = derive_peer_id(&hub_pub_c); // silence unused warning
         }));
@@ -156,9 +170,24 @@ async fn four_clients_churning_against_one_hub() {
     let sent = total_sent.load(Ordering::Relaxed);
     let reconnects = total_reconnects.load(Ordering::Relaxed);
 
+    let hm_preview = hub.metrics();
     println!(
-        "churn: clients={} sent(attempted)={} delivered={} reconnects={}",
-        CLIENTS, sent, delivered, reconnects
+        "churn: clients={} sent(attempted)={} delivered={} reconnects={} \
+         hs_done={} hs_retries={} hs_inflight={} auth_fail={} replays={} \
+         per_client={:?}",
+        CLIENTS,
+        sent,
+        delivered,
+        reconnects,
+        hm_preview.handshakes_completed,
+        hm_preview.handshake_retries,
+        hub.handshakes_in_progress(),
+        hm_preview.auth_failures,
+        hm_preview.replays_caught,
+        per_client_delivered
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect::<Vec<_>>(),
     );
 
     // Under heavy churn, `sent` counts *attempted* sends
@@ -220,11 +249,29 @@ async fn four_clients_churning_against_one_hub() {
         hm.replays_caught,
         reconnects
     );
-    // At least one handshake per client should have happened.
-    assert!(
-        hm.handshakes_completed >= CLIENTS as u64,
-        "hub should have completed at least {} handshakes, got {}",
-        CLIENTS,
-        hm.handshakes_completed
-    );
+    // Every client should have landed at least one packet on
+    // the hub. Prior versions asserted `handshakes_completed >=
+    // CLIENTS` directly, but that counter only increments on
+    // the *first DATA after a HELLO* — and a client whose
+    // first action is "send then immediately close" can race:
+    // the spawn task's Close and the recv task's pending-flush
+    // DATA hit the UDP socket concurrently, and if Close wins
+    // the hub tears down the AwaitingData peer before the DATA
+    // arrives. That's correct protocol behavior (Close is
+    // AEAD-authenticated), but it makes the cold-handshake
+    // counter pessimistically miss the session.
+    //
+    // The real invariant we care about is "the channel stayed
+    // healthy for every client" — so we track per-client
+    // deliveries and require each client to land at least one.
+    // This is strictly stronger than `delivered >= CLIENTS`
+    // (which could be one client dominating).
+    for (cid, n) in per_client_delivered.iter().enumerate() {
+        let n = n.load(Ordering::Relaxed);
+        assert!(
+            n >= 1,
+            "client {} landed 0 packets on hub — channel broken",
+            cid
+        );
+    }
 }
