@@ -15,6 +15,28 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 const CERT_PATH: &str = "/tmp/quic-cert.der";
 
+/// Accept N short connections, echo one datagram on each,
+/// close. The endpoint stays up for the whole loop so the
+/// UDP socket doesn't rebind between iterations — only the
+/// per-connection QUIC state is fresh.
+async fn handshake_server_loop(endpoint: &Endpoint, iters: usize) {
+    for _ in 0..iters {
+        let incoming = match endpoint.accept().await {
+            Some(i) => i,
+            None => return,
+        };
+        let connection = match incoming.await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Ok(bytes) = connection.read_datagram().await {
+            let _ = connection.send_datagram(bytes);
+            // Let quinn flush before the client tears down.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
 /// Install ring as rustls' default CryptoProvider. Idempotent
 /// — rustls errors on repeated installs but doesn't break.
 fn ensure_crypto_provider() {
@@ -58,6 +80,14 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     let endpoint = Endpoint::server(server_config, listen)?;
     eprintln!("quic server listening on {}", listen);
 
+    // Handshake loops over many fresh connections; the other
+    // workloads need one long-lived connection. Structure:
+    // branch first, accept inside.
+    if matches!(cli.workload, Workload::Handshake) {
+        handshake_server_loop(&endpoint, cli.handshake_iters).await;
+        return Ok(None);
+    }
+
     let incoming = endpoint
         .accept()
         .await
@@ -68,18 +98,7 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     // when the client's one-shot workload finishes and tears
     // down the connection.
     match cli.workload {
-        Workload::Handshake => {
-            // Echo one datagram so the client can time the
-            // full round trip (connect + first byte both ways).
-            // Keeps the semantics identical to DRIFT and WG.
-            if let Ok(bytes) = connection.read_datagram().await {
-                let _ = connection.send_datagram(bytes);
-                // Give quinn's inner task a tick to actually
-                // put the datagram on the wire before we
-                // return and drop the connection.
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
+        Workload::Handshake => unreachable!(),
         Workload::Rtt => {
             // Datagrams: each send_datagram maps to one QUIC
             // DATAGRAM frame — no stream accept, no flow
@@ -97,11 +116,19 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             }
         }
         Workload::Throughput => {
+            // Streams (not datagrams) for throughput: QUIC
+            // streams apply flow control, so client write_all
+            // only returns when the server-side buffer has
+            // room. That gives a real on-wire throughput
+            // number instead of the buffer-queue rate that
+            // datagrams measure.
+            let mut recv = connection.accept_uni().await?;
+            let mut buf = vec![0u8; 65536];
             let mut total = 0u64;
             loop {
-                match connection.read_datagram().await {
-                    Ok(bytes) => total += bytes.len() as u64,
-                    Err(_) => break,
+                match recv.read(&mut buf).await? {
+                    Some(n) if n > 0 => total += n as u64,
+                    _ => break,
                 }
             }
             eprintln!("quic server received {} bytes", total);
@@ -146,21 +173,33 @@ async fn build_client() -> Result<Endpoint> {
 }
 
 pub async fn client(cli: &Cli) -> Result<Option<Report>> {
-    let target: SocketAddr = cli.target.parse()?;
+    let target: SocketAddr = crate::resolve_target(&cli.target).await?;
     let endpoint = build_client().await?;
 
     match cli.workload {
         Workload::Handshake => {
             let mut report = Report::new("quic", "handshake");
-            let start = Instant::now();
-            let conn = endpoint.connect(target, "bench-server")?.await?;
-            // One datagram round trip to match DRIFT + WG's
-            // "connect + first byte acked" semantics.
-            let probe: bytes::Bytes = vec![0xA5u8; 32].into();
-            conn.send_datagram(probe)?;
-            let _ =
-                tokio::time::timeout(Duration::from_secs(5), conn.read_datagram()).await??;
-            report.handshake_us = Some(start.elapsed().as_micros() as u64);
+            let mut samples: Vec<u128> = Vec::with_capacity(cli.handshake_iters);
+            // Each iter needs a fresh Endpoint so the UDP
+            // source port changes — otherwise quinn may reuse
+            // a cached 0-RTT state and we'd be measuring
+            // resumption, not a cold handshake.
+            for _ in 0..cli.handshake_iters {
+                let ep = build_client().await?;
+                let start = Instant::now();
+                let conn = ep.connect(target, "bench-server")?.await?;
+                let probe: bytes::Bytes = vec![0xA5u8; 32].into();
+                conn.send_datagram(probe)?;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(5), conn.read_datagram())
+                        .await??;
+                samples.push(start.elapsed().as_micros());
+                // Close the connection + drop endpoint so the
+                // next iter is genuinely cold.
+                conn.close(0u32.into(), b"bye");
+                ep.wait_idle().await;
+            }
+            crate::report::summarize_handshakes(&mut samples, &mut report);
             Ok(Some(report))
         }
         Workload::Rtt => {
@@ -188,20 +227,25 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
         Workload::Throughput => {
             let mut report = Report::new("quic", "throughput");
             let conn = endpoint.connect(target, "bench-server")?.await?;
-            let payload: bytes::Bytes = vec![0xA5u8; cli.payload_bytes].into();
+            // Uni stream + write_all: QUIC flow control blocks
+            // write_all when the server's receive window is
+            // full, so this measures genuine wire throughput
+            // (same contract as DRIFT/WG where the send API
+            // blocks until the kernel has the bytes).
+            let mut send = conn.open_uni().await?;
+            let payload = vec![0xA5u8; cli.payload_bytes];
 
             let duration = Duration::from_secs(cli.duration_secs);
             let start = Instant::now();
             let mut bytes = 0u64;
             while start.elapsed() < duration {
-                // send_datagram returns err on back-pressure
-                // (queue full). Sleep briefly so we don't spin
-                // against a drained queue on slow links.
-                match conn.send_datagram(payload.clone()) {
-                    Ok(()) => bytes += payload.len() as u64,
-                    Err(_) => tokio::time::sleep(Duration::from_millis(1)).await,
-                }
+                send.write_all(&payload).await?;
+                bytes += payload.len() as u64;
             }
+            send.finish()?;
+            // Wait for the stream to actually drain — otherwise
+            // we'd count buffered bytes that haven't been acked.
+            let _ = send.stopped().await;
             let elapsed = start.elapsed().as_secs_f64();
 
             report.bytes_moved = Some(bytes);

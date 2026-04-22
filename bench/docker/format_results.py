@@ -47,12 +47,23 @@ def render(by):
     if "handshake" in by:
         lines.append("### Cold handshake (connect → first byte ack)")
         lines.append("")
-        lines.append("| Protocol | Handshake |")
-        lines.append("|---|---|")
+        lines.append("| Protocol | min | p50 | p95 | p99 | max |")
+        lines.append("|---|---|---|---|---|---|")
         for p in PROTOCOLS:
             r = by["handshake"].get(p)
-            hs = fmt_us(r and r.get("handshake_us"))
-            lines.append(f"| {p} | {hs} |")
+            if r is None:
+                lines.append(f"| {p} | - | - | - | - | - |")
+                continue
+            lines.append(
+                "| {p} | {mn} | {p50} | {p95} | {p99} | {mx} |".format(
+                    p=p,
+                    mn=fmt_us(r.get("handshake_min_us")),
+                    p50=fmt_us(r.get("handshake_p50_us")),
+                    p95=fmt_us(r.get("handshake_p95_us")),
+                    p99=fmt_us(r.get("handshake_p99_us")),
+                    mx=fmt_us(r.get("handshake_max_us")),
+                )
+            )
         lines.append("")
 
     if "rtt" in by:

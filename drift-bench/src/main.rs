@@ -19,6 +19,17 @@ mod quic_proto;
 mod report;
 mod wg_proto;
 
+/// Resolve `host:port` to a SocketAddr. Handles both IPs
+/// (127.0.0.1:9000) and hostnames (server:9000). Docker's
+/// embedded DNS resolves compose/network-alias names via the
+/// OS resolver, which `tokio::net::lookup_host` calls through.
+/// Returns the first A/AAAA answer.
+pub async fn resolve_target(s: &str) -> anyhow::Result<std::net::SocketAddr> {
+    let mut iter = tokio::net::lookup_host(s).await?;
+    iter.next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses resolved for {}", s))
+}
+
 #[derive(Parser, Clone)]
 pub struct Cli {
     #[clap(long, value_enum)]
@@ -44,6 +55,12 @@ pub struct Cli {
     /// How many ping-pong iterations the rtt workload runs.
     #[clap(long, default_value = "1000")]
     pub rtt_iters: usize,
+    /// How many cold handshakes to time. Each iteration spins
+    /// up a fresh client-side session/endpoint so the N-sample
+    /// distribution captures warm-socket variance without
+    /// restarting the server process.
+    #[clap(long, default_value = "30")]
+    pub handshake_iters: usize,
     /// How long the server waits for the client before exiting.
     #[clap(long, default_value = "60")]
     pub server_idle_secs: u64,
@@ -53,7 +70,11 @@ pub struct Cli {
 pub enum Protocol {
     Drift,
     Quic,
-    Wg,
+    // Two accepted spellings: the short `wg` for CLI ergonomics
+    // and `wireguard` for log readability. Clap derives both
+    // from the variant name + aliases.
+    #[clap(alias = "wg")]
+    Wireguard,
 }
 
 impl Protocol {
@@ -61,7 +82,7 @@ impl Protocol {
         match self {
             Protocol::Drift => "drift",
             Protocol::Quic => "quic",
-            Protocol::Wg => "wireguard",
+            Protocol::Wireguard => "wireguard",
         }
     }
 }
@@ -103,8 +124,8 @@ async fn main() -> Result<()> {
             (Protocol::Drift, Mode::Client) => drift_proto::client(&cli).await,
             (Protocol::Quic, Mode::Server) => quic_proto::server(&cli).await,
             (Protocol::Quic, Mode::Client) => quic_proto::client(&cli).await,
-            (Protocol::Wg, Mode::Server) => wg_proto::server(&cli).await,
-            (Protocol::Wg, Mode::Client) => wg_proto::client(&cli).await,
+            (Protocol::Wireguard, Mode::Server) => wg_proto::server(&cli).await,
+            (Protocol::Wireguard, Mode::Client) => wg_proto::client(&cli).await,
         }
     };
 

@@ -8,7 +8,7 @@
 # take a few minutes — subsequent runs are cached by Docker's
 # layer system.
 
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 WORKDIR /usr/src/drift
 
 # System deps for boringtun + quinn + rustls-ring.

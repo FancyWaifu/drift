@@ -33,14 +33,21 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
 
     match cli.workload {
         Workload::Handshake => {
-            // Receive one probe and echo it back so the client
-            // can time a full round trip (handshake + first
-            // data both ways). `send_data` alone returning on
-            // the client side isn't a valid handshake timing
-            // — DRIFT queues payload, completes the handshake
-            // async, and flushes from a background task.
-            if let Some(msg) = server.recv().await {
-                let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
+            // For DRIFT, a "cold handshake" per iter means a
+            // *fresh client identity* (new static keys, new
+            // session state). The client picks a new identity
+            // each time and adds the server as a peer; the
+            // server side just echoes whatever arrives. The
+            // server never needs to rebuild — it accepts any
+            // configured peer — so a single long-running
+            // server loop handles all N handshake samples.
+            for _ in 0..cli.handshake_iters {
+                match tokio::time::timeout(Duration::from_secs(10), server.recv()).await {
+                    Ok(Some(msg)) => {
+                        let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
+                    }
+                    _ => break,
+                }
             }
         }
         Workload::Rtt => {
@@ -74,37 +81,61 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
 }
 
 pub async fn client(cli: &Cli) -> Result<Option<Report>> {
-    let client_id = Identity::from_secret_bytes(CLIENT_SEED);
     let server_pub = Identity::from_secret_bytes(SERVER_SEED).public_bytes();
-    let target: SocketAddr = cli.target.parse()?;
-
-    let client = Transport::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap(), client_id).await?;
-    let server_peer = client
-        .add_peer(server_pub, target, Direction::Initiator)
-        .await?;
+    let target: SocketAddr = crate::resolve_target(&cli.target).await?;
 
     match cli.workload {
-        Workload::Handshake => run_handshake(&client, &server_peer).await,
-        Workload::Rtt => run_rtt(cli, &client, &server_peer).await,
-        Workload::Throughput => run_throughput(cli, &client, &server_peer).await,
+        Workload::Handshake => run_handshake(cli, server_pub, target).await,
+        Workload::Rtt | Workload::Throughput => {
+            // Single long-lived session for the data-plane
+            // workloads — matches what a real app would do.
+            let client_id = Identity::from_secret_bytes(CLIENT_SEED);
+            let client =
+                Transport::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap(), client_id)
+                    .await?;
+            let server_peer = client
+                .add_peer(server_pub, target, Direction::Initiator)
+                .await?;
+            match cli.workload {
+                Workload::Rtt => run_rtt(cli, &client, &server_peer).await,
+                Workload::Throughput => run_throughput(cli, &client, &server_peer).await,
+                _ => unreachable!(),
+            }
+        }
     }
 }
 
 async fn run_handshake(
-    client: &Transport,
-    server_peer: &[u8; 8],
+    cli: &Cli,
+    server_pub: [u8; 32],
+    target: SocketAddr,
 ) -> Result<Option<Report>> {
     let mut report = Report::new("drift", "handshake");
+    let mut samples: Vec<u128> = Vec::with_capacity(cli.handshake_iters);
 
-    let start = Instant::now();
-    client.send_data(server_peer, b"go", 0, 0).await?;
-    // Full round trip: wait for the server's echo, which can
-    // only arrive after the handshake completes + the server
-    // processes the first DATA.
-    let _ = tokio::time::timeout(Duration::from_secs(5), client.recv())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("server closed before ack"))?;
-    report.handshake_us = Some(start.elapsed().as_micros() as u64);
+    // Each iter: fresh client Transport (fresh socket, fresh
+    // peer table, fresh session). The server keeps the same
+    // peer_pub across all iters, so "cold" here means
+    // "fresh client state, full HELLO/HELLO_ACK" — which is
+    // what a reconnecting client actually pays.
+    for _ in 0..cli.handshake_iters {
+        let client_id = Identity::from_secret_bytes(CLIENT_SEED);
+        let client =
+            Transport::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap(), client_id).await?;
+        let server_peer = client
+            .add_peer(server_pub, target, Direction::Initiator)
+            .await?;
+
+        let start = Instant::now();
+        client.send_data(&server_peer, b"go", 0, 0).await?;
+        let _ = tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("server closed before ack"))?;
+        samples.push(start.elapsed().as_micros());
+        // Transport drops here, cleaning up its background
+        // tasks via the TaskGuard we added earlier.
+    }
+    crate::report::summarize_handshakes(&mut samples, &mut report);
     Ok(Some(report))
 }
 
