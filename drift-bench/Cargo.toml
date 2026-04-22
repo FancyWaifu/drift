@@ -1,0 +1,27 @@
+[package]
+name = "drift-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Real-network benchmark: DRIFT vs QUIC vs WireGuard"
+
+[dependencies]
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# QUIC
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rcgen = "0.13"
+bytes = "1"
+
+# WireGuard
+boringtun = "0.7"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[[bin]]
+name = "drift-bench"
+path = "src/main.rs"

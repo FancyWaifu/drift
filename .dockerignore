@@ -1,4 +1,11 @@
 target/
+**/target/
 .git/
 *.log
 /tmp/
+docs/
+pkg-node/
+pkg-web/
+drift-wasm/target/
+drift-wasm-test/node_modules/
+bench/docker/results/
