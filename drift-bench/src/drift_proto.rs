@@ -1,0 +1,162 @@
+//! DRIFT server + client bench implementations.
+//!
+//! Both sides use a fixed identity per role so the client
+//! knows the server's peer_id ahead of time without a discovery
+//! step — this isolates the handshake measurement from any
+//! rendezvous work.
+
+use crate::{report::Report, Cli, Workload};
+use anyhow::Result;
+use drift::identity::Identity;
+use drift::{Direction, Transport};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+// Fixed identity seeds so server + client always derive the
+// same peer_ids regardless of which container hits the net
+// first. Hardcoding is fine — this is a bench, not prod.
+const SERVER_SEED: [u8; 32] = [0xAA; 32];
+const CLIENT_SEED: [u8; 32] = [0xBB; 32];
+
+pub async fn server(cli: &Cli) -> Result<Option<Report>> {
+    let server_id = Identity::from_secret_bytes(SERVER_SEED);
+    let client_pub = Identity::from_secret_bytes(CLIENT_SEED).public_bytes();
+    let listen: SocketAddr = cli.listen.parse()?;
+
+    let server = Transport::bind(listen, server_id).await?;
+    // Learn the client identity up front so first incoming DATA
+    // doesn't get rejected as "unknown peer" during cold start.
+    server
+        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .await?;
+    eprintln!("drift server listening on {}", listen);
+
+    match cli.workload {
+        Workload::Handshake => {
+            // Receive one probe and echo it back so the client
+            // can time a full round trip (handshake + first
+            // data both ways). `send_data` alone returning on
+            // the client side isn't a valid handshake timing
+            // — DRIFT queues payload, completes the handshake
+            // async, and flushes from a background task.
+            if let Some(msg) = server.recv().await {
+                let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
+            }
+        }
+        Workload::Rtt => {
+            // Echo-until-client-disconnects. The client drives
+            // `rtt_iters` iterations, we echo each one back.
+            // Keep going until the client stops sending.
+            loop {
+                match tokio::time::timeout(Duration::from_secs(30), server.recv()).await {
+                    Ok(Some(msg)) => {
+                        let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Workload::Throughput => {
+            // Drain until idle; the client sends for
+            // `duration_secs` then stops. Count bytes for a
+            // sanity check echo.
+            let mut total = 0u64;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(30), server.recv()).await {
+                    Ok(Some(msg)) => total += msg.payload.len() as u64,
+                    _ => break,
+                }
+            }
+            eprintln!("drift server received {} bytes", total);
+        }
+    }
+    Ok(None)
+}
+
+pub async fn client(cli: &Cli) -> Result<Option<Report>> {
+    let client_id = Identity::from_secret_bytes(CLIENT_SEED);
+    let server_pub = Identity::from_secret_bytes(SERVER_SEED).public_bytes();
+    let target: SocketAddr = cli.target.parse()?;
+
+    let client = Transport::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap(), client_id).await?;
+    let server_peer = client
+        .add_peer(server_pub, target, Direction::Initiator)
+        .await?;
+
+    match cli.workload {
+        Workload::Handshake => run_handshake(&client, &server_peer).await,
+        Workload::Rtt => run_rtt(cli, &client, &server_peer).await,
+        Workload::Throughput => run_throughput(cli, &client, &server_peer).await,
+    }
+}
+
+async fn run_handshake(
+    client: &Transport,
+    server_peer: &[u8; 8],
+) -> Result<Option<Report>> {
+    let mut report = Report::new("drift", "handshake");
+
+    let start = Instant::now();
+    client.send_data(server_peer, b"go", 0, 0).await?;
+    // Full round trip: wait for the server's echo, which can
+    // only arrive after the handshake completes + the server
+    // processes the first DATA.
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("server closed before ack"))?;
+    report.handshake_us = Some(start.elapsed().as_micros() as u64);
+    Ok(Some(report))
+}
+
+async fn run_rtt(
+    cli: &Cli,
+    client: &Transport,
+    server_peer: &[u8; 8],
+) -> Result<Option<Report>> {
+    let mut report = Report::new("drift", "rtt");
+    let payload = vec![0xA5u8; cli.payload_bytes];
+
+    // Warm the handshake — the first ping-pong pays the cold
+    // handshake cost and would skew the percentile math.
+    client.send_data(server_peer, &payload, 0, 0).await?;
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.recv()).await;
+
+    let mut samples: Vec<u128> = Vec::with_capacity(cli.rtt_iters);
+    for _ in 0..cli.rtt_iters {
+        let start = Instant::now();
+        client.send_data(server_peer, &payload, 0, 0).await?;
+        let _ = tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("server closed"))?;
+        samples.push(start.elapsed().as_micros());
+    }
+    crate::report::summarize_rtts(&mut samples, &mut report);
+    Ok(Some(report))
+}
+
+async fn run_throughput(
+    cli: &Cli,
+    client: &Transport,
+    server_peer: &[u8; 8],
+) -> Result<Option<Report>> {
+    let mut report = Report::new("drift", "throughput");
+    let payload = vec![0xA5u8; cli.payload_bytes];
+
+    // Warm the handshake.
+    client.send_data(server_peer, &[0u8; 8], 0, 0).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let duration = Duration::from_secs(cli.duration_secs);
+    let start = Instant::now();
+    let mut bytes = 0u64;
+    while start.elapsed() < duration {
+        client.send_data(server_peer, &payload, 0, 0).await?;
+        bytes += payload.len() as u64;
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+
+    report.bytes_moved = Some(bytes);
+    report.duration_s = Some(elapsed);
+    report.throughput_mbps = Some((bytes as f64 * 8.0) / (elapsed * 1_000_000.0));
+    Ok(Some(report))
+}

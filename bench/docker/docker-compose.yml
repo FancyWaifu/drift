@@ -1,0 +1,49 @@
+services:
+  # The server container listens on the internal network on
+  # port 9000. Each workload run starts the server, the
+  # client pings, the server exits. run.sh orchestrates.
+  server:
+    build:
+      context: ../..
+      dockerfile: bench/docker/Dockerfile
+    image: drift-bench:latest
+    networks:
+      bench_net:
+        ipv4_address: 10.42.0.10
+    volumes:
+      # Shared scratch so the QUIC server can write its
+      # self-signed cert DER where the client can read it.
+      - quic-certs:/tmp
+    # Raw caps for netem (run.sh can inject tc qdisc).
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - RUST_BACKTRACE=1
+    # Default command gets overridden per-run. The compose
+    # file just holds the shape.
+    command: ["--help"]
+
+  client:
+    image: drift-bench:latest
+    depends_on:
+      - server
+    networks:
+      bench_net:
+        ipv4_address: 10.42.0.20
+    volumes:
+      - quic-certs:/tmp
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - RUST_BACKTRACE=1
+    command: ["--help"]
+
+networks:
+  bench_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.42.0.0/24
+
+volumes:
+  quic-certs:
