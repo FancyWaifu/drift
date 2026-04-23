@@ -1,0 +1,61 @@
+#!/usr/bin/env expect -f
+# Verify window-resize messages propagate to the remote pty.
+# We can't manipulate the outer `/dev/tty` in an automated
+# environment, so we instead exercise the code path by setting
+# the pty dimensions via stty on the *spawned child's* pty —
+# which is what expect owns after `spawn`.
+
+set timeout 15
+
+set server_log "/tmp/drift-mosh-resize-server.log"
+exec rm -f $server_log
+exec sh -c "../../target/release/drift-mosh-server --bind 127.0.0.1:0 --shell /bin/sh >$server_log 2>&1 &"
+
+set banner ""
+for {set i 0} {$i < 20} {incr i} {
+    after 200
+    if {[file exists $server_log]} {
+        set banner [exec cat $server_log]
+        if {[regexp {pub = ([a-f0-9]+).*addr = ([0-9\.:]+)} $banner _ pub addr]} {
+            break
+        }
+    }
+}
+
+if {![info exists pub]} {
+    puts "FAIL: no banner"
+    exit 1
+}
+
+# Set the spawn's pty to 24x80 *before* spawning the client.
+# The client reads this on startup and sends an initial
+# Ctrl::Resize to the server.
+stty rows 24 columns 80
+spawn ../../target/release/drift-mosh-client --server-pub $pub --server-addr $addr
+
+# Wait for the shell prompt.
+expect -re {[\$#] }
+
+send "stty size\r"
+expect {
+    -re "24 80" { puts "PASS: initial 24x80 propagated" }
+    timeout    { puts "FAIL: initial size didn't propagate"; exit 1 }
+}
+expect -re {[\$#] }
+
+# Resize the spawned pty (this is the one the client reads
+# via crossterm's size()) and send SIGWINCH to the client.
+stty rows 40 columns 120
+exec kill -WINCH [exp_pid]
+
+after 300
+send "stty size\r"
+expect {
+    -re "40 120" { puts "PASS: resize to 40x120 propagated" }
+    timeout    { puts "FAIL: resize didn't propagate"; exit 1 }
+}
+
+send "exit\r"
+expect eof
+exec pkill -f drift-mosh-server
+exit 0

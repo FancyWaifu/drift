@@ -1,0 +1,34 @@
+[package]
+name = "drift-mosh"
+version = "0.1.0"
+edition = "2021"
+description = "Mobile-shell replacement over DRIFT — survives network changes, identity-first, multi-medium"
+
+[dependencies]
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["full"] }
+# Cross-platform PTY spawning: fork + exec + window-size
+# handling for macOS, Linux, Windows without a per-OS branch.
+portable-pty = "0.8"
+# Raw-mode terminal: stdin capture, cursor + escape-sequence
+# primitives on the client side.
+crossterm = "0.28"
+# SIGWINCH (and SIGINT / SIGTERM for clean shutdown).
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+futures-util = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "drift-mosh-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "drift-mosh-client"
+path = "src/bin/client.rs"
