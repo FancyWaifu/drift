@@ -24,6 +24,22 @@ serde = { version = "1", features = ["derive"] }
 bincode = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# XDG-style config resolution: ~/.config/drift-mosh/ on Linux,
+# ~/Library/Application Support/drift-mosh/ on macOS,
+# %APPDATA%\drift-mosh\ on Windows. One crate, consistent
+# paths across platforms.
+dirs = "5"
+# TOML config file at config.toml — human-editable, same
+# family as Cargo.toml / pyproject.toml.
+toml = "0.8"
+# Generating fresh client identities when the config dir is
+# empty.
+rand = "0.8"
+
+[[bin]]
+# The user-facing CLI: `drift-mosh user@host`.
+name = "drift-mosh"
+path = "src/bin/drift_mosh.rs"
 
 [[bin]]
 name = "drift-mosh-server"

@@ -20,7 +20,7 @@ for {set i 0} {$i < 20} {incr i} {
     after 200
     if {[file exists $server_log]} {
         set banner [exec cat $server_log]
-        if {[regexp {pub = ([a-f0-9]+).*addr = ([0-9\.:]+)} $banner _ pub addr]} {
+        if {[regexp {DRIFT_MOSH_PUB=([a-f0-9]+).*DRIFT_MOSH_ADDR=([0-9\.:]+)} $banner _ pub addr]} {
             break
         }
     }

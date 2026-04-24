@@ -1,30 +1,19 @@
-//! drift-mosh — a mobile-shell replacement over DRIFT.
+//! drift-mosh shared library.
 //!
-//! The binaries (`server`, `client`) share the control-plane
-//! message format defined here. Pty bytes go as raw payload on
-//! a dedicated stream; everything else (window resize, clean
-//! shutdown) is a bincode-encoded `Ctrl` message on a control
-//! stream.
+//! Contains the types that server, client, and the `drift-mosh`
+//! launcher all agree on — the control-plane message format,
+//! config, known-hosts (TOFU), and the persistent client key.
 
-use serde::{Deserialize, Serialize};
+pub mod client_key;
+pub mod config;
+pub mod known_hosts;
+// Re-export the TOFU prompt helper at crate root so both
+// binaries and external wrappers can use it.
+pub mod scrollback;
+pub mod wire;
 
-/// Control-plane message. Bincode-encoded and sent as one DRIFT
-/// stream frame. Kept small and stable so adding new message
-/// types later doesn't break old clients — we use an enum with
-/// explicit tags.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Ctrl {
-    /// Client → server: the local TTY was resized. Server
-    /// forwards this to the pty so the remote shell (and any
-    /// full-screen programs) reflow.
-    Resize { rows: u16, cols: u16 },
-    /// Either direction: polite shutdown. The peer should
-    /// close its half of the session without errors.
-    Bye,
-}
-
-/// Wire-size upper bound for a single pty chunk. Well under
-/// DRIFT's MAX_PAYLOAD (1348 B) so every chunk fits in one
-/// packet and we don't have to deal with fragmentation on the
-/// hot path.
-pub const PTY_CHUNK_SIZE: usize = 1024;
+pub use client_key::ClientKey;
+pub use config::Config;
+pub use known_hosts::{HostKeyStatus, KnownHosts};
+pub use scrollback::Scrollback;
+pub use wire::{Ctrl, BannerLine, PTY_CHUNK_SIZE, SCROLLBACK_BYTES};
