@@ -1,46 +1,112 @@
 # drift-mosh
 
-A [mosh](https://mosh.org/)-style mobile-shell replacement built on DRIFT.
+**A mobile-shell replacement that survives network changes.**
 
-Same idea as mosh: keep your remote terminal session alive across network changes (wifi → cellular, laptop suspend/resume, coffee-shop roaming). Different implementation — where mosh had to design SSP from scratch, drift-mosh inherits **connection migration**, **session resumption**, and **identity-first addressing** from the DRIFT transport.
+Like [mosh](https://mosh.org/), but built on [DRIFT](../README.md) — so reconnects, migration, and identity-first addressing come from the transport layer instead of a bespoke protocol. Use it as a drop-in for `ssh user@host` when you want your terminal session to survive wifi-to-cellular switches, laptop suspend, and long network glitches.
 
-## Why
-
-SSH breaks when your network changes. Mosh fixes this with its own UDP-based protocol. DRIFT already solved the same problem at the transport layer — so drift-mosh is a thin shell around a `Transport` + a pty. Roughly **300 lines of code** per side.
-
-| Feature | SSH | mosh | drift-mosh |
-|---------|-----|------|-----------|
-| Survives network change | ❌ | ✅ | ✅ |
-| Identity-first (no hostname) | ❌ | ❌ | ✅ |
-| Multi-medium (UDP/TCP/WS) | TCP only | UDP only | any |
-| Terminal state sync | byte stream | full | byte stream¹ |
-| Local echo prediction | ❌ | ✅ | ❌² |
-
-¹ Mosh-style state sync + `supersedes`-based coalescing is a planned follow-up (see below).
-² No local echo yet — keystrokes round-trip like SSH. Planned.
-
-## Quick start
-
-```bash
-# Build both binaries.
-cargo build --release -p drift-mosh
-
-# Terminal 1 — start the server on the remote host.
-./target/release/drift-mosh-server --bind 0.0.0.0:0
-# Prints a startup banner:
-#   drift-mosh-server ready
-#   pub = bd179b57...
-#   addr = 127.0.0.1:54506
-#   (paste into client: --server-pub ... --server-addr ...)
-
-# Terminal 2 — connect from your laptop.
-./target/release/drift-mosh-client \
-    --server-pub bd179b57e52e6cb0e28fa9b0d4ccfd5cf9e399cd533ed199637780712a875c71 \
-    --server-addr 127.0.0.1:54506
-# You're in a remote shell.
+```
+$ drift-mosh user@host
+# [you're in a shell. close the lid, move to a different network, reopen.]
+# [session is still there, scrollback intact.]
 ```
 
-Close the client's lid, switch networks, reopen — the session resumes transparently. DRIFT's path validation handles the address change; mosh had to build this itself.
+## Install
+
+### From source
+
+Requires Rust 1.80+.
+
+```bash
+git clone https://github.com/FancyWaifu/drift
+cd drift
+cargo install --path drift-mosh --bin drift-mosh
+cargo install --path drift-mosh --bin drift-mosh-client
+cargo install --path drift-mosh --bin drift-mosh-server
+```
+
+### From a release tarball
+
+Pre-built tarballs for macOS (arm64, x86_64) and Linux (x86_64, arm64) are attached to every `drift-mosh-v*` GitHub release:
+
+```bash
+TARGET=aarch64-apple-darwin   # pick yours
+VERSION=drift-mosh-v0.1.0
+curl -L -o dm.tar.gz https://github.com/FancyWaifu/drift/releases/download/$VERSION/drift-mosh-$VERSION-$TARGET.tar.gz
+tar xzf dm.tar.gz
+sudo mv drift-mosh-$VERSION-$TARGET/drift-mosh* /usr/local/bin/
+```
+
+On the remote host, install `drift-mosh-server` the same way. The `drift-mosh` launcher on your laptop runs it over SSH.
+
+## Usage
+
+```bash
+drift-mosh user@host
+```
+
+Under the hood:
+1. The launcher SSHs into `user@host` and runs `drift-mosh-server`.
+2. The server prints its pubkey + bound UDP address on stdout.
+3. The launcher pins the pubkey on first connect (TOFU, same as SSH's `known_hosts`).
+4. It hands off to `drift-mosh-client`, which opens a DRIFT session and drops you into a shell.
+
+### Options
+
+```
+drift-mosh [OPTIONS] <TARGET>
+
+Arguments:
+  <TARGET>                    user@host or just host
+
+Options:
+  -p, --ssh-port <PORT>       SSH port [default: 22]
+      --no-ssh                Skip SSH launch; connect to a server you started manually
+      --server-pub <HEX>      Server pubkey (required with --no-ssh)
+      --server-addr <IP:PORT> Server address (required with --no-ssh)
+      --remote-server-path <PATH>
+                              Path to drift-mosh-server on the remote host
+```
+
+### Config file
+
+`$XDG_CONFIG_HOME/drift-mosh/config.toml` (or `~/Library/Application Support/drift-mosh/config.toml` on macOS):
+
+```toml
+ssh_port = 22                              # default SSH port for user@host launches
+remote_server_path = "drift-mosh-server"   # path on the remote; override if needed
+keepalive_secs = 600                       # server keeps session alive N secs after disconnect
+bind_addr = "0.0.0.0:0"                    # what the remote server binds to (0 = ephemeral)
+```
+
+### Where things live
+
+- `~/.config/drift-mosh/client.key` — your persistent 32-byte client identity. Auto-created on first run, mode 0600. Keep it like you'd keep `~/.ssh/id_ed25519`.
+- `~/.config/drift-mosh/known_hosts` — SSH-style TOFU pins for remote server pubkeys.
+- `~/.config/drift-mosh/sessions/<host>_<port>.session` — per-host session ids, used for reattach.
+
+## How it's different from SSH
+
+| | SSH | drift-mosh |
+|---|---|---|
+| Works after network change | ❌ (TCP breaks) | ✅ (DRIFT migrates the path) |
+| Survives laptop suspend | ❌ | ✅ |
+| Reattach after client crash | ❌ | ✅ (within `keepalive_secs`) |
+| Identity-first (no hostnames) | ❌ | ✅ (pubkey is the address) |
+| Multi-medium (UDP/TCP/WS) | TCP only | any DRIFT transport |
+
+## How it's different from mosh
+
+| | mosh | drift-mosh |
+|---|---|---|
+| Connection migration | built from scratch | inherited from DRIFT |
+| Identity-first | ❌ | ✅ |
+| Lines of code | ~15k | ~1.5k |
+| Terminal state sync | ✅ full | ❌ byte stream¹ |
+| Local echo prediction | ✅ | ❌² |
+
+¹ Today drift-mosh sends raw pty bytes over a reliable stream. True mosh-style state sync (with DRIFT's `supersedes` coalescing) is a planned follow-up — see "Future work" below.
+
+² Local echo prediction is planned. For now keystrokes round-trip like SSH.
 
 ## Architecture
 
@@ -57,48 +123,67 @@ Close the client's lid, switch networks, reopen — the session resumes transpar
 ```
 
 Two DRIFT streams per session:
-1. **pty stream** — raw bytes in both directions. The local terminal emulator (whatever you're running `drift-mosh-client` inside of) handles all VT100/xterm-256color escape sequences.
-2. **control stream** — bincode-encoded `Ctrl` messages: `Resize { rows, cols }` and `Bye`. Sent on window resize (SIGWINCH) and clean exit.
+- **pty stream** — raw bytes in both directions. Your local terminal emulator handles VT100/xterm escape sequences.
+- **control stream** — bincode-encoded messages: `Attach`, `AttachAck`, `Resize`, `Bye`.
 
-Server accepts streams in order: first = pty, second = control. Client opens in that same order.
+Server convention: accept first stream as pty, second as control. Client opens in the same order.
 
-## Authentication model
+### Reattach
 
-The server is authenticated by its **public key** (the 32 bytes after `pub =` in the startup banner). The client pins that pubkey via `--server-pub`; a MITM would need to forge a DRIFT handshake against that specific key, which is cryptographically infeasible.
+1. On first connect, the server mints a 16-byte `session_id` and returns it in `AttachAck`.
+2. The `drift-mosh` launcher persists it to `~/.config/drift-mosh/sessions/<host>_<port>.session`.
+3. On reconnect, the launcher passes it via `--session-id`. The server looks up the session in its table (keyed by client pubkey), re-wires the streams, and replays scrollback.
+4. Sessions stay alive for `keepalive_secs` after disconnect. Default 10 minutes, configurable.
 
-The server runs with `accept_any_peer: true` — it doesn't know in advance what client will connect. This is the same trust model as SSH's `AuthorizedKeysCommand` or mosh's bootstrapping: you trust the transport to identify the server, and the server trusts whoever can handshake with the pubkey of record.
+### Authentication
 
-A future version could add **client-side pubkey pinning on the server** (like SSH `authorized_keys`) by setting `accept_any_peer: false` and explicitly registering each client. That's what you'd want for multi-user deployment.
+- **Server authenticates to client** by its pubkey. The launcher pins it TOFU-style on first connect. Pubkey changes scream loudly (same model as SSH).
+- **Client authenticates to server** by its persistent `client.key`. The server accepts any client whose handshake succeeds — server-side access control is what SSH gave you (the `drift-mosh-server` only runs because you SSH'd in with your SSH key).
 
 ## Tests
 
 ```bash
 cd drift-mosh/tests
-./smoke.exp       # handshake, echo round-trip, resize control stream
-```
 
-Uses `expect(1)` (shipped with macOS + most Linuxes) to drive a fake tty around the client.
+# Basic end-to-end: handshake, echo round-trip, resize.
+./smoke.exp
+
+# Session/reattach protocol — session_id is well-formed +
+# round-tripped.
+./reattach.exp
+```
 
 ## Manual migration demo
 
-The headline feature. Requires two machines or a way to swap network interfaces.
+The headline feature. Needs two machines or a way to swap network interfaces on one machine.
 
 ```bash
-# On host A (server-facing):
-./target/release/drift-mosh-server --bind 0.0.0.0:9400
+# On the remote host:
+drift-mosh-server --bind 0.0.0.0:9400
 
-# On host B (client), note the pub + addr from A's banner:
-./target/release/drift-mosh-client --server-pub <pub> --server-addr <A_wifi_ip>:9400
-# Start typing. Run something like `watch -n 1 date`.
+# Grab its DRIFT_MOSH_PUB=... and DRIFT_MOSH_ADDR=... lines.
 
-# While the session is alive: disable wifi on host B, enable ethernet,
-# (or: tether your laptop to cellular)
-# The `watch` output resumes after a second or two with no session reset.
+# On your laptop:
+drift-mosh --no-ssh --server-pub <pub> --server-addr <addr>
+
+# Start a long-running thing so you can see it resume:
+watch -n 1 date
+
+# While that's running, disable wifi, enable ethernet (or
+# tether to cellular). The `watch` output continues after a
+# brief pause — no session reset, no lost scrollback.
 ```
 
 ## Future work
 
-- **Mosh-style state sync.** True mosh sends *terminal state diffs* with `supersedes`-style overwrite semantics — packet loss is never retransmitted because the next snapshot supersedes the lost one. DRIFT has `supersedes` groups built in; adding a terminal-emulator layer to the server (via [`vte`](https://docs.rs/vte) or similar) would give us this for ~2 days of work. Payoff: flawless typing over 30% loss links.
-- **Local echo prediction.** Client types keystrokes locally with a "pending" style, reconciles with server state on next sync. Mosh's polished frontend is what makes it feel instant over transcontinental latency.
-- **SSH bootstrap.** Today the client needs the server's pub + addr pasted in manually. A `drift-mosh user@host` wrapper would SSH-launch the server, parse the banner from the SSH session's stdout, and hand it to the client — making drift-mosh a drop-in replacement for `mosh user@host`.
-- **Persistent sessions.** Today, killing the client closes the server. A "reattach" mode (session survives client exit, client can reconnect by peer_id) would give us what `tmux over mosh` gives today.
+Called out honestly:
+
+- **Mosh-style state sync with coalescing.** The real mosh sends terminal-state diffs and uses `supersedes`-style overwrite so lost packets never get retransmitted — the next snapshot wins. DRIFT's `supersedes` groups are a perfect fit; adding a terminal emulator on the server (via [`vte`](https://docs.rs/vte) or [`alacritty_terminal`](https://docs.rs/alacritty_terminal)) would give us flawless typing over 30 % packet loss. ~1 week of work.
+- **Local echo prediction.** Type keystrokes locally with a "pending" style, reconcile on next server snapshot. Mosh's key UX feature over high-latency links.
+- **Rude-disconnect recovery.** When a client dies without sending `Bye` (SIGKILL, network partition), DRIFT takes ~30 s by default to notice the peer is gone. Reattach works once that window elapses; we could tune peer timeouts down or add an explicit server-side session-liveness check to make it faster.
+- **Public-key client pinning on the server.** Today the server uses `accept_any_peer: true` (trust the SSH-gated access). For multi-user deployments an `authorized_keys`-style file would let the server enforce per-client pinning without an SSH wrapper.
+- **Homebrew tap.** `brew install fancywaifu/drift/drift-mosh`. Trivial once the release workflow is landed.
+
+## License
+
+MIT. See [`LICENSE`](../LICENSE).

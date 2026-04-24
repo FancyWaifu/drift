@@ -1,0 +1,102 @@
+name: Release drift-mosh
+
+# Fires on tags like `drift-mosh-v0.1.0`. Builds the three
+# drift-mosh binaries (drift-mosh, drift-mosh-client,
+# drift-mosh-server) for macOS + Linux, both amd64 and arm64,
+# packages them into tarballs, and attaches them to a GitHub
+# release.
+
+on:
+  push:
+    tags: ['drift-mosh-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. drift-mosh-v0.1.0)'
+        required: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # cross-compilation helper for Linux aarch64 → reuses
+      # the GitHub-hosted amd64 runner with qemu + a cross
+      # toolchain to avoid a self-hosted arm64 runner.
+      - name: Install cross (aarch64-linux only)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build drift-mosh binaries
+        shell: bash
+        run: |
+          BINS="drift-mosh drift-mosh-client drift-mosh-server"
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            for b in $BINS; do
+              cross build -p drift-mosh --release --target ${{ matrix.target }} --bin $b
+            done
+          else
+            for b in $BINS; do
+              cargo build -p drift-mosh --release --target ${{ matrix.target }} --bin $b
+            done
+          fi
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          STAGE=drift-mosh-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p "$STAGE"
+          for b in drift-mosh drift-mosh-client drift-mosh-server; do
+            cp target/${{ matrix.target }}/release/$b "$STAGE/"
+          done
+          cp drift-mosh/README.md "$STAGE/"
+          cp LICENSE* "$STAGE/" 2>/dev/null || true
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "STAGE=$STAGE" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.tar.gz
+
+  release:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/drift-mosh-v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.tar.gz
+          generate_release_notes: true
+          name: drift-mosh ${{ github.ref_name }}
+          body: |
+            Pre-built drift-mosh binaries for macOS + Linux.
+            See each tarball's `README.md` for install instructions.
