@@ -305,35 +305,63 @@ async fn session_worker(
     let (detach_tx, mut detach_rx) = mpsc::unbounded_channel::<&'static str>();
 
     // A: pty → client
+    //
+    // Coalescing: the pty reader thread emits a chunk per
+    // `read()` syscall, which under interactive load means many
+    // small Vecs (a prompt redraw can fire 5-15 in a few ms).
+    // The MVP sent each one as its own DRIFT stream message,
+    // adding per-message AEAD seal + wire framing overhead and
+    // forcing the client to redraw N times for what is logically
+    // one paint. Now: after the first chunk arrives, drain
+    // anything else that's already queued via try_recv and send
+    // them as a single concatenated message. Pure win — cuts
+    // bytes-on-wire (one frame instead of N) without changing
+    // semantics (the stream is reliable and ordered either way).
     let pty_rx = session.pty_rx.clone();
     let scrollback_a = session.scrollback.clone();
     let pty_stream_a = pty_stream.clone();
     let detach_a = detach_tx.clone();
     let attached_a = session.attached.clone();
     let task_a = tokio::spawn(async move {
+        let mut batch: Vec<u8> = Vec::with_capacity(PTY_CHUNK_SIZE * 4);
         loop {
-            let chunk_opt = {
+            // Step 1: block for the first chunk.
+            let first = {
                 let mut rx = pty_rx.lock().await;
                 rx.recv().await
             };
-            let chunk = match chunk_opt {
+            let first = match first {
                 Some(c) => c,
                 None => {
                     let _ = detach_a.send("pty_eof");
                     break;
                 }
             };
-            // Always scrollback-buffer, even when attached,
-            // so reattaches after transient disconnects have
-            // fresh context.
+            batch.clear();
+            batch.extend_from_slice(&first);
+            // Step 2: opportunistically drain anything else that
+            // arrived while we were waking up. Hard cap so a
+            // runaway shell can't make us hold the lock forever
+            // before yielding to the scheduler.
+            {
+                let mut rx = pty_rx.lock().await;
+                while let Ok(more) = rx.try_recv() {
+                    batch.extend_from_slice(&more);
+                    if batch.len() >= PTY_CHUNK_SIZE * 16 {
+                        break;
+                    }
+                }
+            }
+            // Always scrollback-buffer, even when detached, so a
+            // reattach gets the bytes that arrived while away.
             {
                 let mut sb = scrollback_a.lock().await;
-                sb.push(&chunk);
+                sb.push(&batch);
             }
             if !attached_a.load(std::sync::atomic::Ordering::Acquire) {
                 continue;
             }
-            if let Err(e) = pty_stream_a.send(&chunk).await {
+            if let Err(e) = pty_stream_a.send(&batch).await {
                 tracing::debug!(error = ?e, "pty→client send failed; detaching");
                 let _ = detach_a.send("send_fail");
                 break;

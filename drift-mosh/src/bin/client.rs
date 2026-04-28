@@ -222,11 +222,40 @@ async fn run() -> Result<()> {
     });
 
     // B. pty_stream → stdout (shell output)
+    //
+    // Coalesce: when the server emits a flurry of small chunks
+    // (very common during prompt redraws / escape sequences),
+    // the old code did one write+flush per chunk — many syscalls
+    // and a perceptible stutter on each redraw. Instead, after
+    // the first chunk arrives, opportunistically drain anything
+    // already queued, concatenate, write once, flush once. This
+    // changes nothing semantically (DRIFT already delivers in
+    // order on a stream) but cuts the syscall count to roughly
+    // one per server burst rather than one per chunk.
     let pty_b = pty_stream.clone();
     let task_b = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        while let Some(chunk) = pty_b.recv().await {
-            if stdout.write_all(&chunk).await.is_err() {
+        let mut batch: Vec<u8> = Vec::with_capacity(PTY_CHUNK_SIZE * 4);
+        loop {
+            let first = match pty_b.recv().await {
+                Some(c) => c,
+                None => break,
+            };
+            batch.clear();
+            batch.extend_from_slice(&first);
+            // Soak up everything else that's already ready
+            // without ever blocking. The Stream::try_recv path
+            // returns immediately when the queue is empty, so we
+            // exit the inner loop and write what we have.
+            while let Some(more) = pty_b.try_recv().await {
+                batch.extend_from_slice(&more);
+                if batch.len() >= PTY_CHUNK_SIZE * 16 {
+                    // Hard cap so a runaway server can't make us
+                    // hold off rendering forever during a flood.
+                    break;
+                }
+            }
+            if stdout.write_all(&batch).await.is_err() {
                 break;
             }
             let _ = stdout.flush().await;

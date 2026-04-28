@@ -1408,6 +1408,17 @@ impl Stream {
         self.recv_rx.lock().await.recv().await
     }
 
+    /// Non-blocking peek. Returns `Some(bytes)` if a chunk is
+    /// already queued for delivery, `None` otherwise (whether
+    /// the queue is empty or the stream is closed — the
+    /// distinction is observable on the next blocking `recv`).
+    /// Useful for coalescing flushes/sends: drain everything
+    /// currently ready before doing one expensive operation
+    /// rather than one per chunk.
+    pub async fn try_recv(&self) -> Option<Vec<u8>> {
+        self.recv_rx.lock().await.try_recv().ok()
+    }
+
     pub async fn close(&self) -> Result<(), StreamError> {
         self.manager
             .close_stream(self.peer_id, self.stream_id)
