@@ -704,6 +704,8 @@ impl StreamManager {
         let (accept_tx, accept_rx) = mpsc::unbounded_channel();
         let (datagram_tx, datagram_rx) = mpsc::unbounded_channel();
 
+        let session_reset_rx = transport.take_session_reset_listener();
+
         let manager = Arc::new(Self {
             transport,
             local_peer_id,
@@ -725,7 +727,48 @@ impl StreamManager {
         let retry_mgr = manager.clone();
         tokio::spawn(async move { retry_mgr.run_retransmit_loop().await });
 
+        // Listen for transport-level session resets (a peer's
+        // authenticated session was regenerated — typically a
+        // client restarted and reconnected from a new source
+        // IP). Drop every stream-layer entry for that peer so
+        // the new session's first OPEN frame creates fresh
+        // state instead of getting silently dropped as a
+        // duplicate.
+        let reset_mgr = manager.clone();
+        tokio::spawn(async move { reset_mgr.run_session_reset_loop(session_reset_rx).await });
+
         manager
+    }
+
+    async fn run_session_reset_loop(
+        self: Arc<Self>,
+        mut rx: mpsc::UnboundedReceiver<PeerId>,
+    ) {
+        while let Some(peer) = rx.recv().await {
+            self.wipe_peer_streams(&peer).await;
+        }
+    }
+
+    /// Drop every per-peer stream-layer entry for `peer`.
+    /// Called when the underlying DRIFT session for that peer
+    /// regenerates — old streams reference invalidated session
+    /// keys and old sequence-number windows, so they can never
+    /// receive again. Wiping clears the way for the new
+    /// session's OPEN frames to land cleanly.
+    async fn wipe_peer_streams(&self, peer: &PeerId) {
+        let mut state = self.state.lock().await;
+        // Drop StreamState entries (the deliver_tx in each goes
+        // away here; the holding application's `recv()` will
+        // observe `None` on the next call).
+        state.streams.retain(|(p, _), _| p != peer);
+        // Forget the next-id counter so a fresh local `open()`
+        // restarts at the parity-correct seed.
+        state.next_stream_id.remove(peer);
+        // Per-peer congestion gauges referenced the prior path's
+        // RTT/cwnd estimates — bin them so the new session
+        // starts from the initial cwnd rather than a value the
+        // old path warmed up to.
+        state.congestion.remove(peer);
     }
 
     /// TEST / FUZZ HELPER: dispatch a stream-layer frame as if it

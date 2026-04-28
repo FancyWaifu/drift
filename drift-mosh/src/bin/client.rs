@@ -49,6 +49,12 @@ struct Cli {
     /// the default work out-of-the-box.
     #[clap(long)]
     identity_file: Option<String>,
+
+    /// Local address to bind. Default `0.0.0.0:0` (any
+    /// interface, ephemeral port). Useful for testing across
+    /// multiple loopback addresses or pinning a specific NIC.
+    #[clap(long, default_value = "0.0.0.0:0")]
+    bind: String,
 }
 
 struct RawModeGuard;
@@ -101,10 +107,14 @@ async fn run() -> Result<()> {
             .context("loading or creating persistent client identity")?,
     };
 
+    let bind_addr: SocketAddr = cli
+        .bind
+        .parse()
+        .with_context(|| format!("--bind {:?} is not a valid ip:port", cli.bind))?;
     let transport = Arc::new(
-        Transport::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap(), identity)
+        Transport::bind(bind_addr, identity)
             .await
-            .context("failed to bind local UDP socket")?,
+            .with_context(|| format!("failed to bind local UDP socket {}", bind_addr))?,
     );
 
     let server_peer = transport
