@@ -22,6 +22,12 @@ pub mod multipath;
 pub mod streams;
 pub mod transport;
 
+// `onion://` adapter — opt-in via `--features onion`. The whole
+// Tor protocol stack is heavyweight, so we don't compile it
+// into default builds.
+#[cfg(feature = "onion")]
+pub mod wire_onion;
+
 // Convenience re-exports.
 pub use drift_core::{derive_peer_id, Direction, PeerId, SessionKey, KEY_LEN, PEER_ID_LEN};
 pub use drift_core::{DriftError, Result};

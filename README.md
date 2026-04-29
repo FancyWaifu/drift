@@ -18,7 +18,7 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry. Peer self-migration at equal cost.
 
-**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, Tor, or anything else.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
 
 **Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
 
@@ -59,6 +59,8 @@ drift/           native tokio-based stack built on drift-core
                        WebRTC / WebTransport / Memory adapters, inventory-based
                        scheme registry (Transport::bind_url / connect_url /
                        add_listener)
+    wire_onion.rs    `onion://` Tor adapter via arti — hidden-service hosting
+                       + dialing (gated behind `--features onion`)
     streams.rs       Reliable streams, NewReno + BBR congestion control
     multipath.rs     RTT-weighted path selection
     transport/
@@ -185,6 +187,7 @@ Match your transport's shape against one of the existing built-ins and copy the 
 | Reliable byte stream (per-peer) | `TcpPacketIO` / `TcpListenerIO` | Length-prefix framing, `tokio::io::split`, `is_multi() = false` |
 | Reliable byte stream over TLS | `TlsPacketIO` / `TlsListenerIO` | Same as TCP + `tokio_rustls::TlsAcceptor` wrapping each accept |
 | Browser-friendly framed stream | `WsPacketIO` / `WsListenerIO` | tungstenite `Message::Binary` per packet |
+| Non-IP-addressed (Tor, BLE, etc.) | `OnionPacketIO` / `OnionListenerIO` in `drift/src/wire_onion.rs` | Synthesize a loopback `SocketAddr` per peer; lazy-bootstrap heavy global state once via `tokio::sync::OnceCell` |
 | Out-of-band signaling | WebRTC / WebTransport adapters | Skip the URL-dispatch path; use `Transport::bind_with_io` directly |
 
 #### Sketch
@@ -317,6 +320,7 @@ drift relay                               # run a mesh relay node
 | UDP | ✅ | ❌ (browser sandbox) | ✅ `udp://` | ✅ |
 | TCP | ✅ | ❌ (browser sandbox) | ✅ `tcp://` | ✅ |
 | TLS over TCP | ✅ | ❌ (browser sandbox) | ✅ `tls://` | ✅ (`multi_transport_4way.sh`) |
+| Tor onion service | ✅ (opt-in via `--features onion`) | ❌ | ✅ `onion://` | Manual smoke test (`onion_self_dial`, ~3-5 min, requires internet) |
 | WebSocket | ✅ | ✅ | ✅ `ws://` | ✅ WASM↔native + mesh-through-bridge to any medium |
 | WebRTC data channel | ✅ | ✅ | ❌ (signaling out-of-band) | Native↔native ✅ (`webrtc_adapter` test); browser↔native needs app-supplied SDP signaling |
 | WebTransport | ✅ | ✅ | ❌ (cert handoff out-of-band) | Native↔native ✅ (`webtransport_adapter` test); browser↔native ships and is cert-hash-pinnable |

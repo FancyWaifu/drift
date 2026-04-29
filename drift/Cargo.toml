@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "Deadline-aware, identity-based UDP transport with semantic coalescing"
 
+[features]
+default = []
+# `onion://` adapter — DRIFT over Tor via arti. Pulls in the
+# whole Tor protocol stack (~150 transitive crates), which is
+# why it's opt-in: build with `--features onion` to enable.
+onion = ["dep:arti-client", "dep:tor-rtcompat", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-keymgr", "dep:tor-error", "dep:fs-mistrust", "dep:safelog"]
+
 [dependencies]
 drift-core = { path = "../drift-core" }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "io-util", "signal"] }
@@ -51,6 +58,23 @@ hex = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rcgen = "0.13"
+# DRIFT-over-Tor (`onion://...`) — see `[features] onion`. arti
+# is the Tor Project's official Rust Tor implementation; it
+# bootstraps a Tor circuit in-process (no `tor` daemon, no
+# `torrc`). Client + service support both gated behind
+# `experimental-api` because arti's onion-service hosting API
+# is still evolving upstream.
+arti-client = { version = "0.41", optional = true, default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "experimental-api"] }
+tor-rtcompat = { version = "0.41", optional = true, default-features = false, features = ["tokio", "rustls"] }
+tor-hsservice = { version = "0.41", optional = true }
+tor-cell = { version = "0.41", optional = true }
+tor-keymgr = { version = "0.41", optional = true }
+tor-error = { version = "0.41", optional = true }
+fs-mistrust = { version = "0.10", optional = true }
+# arti's `HsId` only exposes its Display impl via `safelog`'s
+# redaction trait, so we depend on the trait directly to
+# format `<base32>.onion` strings.
+safelog = { version = "0.8", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
