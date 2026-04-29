@@ -21,6 +21,7 @@ pub mod io;
 pub mod multipath;
 pub mod streams;
 pub mod transport;
+pub mod wire_http;
 
 // `onion://` adapter — opt-in via `--features onion`. The whole
 // Tor protocol stack is heavyweight, so we don't compile it
