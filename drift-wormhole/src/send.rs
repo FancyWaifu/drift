@@ -109,11 +109,15 @@ pub async fn run(args: SendArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("stream manager closed before recipient connected"))?;
     eprintln!("[connected to peer {}]", hex_short(&stream.peer()));
 
-    // Send header.
+    // Send header. Include our self-advertised petname so
+    // the recipient can save us under that name in their
+    // contacts file.
+    let our_name = drift::contacts::self_name::load().ok().flatten();
     let header = Header {
         name: name.clone(),
         size,
         sha256,
+        sender_name: our_name,
     };
     let header_bytes = bincode::serialize(&header).context("encoding header")?;
     if header_bytes.len() > MAX_HEADER_BYTES {
@@ -157,9 +161,24 @@ pub async fn run(args: SendArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("receiver closed stream before sending ack"))?;
     let ack: Ack = bincode::deserialize(&ack_bytes).context("decoding ack")?;
     match ack {
-        Ack::Ok => {
+        Ack::Ok { recipient_name } => {
             eprintln!();
             eprintln!("done — sent {} ({})", name, humansize::format_size(size, humansize::BINARY));
+            // Record the recipient in our local contacts file
+            // (we already have their pubkey from the DRIFT
+            // handshake). Best-effort.
+            let recipient_pid = stream.peer();
+            if let Some(recipient_pub) = transport.peer_public(&recipient_pid).await {
+                if let Ok(mut book) = drift::contacts::Contacts::load_default() {
+                    let placeholder = "0.0.0.0:0".parse().unwrap();
+                    if book
+                        .record(recipient_pub, placeholder, recipient_name.as_deref())
+                        .is_ok()
+                    {
+                        let _ = book.save();
+                    }
+                }
+            }
         }
         Ack::Reject { reason } => {
             eprintln!();

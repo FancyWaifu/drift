@@ -810,6 +810,17 @@ impl Transport {
         self.inner.identity.public_bytes()
     }
 
+    /// Look up the X25519 pubkey for a known peer by its
+    /// 8-byte peer_id. Returns `None` if no peer with that
+    /// id is registered. Useful for application-level code
+    /// (drift-mosh, drift-http, …) that knows the peer_id
+    /// from a stream's `peer()` accessor and wants to record
+    /// the full pubkey in a contacts file.
+    pub async fn peer_public(&self, peer_id: &PeerId) -> Option<[u8; STATIC_KEY_LEN]> {
+        let peers = self.inner.peers.lock_for(peer_id).await;
+        peers.get(peer_id).map(|p| p.peer_static_pub)
+    }
+
     /// Returns true if the kernel actually applied the ECN
     /// outbound mark (`ECT(0)`) to this transport's socket.
     /// Configured via `TransportConfig::enable_ecn`. On

@@ -34,12 +34,26 @@ pub struct Header {
     /// SHA-256 of the file content. Recipient verifies after
     /// reading `size` bytes; mismatch → reject.
     pub sha256: [u8; 32],
+    /// Sender's self-advertised petname. Recipient records
+    /// this in their local contacts file; never trusted as
+    /// identity (DRIFT pubkey is the truth). `None` if the
+    /// sender hasn't configured a self-name.
+    #[serde(default)]
+    pub sender_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Ack {
-    Ok,
-    Reject { reason: String },
+    Ok {
+        /// Recipient's self-advertised petname. Sender records
+        /// this in their contacts file so they can refer to
+        /// the recipient by name on future transfers.
+        #[serde(default)]
+        recipient_name: Option<String>,
+    },
+    Reject {
+        reason: String,
+    },
 }
 
 /// Max framed-message size — bincode messages are tiny in

@@ -121,14 +121,23 @@ struct ServeArgs {
     /// with `--root`.
     #[clap(long, conflicts_with = "root")]
     proxy: Option<String>,
+
+    /// Self-advertised name. Printed in the startup banner so
+    /// connecting clients (or admin tooling) can record this
+    /// server under that petname in their local contacts file.
+    /// Defaults to the shared `~/.config/drift/self-name`.
+    #[clap(long)]
+    name: Option<String>,
 }
 
 #[derive(Args)]
 struct ConnectArgs {
-    /// Server peer. Forms accepted:
-    ///   PUBHEX@host:port          (UDP, default)
-    ///   PUBHEX@udp://host:port
-    ///   PUBHEX@tcp://host:port
+    /// Server peer. Either:
+    ///   * a petname registered in `~/.config/drift/contacts.toml`
+    ///     (e.g. `bob-server`) — pubkey + address from that
+    ///     contact, or
+    ///   * a literal `PUBHEX@host:port` (or with scheme
+    ///     prefix `PUBHEX@tcp://host:port`, etc.)
     /// Pubkey is 64 hex chars (32 bytes).
     #[clap(long)]
     peer: String,
@@ -249,6 +258,16 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     } else if let Some(up) = &args.proxy {
         println!("DRIFT_HTTP_MODE=proxy upstream={}", up);
     }
+    // Self-advertised petname: explicit --name wins, else the
+    // shared `$CONFIG_DIR/drift/self-name`. Connecting clients
+    // and admin tooling can record us under this name.
+    let self_name = args
+        .name
+        .clone()
+        .or_else(|| drift::contacts::self_name::load().ok().flatten());
+    if let Some(n) = &self_name {
+        println!("DRIFT_HTTP_NAME={}", n);
+    }
     println!("DRIFT_HTTP_READY");
     use std::io::Write;
     std::io::stdout().flush().ok();
@@ -350,6 +369,25 @@ async fn run_connect(args: ConnectArgs) -> Result<()> {
         .add_peer(server_pub, server_addr, Direction::Initiator)
         .await
         .context("registering remote peer")?;
+
+    // Auto-record this server in our local contacts file so
+    // future connects can use a petname instead of pasting
+    // the literal pubkey. drift-http is L4 byte-tunnel so we
+    // can't see the server's advertised name from the wire —
+    // contact gets a `peer-<pubprefix>` placeholder, user
+    // renames with `drift contacts rename`. Best-effort.
+    if let Ok(mut book) = drift::contacts::Contacts::load_default() {
+        if book.find_by_pubkey(&server_pub).is_none() {
+            if book.record(server_pub, server_addr, None).is_ok() {
+                let _ = book.save();
+            }
+        } else {
+            // Existing contact — refresh last_seen + addr only.
+            let _ = book.record(server_pub, server_addr, None);
+            let _ = book.save();
+        }
+    }
+
     let mgr = StreamManager::bind(transport.clone()).await;
 
     let listener = TcpListener::bind(listen)

@@ -15,25 +15,47 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 pub async fn run(args: RecvArgs) -> Result<()> {
-    // Parse PUBHEX@<addr-or-url>.
-    let (pub_str, rest) = args
-        .peer
-        .split_once('@')
-        .ok_or_else(|| anyhow!("--peer expects PUBHEX@HOST:PORT (or PUBHEX@scheme://HOST:PORT)"))?;
-    let bytes = hex::decode(pub_str.trim())
-        .with_context(|| format!("pubkey {:?} is not valid hex", pub_str))?;
-    if bytes.len() != 32 {
-        return Err(anyhow!("pubkey must be 32 bytes (64 hex chars); got {}", bytes.len()));
-    }
-    let mut sender_pub = [0u8; 32];
-    sender_pub.copy_from_slice(&bytes);
-
-    // No scheme → default udp://. Hand the resulting URL to
-    // Transport::connect_url which validates it.
-    let url = if rest.contains("://") {
-        rest.to_string()
+    // The peer arg can be either:
+    //   1. A petname registered in the local contacts file
+    //      (e.g. `bob-laptop`) — resolves to pubkey + addr.
+    //   2. The legacy `PUBHEX@<addr-or-url>` form — used on
+    //      first contact when there's no contact entry yet.
+    let (sender_pub, url) = if args.peer.contains('@') {
+        let (pub_str, rest) = args.peer.split_once('@').unwrap();
+        let bytes = hex::decode(pub_str.trim())
+            .with_context(|| format!("pubkey {:?} is not valid hex", pub_str))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!(
+                "pubkey must be 32 bytes (64 hex chars); got {}",
+                bytes.len()
+            ));
+        }
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(&bytes);
+        let url = if rest.contains("://") {
+            rest.to_string()
+        } else {
+            format!("udp://{}", rest)
+        };
+        (pk, url)
     } else {
-        format!("udp://{}", rest)
+        // No `@` → treat as petname.
+        let book = drift::contacts::Contacts::load_default()
+            .context("loading contacts")?;
+        let contact = book.resolve(&args.peer).ok_or_else(|| {
+            anyhow!(
+                "no contact named {:?} (and the value isn't a PUBHEX@addr literal). \
+                 Run `drift contacts list` to see saved contacts.",
+                args.peer
+            )
+        })?;
+        let pk = drift::contacts::parse_pubkey_hex(&contact.pubkey)?;
+        let url = if contact.address.contains("://") {
+            contact.address.clone()
+        } else {
+            format!("udp://{}", contact.address)
+        };
+        (pk, url)
     };
 
     let identity = crate::load_identity(args.identity_file)?;
@@ -143,7 +165,29 @@ pub async fn run(args: RecvArgs) -> Result<()> {
         ));
     }
 
-    send_ack(&stream, Ack::Ok).await?;
+    // Send Ok ack with our self-name so the sender can record
+    // us in their contacts under that petname.
+    let our_name = drift::contacts::self_name::load().ok().flatten();
+    send_ack(
+        &stream,
+        Ack::Ok {
+            recipient_name: our_name,
+        },
+    )
+    .await?;
+
+    // Auto-record the sender in our contacts file under their
+    // advertised name. Best-effort.
+    if let Ok(mut book) = drift::contacts::Contacts::load_default() {
+        let placeholder = "0.0.0.0:0".parse().unwrap();
+        if book
+            .record(sender_pub, placeholder, header.sender_name.as_deref())
+            .is_ok()
+        {
+            let _ = book.save();
+        }
+    }
+
     eprintln!();
     eprintln!("done — saved to {}", out_path.display());
     Ok(())

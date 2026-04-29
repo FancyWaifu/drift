@@ -31,9 +31,16 @@ use tokio::io::AsyncWriteExt;
 #[derive(Parser)]
 #[command(name = "drift-mosh-client", about = "Local side of drift-mosh")]
 struct Cli {
+    /// Server pubkey (hex). Optional if `--server-addr` is a
+    /// petname registered in the local contacts file — the
+    /// launcher resolves the name to pubkey + addr together.
     #[clap(long)]
-    server_pub: String,
+    server_pub: Option<String>,
 
+    /// Either a petname registered in `~/.config/drift/contacts.toml`
+    /// (e.g. `bob-laptop`) or a `host:port` / scheme-prefixed
+    /// address. Petnames take priority: if a contact matches,
+    /// its pubkey + address are used.
     #[clap(long)]
     server_addr: String,
 
@@ -90,9 +97,17 @@ async fn main() -> Result<()> {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-
-    let server_pub = parse_server_pub(&cli.server_pub)?;
     let session_id = parse_session_id(cli.session_id.as_deref())?;
+
+    // Resolve `--server-addr`: it can be either a petname
+    // saved in `$CONFIG_DIR/drift/contacts.toml` (e.g.
+    // `bob-laptop`) or a literal `host:port` / scheme-
+    // prefixed URL. Petnames take priority — if the user
+    // typed `bob-laptop` and a contact exists, use that
+    // contact's pubkey + addr regardless of whether
+    // `--server-pub` was passed.
+    let (server_pub, server_addr_with_scheme) =
+        resolve_target(&cli.server_addr, cli.server_pub.as_deref())?;
 
     // Identity: either explicit --identity-file, or the
     // persistent default at $CONFIG_DIR/drift-mosh/client.key.
@@ -102,18 +117,8 @@ async fn run() -> Result<()> {
             .context("loading or creating persistent client identity")?,
     };
 
-    // --server-addr accepts either bare `host:port` (UDP, back-
-    // compat) or a scheme-prefixed form (`udp://`, `tcp://`,
-    // …). Transport-specific dial logic lives in
-    // `drift::Transport::connect_url`. `--bind` is now an
-    // unused legacy flag; left in place so old scripts don't
-    // error out on its presence.
+    // `--bind` is an unused legacy flag retained for old scripts.
     let _ = &cli.bind;
-    let server_addr_with_scheme = if cli.server_addr.contains("://") {
-        cli.server_addr.clone()
-    } else {
-        format!("udp://{}", cli.server_addr)
-    };
     let (transport, server_addr) =
         Transport::connect_url(&server_addr_with_scheme, identity, TransportConfig::default())
             .await
@@ -144,9 +149,16 @@ async fn run() -> Result<()> {
             .context("opening control stream")?,
     );
 
-    // Attach handshake. The server replies with our session_id
-    // and any scrollback to replay.
-    let attach = Ctrl::Attach { session_id };
+    // Attach handshake. We include our self-name (loaded from
+    // the shared `~/.config/drift/self-name`) so the server
+    // can record us in its contacts file under that petname.
+    // Hearsay only — the server still authenticates us by
+    // pubkey via DRIFT.
+    let our_name = drift::contacts::self_name::load().ok().flatten();
+    let attach = Ctrl::Attach {
+        session_id,
+        name: our_name,
+    };
     ctrl_stream.send(&bincode::serialize(&attach)?).await?;
 
     let ack_bytes = tokio::time::timeout(std::time::Duration::from_secs(5), ctrl_stream.recv())
@@ -154,14 +166,28 @@ async fn run() -> Result<()> {
         .map_err(|_| anyhow!("no AttachAck from server within 5 s"))?
         .ok_or_else(|| anyhow!("server closed control stream before AttachAck"))?;
     let ack: Ctrl = bincode::deserialize(&ack_bytes).context("decoding AttachAck")?;
-    let (got_session_id, reattach_ok, scrollback) = match ack {
+    let (got_session_id, reattach_ok, scrollback, server_name) = match ack {
         Ctrl::AttachAck {
             session_id,
             reattach_ok,
             scrollback,
-        } => (session_id, reattach_ok, scrollback),
+            name,
+        } => (session_id, reattach_ok, scrollback, name),
         other => return Err(anyhow!("unexpected first reply from server: {:?}", other)),
     };
+
+    // Auto-record the server in our local contacts under the
+    // petname it advertised (or `peer-<pubkey-prefix>` if it
+    // didn't advertise one). Best-effort: contacts I/O failure
+    // never breaks the session.
+    if let Ok(mut book) = drift::contacts::Contacts::load_default() {
+        if book
+            .record(server_pub, server_addr, server_name.as_deref())
+            .is_ok()
+        {
+            let _ = book.save();
+        }
+    }
 
     // Machine-parseable line on stdout so the launcher can
     // persist the session id. Written BEFORE raw mode so it
@@ -312,6 +338,49 @@ fn parse_server_pub(hex_str: &str) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+/// Resolve `--server-addr` into (pubkey, connect-URL).
+///
+/// Priority:
+///   1. If `--server-addr` matches a contact in
+///      `~/.config/drift/contacts.toml`, use that contact's
+///      pubkey + saved address. `--server-pub` is ignored.
+///   2. Otherwise treat `--server-addr` as a literal address
+///      (bare `host:port` or scheme-prefixed) and require
+///      `--server-pub` for the pubkey.
+fn resolve_target(server_addr_arg: &str, server_pub_arg: Option<&str>) -> Result<([u8; 32], String)> {
+    if let Ok(book) = drift::contacts::Contacts::load_default() {
+        if let Some(contact) = book.resolve(server_addr_arg) {
+            let pub_bytes = drift::contacts::parse_pubkey_hex(&contact.pubkey)?;
+            // Saved address — fall back to udp:// if it lacks
+            // a scheme (older entries from before multi-
+            // transport support).
+            let url = if contact.address.contains("://") {
+                contact.address.clone()
+            } else {
+                format!("udp://{}", contact.address)
+            };
+            return Ok((pub_bytes, url));
+        }
+    }
+    let pub_str = server_pub_arg.ok_or_else(|| {
+        anyhow!(
+            "--server-pub is required when --server-addr is a literal address \
+             (no contact named {:?} found in {})",
+            server_addr_arg,
+            drift::contacts::Contacts::default_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<no config dir>".into())
+        )
+    })?;
+    let pub_bytes = parse_server_pub(pub_str)?;
+    let url = if server_addr_arg.contains("://") {
+        server_addr_arg.to_string()
+    } else {
+        format!("udp://{}", server_addr_arg)
+    };
+    Ok((pub_bytes, url))
 }
 
 fn parse_session_id(opt: Option<&str>) -> Result<[u8; 16]> {
