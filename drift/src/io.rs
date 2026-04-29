@@ -663,3 +663,191 @@ mod tests {
         receiver.await.unwrap();
     }
 }
+
+// ─── Listener / URL dispatch ──────────────────────────────────────
+//
+// Higher-level abstractions on top of `PacketIO`:
+//
+//   * `Listener` — "give me the next inbound connection as a
+//     `PacketIO`." UDP yields its single socket once and is done.
+//     TCP and other connection-oriented adapters yield one
+//     `PacketIO` per accepted client.
+//
+//   * URL dispatch — `make_listener("tcp://0.0.0.0:9100")` and
+//     `make_connector("udp://host:9100")` route to the right
+//     adapter based on scheme. New transports plug in by adding
+//     an arm here, with no changes to application code.
+//
+// These together let `Transport::bind_url` / `Transport::connect_url`
+// be transport-agnostic — applications don't care whether they're
+// running over UDP, TCP, or anything else.
+
+/// Abstraction over "accept the next inbound connection."
+///
+/// Two flavours of listener exist:
+///
+///   * **Single-shot** (`is_multi() == false`): yields a single
+///     `PacketIO` from `accept()` exactly once, then returns
+///     "exhausted" on subsequent calls. Used for connectionless
+///     transports like UDP where one socket serves all peers.
+///
+///   * **Multi-shot** (`is_multi() == true`): yields one
+///     `PacketIO` per accepted client. Used for connection-
+///     oriented transports like TCP and WebSocket.
+///
+/// `Transport::bind_url` uses `is_multi()` to decide whether to
+/// wire up a single primary interface or to spawn an accept loop
+/// that adds interfaces dynamically as clients connect.
+#[async_trait]
+pub trait Listener: Send + Sync + 'static {
+    /// Local address this listener is bound to.
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Whether this listener can yield more than one PacketIO.
+    /// Multi-shot listeners need an accept loop on the consumer
+    /// side; single-shot ones are used directly as the primary.
+    fn is_multi(&self) -> bool;
+
+    /// Yields the next inbound `PacketIO`. Single-shot listeners
+    /// return `Err(NotFound)` after the first call. Multi-shot
+    /// listeners block until the next client connects.
+    async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>>;
+}
+
+/// UDP listener — a single bound socket served as one PacketIO.
+/// Once `accept()` has been called, subsequent calls error out
+/// with `NotFound`. The single socket handles all UDP peers via
+/// the connectionless model; per-peer state is the Transport's
+/// job, not the adapter's.
+pub struct UdpListenerIO {
+    /// Some until first accept, then None.
+    socket: Option<Arc<UdpSocket>>,
+    addr: SocketAddr,
+}
+
+impl UdpListenerIO {
+    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let sock = UdpSocket::bind(addr).await?;
+        let local = sock.local_addr()?;
+        Ok(Self {
+            socket: Some(Arc::new(sock)),
+            addr: local,
+        })
+    }
+}
+
+#[async_trait]
+impl Listener for UdpListenerIO {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.addr)
+    }
+    fn is_multi(&self) -> bool {
+        false
+    }
+    async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
+        match self.socket.take() {
+            Some(s) => Ok(Arc::new(UdpPacketIO::new(s))),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "UDP listener is single-shot and was already consumed",
+            )),
+        }
+    }
+}
+
+/// TCP listener — wraps `tokio::net::TcpListener`. Each
+/// `accept()` returns a fresh `TcpPacketIO` for the next
+/// inbound client. Multi-shot.
+pub struct TcpListenerIO {
+    listener: tokio::net::TcpListener,
+}
+
+impl TcpListenerIO {
+    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Ok(Self { listener })
+    }
+}
+
+#[async_trait]
+impl Listener for TcpListenerIO {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+    fn is_multi(&self) -> bool {
+        true
+    }
+    async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
+        let (stream, _peer) = self.listener.accept().await?;
+        let io = TcpPacketIO::new(stream)?;
+        Ok(Arc::new(io))
+    }
+}
+
+/// Parse a `<scheme>://<host:port>` URL. Bare `host:port` (no
+/// scheme) defaults to `udp` for back-compat. Returns the
+/// scheme as `&str` and the address part as `&str`.
+fn split_url(url: &str) -> io::Result<(&str, &str)> {
+    if let Some(idx) = url.find("://") {
+        Ok((&url[..idx], &url[idx + 3..]))
+    } else {
+        Ok(("udp", url))
+    }
+}
+
+/// Build a `Listener` from a URL. New transports plug in by
+/// adding an arm to this match.
+pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
+    let (scheme, addr_str) = split_url(url)?;
+    let addr: SocketAddr = addr_str.parse().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a valid host:port {:?}: {}", addr_str, e),
+        )
+    })?;
+    match scheme {
+        "udp" => Ok(Box::new(UdpListenerIO::bind(addr).await?)),
+        "tcp" => Ok(Box::new(TcpListenerIO::bind(addr).await?)),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported listener scheme {:?}", other),
+        )),
+    }
+}
+
+/// Client-side URL dispatch. Returns the connected `PacketIO`
+/// plus the remote `SocketAddr` that the application should use
+/// when calling `transport.add_peer(...)`.
+///
+/// * `udp://host:port` — binds an ephemeral local UDP socket
+///   and returns its `UdpPacketIO`. The remote addr is
+///   `host:port`.
+/// * `tcp://host:port` — dials the remote TCP listener, wraps
+///   the connected stream in `TcpPacketIO`. The remote addr
+///   is the dialed peer (mostly informational since TCP is
+///   point-to-point).
+pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+    let (scheme, addr_str) = split_url(url)?;
+    let addr: SocketAddr = addr_str.parse().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a valid host:port {:?}: {}", addr_str, e),
+        )
+    })?;
+    match scheme {
+        "udp" => {
+            let sock = UdpSocket::bind("0.0.0.0:0").await?;
+            let io: Arc<dyn PacketIO> = Arc::new(UdpPacketIO::new(Arc::new(sock)));
+            Ok((io, addr))
+        }
+        "tcp" => {
+            let stream = tokio::net::TcpStream::connect(addr).await?;
+            let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(stream)?);
+            Ok((io, addr))
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported connector scheme {:?}", other),
+        )),
+    }
+}

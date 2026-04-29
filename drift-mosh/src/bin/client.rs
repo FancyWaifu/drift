@@ -20,13 +20,11 @@ use clap::Parser;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use drift::identity::Identity;
 use drift::streams::StreamManager;
-use drift::Direction;
-use drift_mosh::transport_url::{build_client_transport, parse_addr};
+use drift::{Direction, Transport, TransportConfig};
 use drift_mosh::{ClientKey, Ctrl, PTY_CHUNK_SIZE};
 use futures_util::StreamExt;
 use signal_hook::consts::signal::SIGWINCH;
 use signal_hook_tokio::Signals;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
@@ -94,11 +92,6 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     let server_pub = parse_server_pub(&cli.server_pub)?;
-    // --server-addr accepts either a bare host:port (defaults to
-    // UDP) or a scheme-prefixed form (`udp://...` / `tcp://...`).
-    // Picks which wire DRIFT uses to reach the server.
-    let server_spec = parse_addr(&cli.server_addr)
-        .with_context(|| format!("invalid --server-addr {:?}", cli.server_addr))?;
     let session_id = parse_session_id(cli.session_id.as_deref())?;
 
     // Identity: either explicit --identity-file, or the
@@ -109,14 +102,23 @@ async fn run() -> Result<()> {
             .context("loading or creating persistent client identity")?,
     };
 
-    let bind_addr: SocketAddr = cli
-        .bind
-        .parse()
-        .with_context(|| format!("--bind {:?} is not a valid ip:port", cli.bind))?;
+    // --server-addr accepts either bare `host:port` (UDP, back-
+    // compat) or a scheme-prefixed form (`udp://`, `tcp://`,
+    // …). Transport-specific dial logic lives in
+    // `drift::Transport::connect_url`. `--bind` is now an
+    // unused legacy flag; left in place so old scripts don't
+    // error out on its presence.
+    let _ = &cli.bind;
+    let server_addr_with_scheme = if cli.server_addr.contains("://") {
+        cli.server_addr.clone()
+    } else {
+        format!("udp://{}", cli.server_addr)
+    };
     let (transport, server_addr) =
-        build_client_transport(bind_addr, &server_spec, identity)
+        Transport::connect_url(&server_addr_with_scheme, identity, TransportConfig::default())
             .await
-            .context("setting up DRIFT client transport")?;
+            .with_context(|| format!("connecting to {}", server_addr_with_scheme))?;
+    let transport = Arc::new(transport);
 
     let server_peer = transport
         .add_peer(server_pub, server_addr, Direction::Initiator)

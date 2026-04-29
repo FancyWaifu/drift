@@ -24,8 +24,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use drift::identity::Identity;
 use drift::streams::{Stream, StreamManager};
-use drift::TransportConfig;
-use drift_mosh::transport_url::{build_server_transport, parse_addr};
+use drift::{Transport, TransportConfig};
 use drift_mosh::{BannerLine, Config, Ctrl, Scrollback, PTY_CHUNK_SIZE, SCROLLBACK_BYTES};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use rand::RngCore;
@@ -108,14 +107,25 @@ async fn main() -> Result<()> {
         accept_any_peer: true,
         ..TransportConfig::default()
     };
-    // --bind accepts a scheme prefix so the same drift-mosh-server
-    // can run over UDP (default) or TCP (firewalled networks).
-    // Bare `host:port` keeps back-compat with existing scripts and
-    // launcher session files.
-    let bind_spec = parse_addr(&bind_addr).context("invalid --bind")?;
-    let (transport, local_addr) = build_server_transport(&bind_spec, identity, tcfg)
+    // --bind accepts a scheme prefix (`udp://`, `tcp://`, …) so
+    // the same server can run over any transport DRIFT supports.
+    // A bare `host:port` keeps back-compat with old launcher
+    // scripts. All transport-specific setup (UDP socket vs TCP
+    // accept-loop, future WebSocket upgrade, etc.) lives in
+    // `drift::Transport::bind_url` — this binary doesn't know or
+    // care which scheme is which.
+    let (transport, bound_url) = Transport::bind_url(&bind_addr, identity, tcfg)
         .await
         .context("DRIFT transport setup failed")?;
+    let transport = Arc::new(transport);
+    // The bound URL ends in the resolved bind address — strip
+    // the `<scheme>://` prefix to get the bare `host:port`
+    // form the legacy banner uses.
+    let local_addr_str = bound_url
+        .splitn(2, "://")
+        .nth(1)
+        .unwrap_or(&bound_url)
+        .to_string();
 
     // Banner: one key=value per line, parseable by the
     // `drift-mosh` launcher.
@@ -124,15 +134,14 @@ async fn main() -> Result<()> {
     // Bare addr line for back-compat with the existing launcher
     // (and the plain `udp://` scheme assumption baked into older
     // session files).
-    println!("{}{}", BannerLine::Addr.prefix(), local_addr);
+    println!("{}{}", BannerLine::Addr.prefix(), local_addr_str);
     // New scheme-qualified line. Multi-transport launchers can
-    // parse this to know which DRIFT wire to use; the bare ADDR
-    // line above stays for the default-UDP path.
-    println!("DRIFT_MOSH_BIND={}://{}", bind_spec.transport.as_str(), local_addr);
+    // parse this to know which DRIFT wire to use.
+    println!("DRIFT_MOSH_BIND={}", bound_url);
     println!("{}", BannerLine::Ready.prefix());
     use std::io::Write;
     std::io::stdout().flush().ok();
-    tracing::info!(addr = %local_addr, keepalive_secs, "drift-mosh-server ready");
+    tracing::info!(bound = %bound_url, keepalive_secs, "drift-mosh-server ready");
 
     let mgr = StreamManager::bind(transport.clone()).await;
 
