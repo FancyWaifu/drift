@@ -87,7 +87,8 @@ The C ABI is the foundation; specific-language bindings build on top:
 
 The current surface covers the core UDP transport path. Not yet wired through FFI:
 
-- Custom `PacketIO` adapters (TCP, WebSocket, WebRTC, WebTransport, in-memory). These are all first-class in the Rust API; exposing them through C would mean either (a) adding a callback-based adapter that lets C provide a custom `send_to` / `recv_from`, or (b) exposing each built-in adapter's constructor. Open follow-up.
+- **`drift_transport_bind_url("tcp://0.0.0.0:9100")` and `drift_transport_connect_url(...)`.** The Rust side has a registry-based URL dispatcher (`Transport::bind_url` / `connect_url`) that resolves any registered scheme — UDP, TCP, WebSocket, and any future-registered transport — to the right adapter automatically. Wrapping these two functions in the FFI is a few-hour task and would expose every drift-registered transport to C without per-adapter glue. Open follow-up.
+- **Callback-based custom adapters.** A C-side `PacketIO` (callbacks for `send_to` / `recv_from`) so non-Rust code can plug in its own transport. Useful if you have a serial-port stack or a proprietary BLE driver.
 - Stream API (`streams.rs`). The FFI only exposes raw datagram send/recv so far.
 - Mesh routes (`add_route`). Static routes can be added from Rust; no FFI wrapper yet.
 - Resumption tickets (`export_resumption_ticket` / `import_resumption_ticket`).

@@ -41,10 +41,22 @@ Serves static files from a directory. Hyper + tower-http does the actual HTTP wo
 drift-http serve --root /var/www --bind 0.0.0.0:9100
 ```
 
+`--bind` is **repeatable** and accepts a transport scheme. One server can listen on UDP + TCP + WebSocket simultaneously, so clients on different networks reach the same identity over whichever wire works for them:
+
+```bash
+drift-http serve --root /var/www \
+    --bind udp://0.0.0.0:9100 \
+    --bind tcp://0.0.0.0:9100 \
+    --bind ws://0.0.0.0:443
+```
+
 Banner on stdout:
 ```
-DRIFT_HTTP_PUB=<64 hex chars>      # the address — give this to anyone who should connect
-DRIFT_HTTP_ADDR=0.0.0.0:9100       # actual bound UDP socket
+DRIFT_HTTP_PUB=<64 hex chars>             # the address — give this to anyone who should connect
+DRIFT_HTTP_ADDR=0.0.0.0:9100              # bare addr of the first UDP bind (back-compat for old tools)
+DRIFT_HTTP_BIND=udp://0.0.0.0:9100        # one BIND line per bound transport
+DRIFT_HTTP_BIND=tcp://0.0.0.0:9100
+DRIFT_HTTP_BIND=ws://0.0.0.0:443
 DRIFT_HTTP_MODE=serve-files root=/var/www
 DRIFT_HTTP_READY
 ```
@@ -61,13 +73,21 @@ The Jellyfin server keeps doing exactly what it always did. `drift-http` just gi
 
 ### `connect` — local listener that bridges to a remote `drift-http`
 
-The consume side. Browsers, Jellyswarrm, anything else speaking plain HTTP hits a `localhost:NNNN` and the bytes flow over DRIFT to the remote server.
+The consume side. Browsers, Jellyswarrm, anything else speaking plain HTTP hits a `localhost:NNNN` and the bytes flow over DRIFT to the remote server. The peer URL accepts a scheme prefix to pick which DRIFT transport to use:
 
 ```bash
-drift-http connect \
-    --peer <PUB>@<HOST>:9100 \
-    --listen 127.0.0.1:8080
-# now `curl http://127.0.0.1:8080/` reaches the remote server
+# UDP (default; bare host:port also works for back-compat):
+drift-http connect --peer <PUB>@<HOST>:9100         --listen 127.0.0.1:8080
+drift-http connect --peer <PUB>@udp://<HOST>:9100   --listen 127.0.0.1:8080
+
+# TCP — corporate-firewall fallback:
+drift-http connect --peer <PUB>@tcp://<HOST>:9100   --listen 127.0.0.1:8080
+
+# WebSocket — port-443 friendly, gets through HTTP-only proxies:
+drift-http connect --peer <PUB>@ws://<HOST>:443     --listen 127.0.0.1:8080
+
+# Now `curl http://127.0.0.1:8080/` reaches the remote server
+# regardless of which wire was negotiated underneath.
 ```
 
 ### `open <url>` — fire a `drift://` URL
@@ -76,6 +96,13 @@ Parses `drift://<PUB>@<HOST>:<PORT>/path?query`, ensures a background `connect` 
 
 ```bash
 drift-http open drift://abc123...@1.2.3.4:9100/some/page
+```
+
+The URL scheme can also pick a non-default transport via the `drift+<wire>://` form (Git's pattern):
+
+```bash
+drift-http open drift+tcp://abc123...@1.2.3.4:9100/some/page
+drift-http open drift+ws://abc123...@1.2.3.4:443/some/page
 ```
 
 The most useful command is invoked indirectly: when someone clicks a `drift://` link in any app on a machine where the URL handler is installed (next section), it fires this command for them.
@@ -162,16 +189,30 @@ The linchpin is `StreamIo` (`src/io.rs`) — adapts a `drift::streams::Stream` s
 ```bash
 cd drift-http/tests
 
-./serve_static.sh   # 7 cases: index, nested, 404, SHA-fidelity, range
-./serve_proxy.sh    # 64 KB through proxy mode against python -m http.server
-./open_url.sh       # drift:// open: GET /, nested path, bridge-port reuse
+./serve_static.sh           # 7 cases: index, nested, 404, SHA-fidelity, range
+./serve_proxy.sh            # 64 KB through proxy mode against python -m http.server
+./open_url.sh               # drift:// open: GET /, nested path, bridge-port reuse
+./multi_transport.sh        # 1 server bound to UDP + TCP, fetched via both
+./multi_transport_3way.sh   # 1 server bound to UDP + TCP + WS, fetched via all three
 ```
 
 URL parser unit tests:
 
 ```bash
-cargo test -p drift-http url::tests
+cargo test -p drift-http --lib
 ```
+
+## Transport availability
+
+| Wire | Server (`--bind`) | Client (`--peer`, `drift://...`) | Notes |
+|---|:---:|:---:|---|
+| UDP | ✅ | ✅ | Default; lowest latency |
+| TCP | ✅ | ✅ | Corporate-firewall fallback |
+| WebSocket | ✅ | ✅ | Port-443 friendly, HTTP-proxy traversable |
+| WebRTC | ⏳ | ⏳ | Adapter exists in drift, no URL dispatch yet (signaling out-of-band) |
+| WebTransport | ⏳ | ⏳ | Adapter exists in drift, no URL dispatch yet (TLS cert handoff out-of-band) |
+
+When drift core gains a URL-dispatchable adapter (via `inventory::submit!` in any crate), drift-http picks it up automatically — no edits needed here.
 
 ## Future work
 
@@ -180,7 +221,7 @@ Called out honestly:
 - **HTTP/2.** Hyper supports it; we'd just wire `http2::Builder` and let clients negotiate. ~1 day.
 - **Per-pubkey allowlist mode.** Today `serve` is `accept_any_peer: true` (anyone with the pubkey can connect, like a normal website). For private deployments, a flag that flips this and requires an `authorized_keys`-style file would let the server enforce per-client pinning.
 - **Vhost / path routing.** One daemon serving multiple sites or multiple proxies, dispatched by `Host` header or path prefix.
-- **WebSocket integration test.** Works in proxy mode for free (it's L4); a test that opens a WS connection and round-trips a frame would be worth adding for confidence.
+- **WebSocket-upgrade integration test.** Works in proxy mode for free (it's L4); a test that opens a WS connection inside the tunnel and round-trips a frame would be worth adding for confidence beyond the L4 byte tunnel.
 - **Browser extension** that intercepts `drift://` URLs natively, so the address bar literally shows `drift://...` instead of the `localhost:NNNN` mapping. The current setup works in every browser without one, at the cost of address-bar fidelity.
 
 ## License

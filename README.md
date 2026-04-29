@@ -20,6 +20,8 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in TLS, serial, BLE, or anything else.
 
+**Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
+
 **Browser-native** — `drift-wasm` compiles the full DRIFT protocol to WebAssembly. Same `drift-core` code as the native stack; interoperates with native peers through a bridge. Supports all three browser wire transports (WebSocket, WebRTC data channel, WebTransport) behind one `DriftClient` API.
 
 **Observability** — 30+ runtime metrics. Structured NDJSON qlog. XOR-based FEC for lossy links.
@@ -90,40 +92,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Non-UDP Transports
+### URL-shaped transports
+
+The same scheme-prefixed addresses work everywhere — drift-mosh, drift-http, drift-bench, the `drift` CLI, and library callers all use `Transport::bind_url` / `Transport::connect_url`. The URL dispatcher resolves the scheme to a registered adapter at runtime; bare `host:port` (no scheme) defaults to UDP for back-compat.
 
 ```rust
-use drift::io::{TcpPacketIO, WebRTCPacketIO, WebTransportPacketIO, WsPacketIO};
+// Server: bind to whichever transport(s) you want. First call uses
+// bind_url; subsequent listeners attach via add_listener so one
+// server can be reachable on UDP + TCP + WS simultaneously.
+let (transport, primary_url) =
+    Transport::bind_url("udp://0.0.0.0:9100", identity, cfg).await?;
+let transport = Arc::new(transport);
+transport.add_listener("tcp://0.0.0.0:9100").await?;
+transport.add_listener("ws://0.0.0.0:9100").await?;
 
-// TCP (firewall traversal)
-let tcp = tokio::net::TcpStream::connect("10.0.0.5:443").await?;
-let transport = Transport::bind_with_io(Arc::new(TcpPacketIO::new(tcp)?), identity, config).await?;
-
-// WebSocket (browser-to-server, CDN-friendly)
-let (ws, _) = tokio_tungstenite::connect_async("ws://10.0.0.5:8080").await?;
-let transport = Transport::bind_with_io(Arc::new(WsPacketIO::new(ws, addr)), identity, config).await?;
-
-// WebRTC (browser-to-browser after SDP exchange — no server in the data path)
-let dc: Arc<RTCDataChannel> = /* exchange SDP offer/answer, open data channel */;
-let transport = Transport::bind_with_io(Arc::new(WebRTCPacketIO::new(dc, addr)), identity, config).await?;
-
-// WebTransport (QUIC/HTTP3, unreliable datagrams, browser-reachable)
-let conn: wtransport::Connection = /* accept an incoming WebTransport session */;
-let transport = Transport::bind_with_io(Arc::new(WebTransportPacketIO::new(conn, addr)), identity, config).await?;
+// Client: pick whichever wire is reachable in your environment.
+let (transport, peer_addr) =
+    Transport::connect_url("tcp://example.com:9100", identity, cfg).await?;
+transport.add_peer(server_pub, peer_addr, Direction::Initiator).await?;
 ```
+
+Lower-level `Transport::bind_with_io(io, ...)` still exists for cases where the adapter has out-of-band setup (WebRTC's SDP exchange, WebTransport's TLS-cert handoff). It accepts any `Arc<dyn PacketIO>` directly.
 
 ### Multi-Interface Bridging
 
 A single node can bridge across mediums — UDP peers talk to TCP peers talk to WebSocket peers talk to WebRTC peers talk to WebTransport peers through one bridge, zero medium-specific routing code. The bridge sees only ciphertext; DRIFT's end-to-end crypto stays between the real endpoints:
 
 ```rust
-let bridge = Transport::bind("0.0.0.0:9000".parse()?, bridge_id).await?;
-bridge.add_interface("tcp", Arc::new(TcpPacketIO::new(tcp_stream)?));
-bridge.add_interface("websocket", Arc::new(WsPacketIO::new(ws_stream, addr)));
-bridge.add_interface("webrtc", Arc::new(WebRTCPacketIO::new(data_channel, addr)));
-bridge.add_interface("webtransport", Arc::new(WebTransportPacketIO::new(wt_conn, addr)));
+let (bridge, _) = Transport::bind_url("udp://0.0.0.0:9000", bridge_id, cfg).await?;
+let bridge = Arc::new(bridge);
+bridge.add_listener("tcp://0.0.0.0:9001").await?;
+bridge.add_listener("ws://0.0.0.0:9002").await?;
 // Packets route by identity, not by medium.
 ```
+
+### Adding a new transport
+
+Drop a new adapter into any file (drift's source tree, your own crate, a downstream consumer's crate — anywhere). The URL dispatcher finds it via `inventory::iter` at runtime; nothing in drift core needs editing.
+
+```rust
+use drift::io::{Listener, PacketIO, SchemeRegistration};
+
+// 1. Implement the Listener trait for your transport.
+pub struct MyTransportListener { /* ... */ }
+#[async_trait::async_trait]
+impl Listener for MyTransportListener { /* ... */ }
+
+// 2. Register it under a scheme name.
+fn my_listener_factory(addr: SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move { Ok(Box::new(MyTransportListener::bind(addr).await?) as Box<dyn Listener>) })
+}
+fn my_connector_factory(addr: SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
+    Box::pin(async move { /* dial + wrap */ })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "mytransport",
+        listener: my_listener_factory,
+        connector: my_connector_factory,
+    }
+}
+```
+
+That's it. From now on `Transport::bind_url("mytransport://addr")` works, and every drift-shaped tool can route over it.
 
 ## Quick Start (browser / WASM)
 
@@ -177,14 +209,16 @@ drift relay                               # run a mesh relay node
 
 ## Adapter availability matrix
 
-| Transport | Native | Browser (WASM) | End-to-end verified |
-|-----------|:------:|:-------:|-------------------|
-| UDP | ✅ | ❌ (browser sandbox) | ✅ |
-| TCP | ✅ | ❌ (browser sandbox) | ✅ |
-| WebSocket | ✅ | ✅ | ✅ WASM↔native + mesh-through-bridge to any medium |
-| WebRTC data channel | ✅ | ✅ | Native↔native ✅; browser↔native needs app-supplied SDP signaling |
-| WebTransport | ✅ | ✅ | Native↔native ✅; browser↔native ships and is cert-hash-pinnable |
-| In-memory | ✅ | ❌ | ✅ |
+| Transport | Native | Browser (WASM) | URL dispatch (`bind_url`) | End-to-end verified |
+|-----------|:------:|:-------:|:----:|-------------------|
+| UDP | ✅ | ❌ (browser sandbox) | ✅ `udp://` | ✅ |
+| TCP | ✅ | ❌ (browser sandbox) | ✅ `tcp://` | ✅ |
+| WebSocket | ✅ | ✅ | ✅ `ws://` | ✅ WASM↔native + mesh-through-bridge to any medium |
+| WebRTC data channel | ✅ | ✅ | ❌ (signaling out-of-band) | Native↔native ✅ (`webrtc_adapter` test); browser↔native needs app-supplied SDP signaling |
+| WebTransport | ✅ | ✅ | ❌ (cert handoff out-of-band) | Native↔native ✅ (`webtransport_adapter` test); browser↔native ships and is cert-hash-pinnable |
+| In-memory | ✅ | ❌ | n/a (no addr) | ✅ (used internally by tests + bridge placeholders) |
+
+External crates can register their own adapters via `inventory::submit!` from anywhere — drift core has no allowlist of acceptable schemes.
 
 ## Testing
 
