@@ -69,6 +69,23 @@ pub struct Contact {
     #[serde(default)]
     pub advertised_name: Option<String>,
 
+    /// `true` if the petname was auto-assigned from the peer's
+    /// advertised name (and the user hasn't run `drift contacts
+    /// rename` on it). When `true`, future `record()` calls
+    /// will follow renames the peer advertises — so if Bob
+    /// renames himself from `bob-laptop` to `bob-imac`, your
+    /// address book updates automatically. Once the user
+    /// renames manually, this flips to `false` and the petname
+    /// is frozen at the user's choice; the peer's renames go
+    /// into `advertised_name` (display-only) without touching
+    /// `assigned_name`.
+    ///
+    /// Default `false` for backwards compatibility — old
+    /// contact entries written before this field existed are
+    /// treated as user-customized.
+    #[serde(default)]
+    pub auto_named: bool,
+
     /// Unix-epoch seconds at which this contact was first
     /// added.
     pub added_at: u64,
@@ -185,13 +202,36 @@ impl Contacts {
         let pub_hex = hex_encode(&pubkey);
         let addr_str = addr.to_string();
 
-        // Existing pubkey? Refresh metadata, keep petname.
+        // Existing pubkey: refresh metadata.
         if let Some(idx) = self
             .file
             .contacts
             .iter()
             .position(|c| c.pubkey == pub_hex)
         {
+            // Peer renamed themselves? If the contact was
+            // auto-named (user never customized the petname)
+            // AND the new advertised name is available, rename
+            // the petname to follow. If the user has already
+            // chosen a custom petname, never touch it — the
+            // peer's new name only updates the
+            // `advertised_name` display field.
+            let new_name_clean = advertised_name
+                .filter(|s| !s.is_empty())
+                .map(sanitize_name);
+            let auto_rename_to: Option<String> = match (
+                self.file.contacts[idx].auto_named,
+                new_name_clean.as_deref(),
+            ) {
+                (true, Some(new))
+                    if new != self.file.contacts[idx].assigned_name
+                        && !self.has_name_other_than(new, idx) =>
+                {
+                    Some(new.to_string())
+                }
+                _ => None,
+            };
+
             let c = &mut self.file.contacts[idx];
             c.last_seen = now;
             c.address = addr_str;
@@ -200,21 +240,34 @@ impl Contacts {
                     c.advertised_name = Some(n.to_string());
                 }
             }
+            if let Some(new_assigned) = auto_rename_to {
+                tracing::info!(
+                    old = %c.assigned_name,
+                    new = %new_assigned,
+                    "peer advertised a new name; auto-following"
+                );
+                c.assigned_name = new_assigned;
+            }
             return Ok(c.assigned_name.clone());
         }
 
         // New peer: pick a petname.
-        let base = match advertised_name {
-            Some(n) if !n.is_empty() => sanitize_name(n),
-            _ => format!("peer-{}", &pub_hex[..8]),
+        let (base, was_auto) = match advertised_name {
+            Some(n) if !n.is_empty() => (sanitize_name(n), true),
+            _ => (format!("peer-{}", &pub_hex[..8]), true),
         };
         let assigned = self.disambiguate(&base);
+        // Even after auto-disambiguation (e.g. base `laptop`
+        // taken → `laptop-2`), the entry is still considered
+        // auto-named — future renames will follow the peer's
+        // advertisement, with disambiguation applied as needed.
 
         let entry = Contact {
             assigned_name: assigned.clone(),
             pubkey: pub_hex,
             address: addr_str,
             advertised_name: advertised_name.map(|s| s.to_string()),
+            auto_named: was_auto,
             added_at: now,
             last_seen: now,
         };
@@ -222,10 +275,23 @@ impl Contacts {
         Ok(assigned)
     }
 
+    /// True if any contact other than `skip_idx` already uses
+    /// `name` as their petname. Used by auto-rename to avoid
+    /// collisions with other contacts.
+    fn has_name_other_than(&self, name: &str, skip_idx: usize) -> bool {
+        self.file
+            .contacts
+            .iter()
+            .enumerate()
+            .any(|(i, c)| i != skip_idx && c.assigned_name == name)
+    }
+
     /// Manually add a contact with an explicit petname.
     /// Errors if the petname is already taken or if the
     /// pubkey is already pinned to a different petname (to
-    /// preserve the 1:1 invariant).
+    /// preserve the 1:1 invariant). Manually-added contacts
+    /// are NOT auto-named — peer renames won't override the
+    /// user's choice.
     pub fn add_manual(
         &mut self,
         name: &str,
@@ -249,6 +315,7 @@ impl Contacts {
             pubkey: pub_hex,
             address: addr.to_string(),
             advertised_name: None,
+            auto_named: false,
             added_at: now,
             last_seen: now,
         });
@@ -257,7 +324,9 @@ impl Contacts {
 
     /// Rename a contact in this user's address book. Errors
     /// if `old` doesn't exist or `new` is already taken by a
-    /// different contact.
+    /// different contact. Flips `auto_named` to false — once
+    /// the user has a name they like, peer-advertised
+    /// renames won't override it.
     pub fn rename(&mut self, old: &str, new: &str) -> Result<()> {
         let new_clean = sanitize_name(new);
         if old == new_clean {
@@ -273,6 +342,7 @@ impl Contacts {
             .find(|c| c.assigned_name == old)
             .ok_or_else(|| anyhow!("no contact named {:?}", old))?;
         entry.assigned_name = new_clean;
+        entry.auto_named = false;
         Ok(())
     }
 
@@ -544,5 +614,81 @@ mod tests {
         assert_eq!(sanitize_name("  Hello World "), "hello-world");
         assert_eq!(sanitize_name("abc/def"), "abcdef");
         assert_eq!(sanitize_name(""), "peer");
+    }
+
+    #[test]
+    fn auto_named_contact_follows_peer_rename() {
+        let (_d, mut c) = fresh();
+        // Bob says he's "bob-laptop"; gets auto-named that.
+        let n1 = c
+            .record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("bob-laptop"))
+            .unwrap();
+        assert_eq!(n1, "bob-laptop");
+        assert!(c.resolve("bob-laptop").unwrap().auto_named);
+
+        // Bob renames himself to "bob-imac". We follow.
+        let n2 = c
+            .record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("bob-imac"))
+            .unwrap();
+        assert_eq!(n2, "bob-imac");
+        assert!(c.resolve("bob-imac").is_some());
+        assert!(c.resolve("bob-laptop").is_none());
+    }
+
+    #[test]
+    fn user_renamed_contact_does_not_follow_peer_rename() {
+        let (_d, mut c) = fresh();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("bob-laptop"))
+            .unwrap();
+        // User customizes the name.
+        c.rename("bob-laptop", "bob").unwrap();
+        assert!(!c.resolve("bob").unwrap().auto_named);
+
+        // Bob now advertises "bob-imac". We DO NOT follow —
+        // user already chose "bob".
+        let n = c
+            .record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("bob-imac"))
+            .unwrap();
+        assert_eq!(n, "bob");
+        // But advertised_name is still updated for display.
+        assert_eq!(
+            c.resolve("bob").unwrap().advertised_name.as_deref(),
+            Some("bob-imac")
+        );
+    }
+
+    #[test]
+    fn auto_rename_skipped_when_new_name_collides() {
+        let (_d, mut c) = fresh();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("alice"))
+            .unwrap();
+        c.record(pk(2), "2.2.2.2:9000".parse().unwrap(), Some("bob"))
+            .unwrap();
+        // Alice now claims to be "bob" — but bob is taken by
+        // peer 2. We keep alice's petname; advertised_name
+        // updates to "bob" so the user can see it.
+        let n = c
+            .record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("bob"))
+            .unwrap();
+        assert_eq!(n, "alice"); // unchanged
+        assert_eq!(
+            c.resolve("alice").unwrap().advertised_name.as_deref(),
+            Some("bob")
+        );
+        // peer 2's contact is unaffected.
+        assert!(c.resolve("bob").is_some());
+    }
+
+    #[test]
+    fn manually_added_contact_is_not_auto_named() {
+        let (_d, mut c) = fresh();
+        c.add_manual("bob", pk(1), "1.1.1.1:9000".parse().unwrap()).unwrap();
+        assert!(!c.resolve("bob").unwrap().auto_named);
+        // Even if the peer advertises a different name, we
+        // don't follow because the user explicitly chose "bob".
+        let n = c
+            .record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("bob-imac"))
+            .unwrap();
+        assert_eq!(n, "bob");
     }
 }
