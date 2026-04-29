@@ -1,0 +1,50 @@
+#!/usr/bin/env expect -f
+# drift-mosh over WebSocket. Pure plug-and-play check: drift-mosh's
+# source never touched; the new transport works because drift::io
+# learned about ws://.
+
+set timeout 15
+
+set server_log "/tmp/drift-mosh-ws-server.log"
+exec rm -f $server_log
+
+exec sh -c "../../target/release/drift-mosh-server --bind ws://127.0.0.1:0 --shell /bin/sh >$server_log 2>&1 &"
+
+set banner ""
+for {set i 0} {$i < 20} {incr i} {
+    after 200
+    if {[file exists $server_log]} {
+        set banner [exec cat $server_log]
+        if {[regexp {DRIFT_MOSH_PUB=([a-f0-9]+).*DRIFT_MOSH_BIND=ws://([0-9\.:]+)} $banner _ pub addr]} {
+            break
+        }
+    }
+}
+
+if {![info exists pub] || ![info exists addr]} {
+    puts "FAIL: server banner never appeared"
+    puts "log: $banner"
+    exit 1
+}
+
+puts "server pub=$pub  ws_addr=$addr"
+
+spawn ../../target/release/drift-mosh-client \
+    --server-pub $pub --server-addr ws://$addr
+
+expect {
+    -re {[\$#] *} { }
+    timeout       { puts "FAIL: no prompt within timeout"; exit 1 }
+}
+
+send "echo ws-transport-works\r"
+expect {
+    "ws-transport-works" { puts "PASS: echo round-trip over WebSocket" }
+    timeout              { puts "FAIL: echo round-trip timeout"; exit 1 }
+}
+
+send "exit\r"
+expect eof
+catch {exec pkill -f drift-mosh-server}
+puts "ALL GOOD"
+exit 0
