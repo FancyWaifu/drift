@@ -35,6 +35,7 @@ End-user binaries shipped from this repo. Each has its own README with install +
 | **[drift-mosh](drift-mosh/README.md)** | Mobile-shell replacement (mosh-style) — survives wifi-to-cellular, laptop suspend, client crash. UDP / TCP / WebSocket. | `cargo install --path drift-mosh --bin drift-mosh` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-http](drift-http/README.md)** | Apache-style file server + Jellyfin-style proxy + system-wide `drift://` URL handler. Pubkey-addressed; no DDNS, no reverse proxy, no TLS cert. | `cargo install --path drift-http --bin drift-http` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`. | `cargo install --path drift` |
+| **[drift-wormhole](drift-wormhole/README.md)** | Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, no rendezvous server. | `cargo install --path drift-wormhole --bin drift-wormhole` |
 | **[drift-bench](drift-bench/)** | Cross-protocol benchmark: DRIFT vs QUIC vs WireGuard, identical workloads. | `cargo build --release -p drift-bench` |
 | **[drift-ffi](drift-ffi/README.md)** | C ABI — call DRIFT from C, C++, Python, Go, Swift, anything. | `cargo build --release -p drift-ffi` |
 
@@ -84,6 +85,8 @@ drift-mosh/      Mobile-shell replacement built on DRIFT. Multi-transport CLI,
                    restart migration, scrollback reattach, TOFU known-hosts.
 drift-http/      HTTP-over-DRIFT: Apache-style file server, opaque proxy,
                    drift:// URL handler with macOS / Linux registration.
+drift-wormhole/  Magic-Wormhole-shaped file transfer over DRIFT. SHA-256
+                   byte-fidelity, progress bar, scheme-prefixed peer URLs.
 drift-bench/     Cross-protocol benchmark harness (DRIFT vs QUIC vs WireGuard).
 drift-ffi/       C ABI for invoking DRIFT from C / Python / Go / Swift / anywhere
                    that speaks the C ABI.

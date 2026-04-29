@@ -1,0 +1,37 @@
+[package]
+name = "drift-wormhole"
+version = "0.1.0"
+edition = "2021"
+description = "Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, end-to-end encrypted, no rendezvous server"
+
+[dependencies]
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+hex = "0.4"
+
+# Protocol-message framing
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+# Identity file: same shared location as drift-mosh / drift-http
+# (~/.config/drift/identity.key). dirs handles the per-OS path
+# resolution.
+dirs = "5"
+rand = "0.8"
+
+# Progress bars + readable byte sizes — the UX flair that
+# Magic Wormhole gets right.
+indicatif = "0.17"
+humansize = "2"
+
+# SHA-256 for byte-fidelity verification on receive.
+sha2 = "0.10"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "drift-wormhole"
+path = "src/main.rs"
