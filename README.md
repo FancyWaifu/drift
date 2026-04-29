@@ -18,7 +18,7 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry. Peer self-migration at equal cost.
 
-**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in TLS, serial, BLE, or anything else.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, Tor, or anything else.
 
 **Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
 
@@ -55,9 +55,10 @@ drift/           native tokio-based stack built on drift-core
   src/
     lib.rs           Transport re-exports
     main.rs          `drift` CLI (keygen, info, send, listen, relay)
-    io.rs            PacketIO + Listener traits, UDP / TCP / WebSocket / WebRTC /
-                       WebTransport / Memory adapters, inventory-based scheme registry
-                       (Transport::bind_url / connect_url / add_listener)
+    io.rs            PacketIO + Listener traits, UDP / TCP / WebSocket / TLS /
+                       WebRTC / WebTransport / Memory adapters, inventory-based
+                       scheme registry (Transport::bind_url / connect_url /
+                       add_listener)
     streams.rs       Reliable streams, NewReno + BBR congestion control
     multipath.rs     RTT-weighted path selection
     transport/
@@ -159,20 +160,70 @@ bridge.add_listener("ws://0.0.0.0:9002").await?;
 
 Drop a new adapter into any file (drift's source tree, your own crate, a downstream consumer's crate — anywhere). The URL dispatcher finds it via `inventory::iter` at runtime; nothing in drift core needs editing.
 
+#### The three pieces
+
+Every adapter implements two traits and submits one registration. The shapes of the two traits are:
+
+- **`PacketIO`** — a packet-oriented I/O object. Two methods: `send_to(&self, buf, dest)` and `recv_from(&self, buf) -> (n, src)`. DRIFT calls these for every wire-going packet. Datagram transports (UDP) implement them naively. Stream transports (TCP, WebSocket, TLS) need to invent their own packet boundaries — see "Framing" below.
+- **`Listener`** — a server-side acceptor. One method: `accept(&mut self) -> Arc<dyn PacketIO>`. Plus `is_multi() -> bool`: return `true` if one `PacketIO` services many peers (UDP-style — one socket, peers distinguished by `recv_from`'s addr); `false` if each accept yields a per-peer `PacketIO` (TCP-style — one stream per peer).
+
+`SchemeRegistration` ties them together with a string scheme name and a connector factory (the client-side dialer).
+
+#### Framing for stream transports
+
+Stream transports have no message boundaries — DRIFT packets must be re-delineated on top of the byte stream. The convention used by every built-in stream adapter (TCP, WebSocket, TLS): **2-byte big-endian length prefix per packet.** `recv_from` reads 2 bytes, then exactly that many. `send_to` writes 2 bytes + the packet, then `flush()`. Cap packets at `u16::MAX` (65 535 bytes) — DRIFT packets are well under that ceiling.
+
+Datagram transports (UDP, WebRTC data channel, WebTransport datagrams) preserve message boundaries natively and don't need framing at all.
+
+#### Reference adapters
+
+Match your transport's shape against one of the existing built-ins and copy the pattern:
+
+| Shape | Reference | What to copy |
+|---|---|---|
+| Connectionless datagram | `UdpPacketIO` / `UdpListenerIO` in `drift/src/io.rs` | Single shared `PacketIO`, `is_multi() = true` |
+| Reliable byte stream (per-peer) | `TcpPacketIO` / `TcpListenerIO` | Length-prefix framing, `tokio::io::split`, `is_multi() = false` |
+| Reliable byte stream over TLS | `TlsPacketIO` / `TlsListenerIO` | Same as TCP + `tokio_rustls::TlsAcceptor` wrapping each accept |
+| Browser-friendly framed stream | `WsPacketIO` / `WsListenerIO` | tungstenite `Message::Binary` per packet |
+| Out-of-band signaling | WebRTC / WebTransport adapters | Skip the URL-dispatch path; use `Transport::bind_with_io` directly |
+
+#### Sketch
+
 ```rust
 use drift::io::{Listener, PacketIO, SchemeRegistration};
 
-// 1. Implement the Listener trait for your transport.
-pub struct MyTransportListener { /* ... */ }
+// 1. Implement PacketIO for the wire object (a connection / socket / channel).
+pub struct MyPacketIO { /* ... */ }
 #[async_trait::async_trait]
-impl Listener for MyTransportListener { /* ... */ }
-
-// 2. Register it under a scheme name.
-fn my_listener_factory(addr: SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
-    Box::pin(async move { Ok(Box::new(MyTransportListener::bind(addr).await?) as Box<dyn Listener>) })
+impl PacketIO for MyPacketIO {
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> { /* frame + write */ }
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> { /* read + unframe */ }
+    fn local_addr(&self) -> io::Result<SocketAddr> { /* ... */ }
 }
-fn my_connector_factory(addr: SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
-    Box::pin(async move { /* dial + wrap */ })
+
+// 2. Implement Listener for the server side.
+pub struct MyListener { /* ... */ }
+#[async_trait::async_trait]
+impl Listener for MyListener {
+    fn local_addr(&self) -> io::Result<SocketAddr> { /* ... */ }
+    fn is_multi(&self) -> bool { false }  // true for datagram-shaped transports
+    async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> { /* handshake + wrap */ }
+}
+
+// 3. Register it under a scheme name. Both factories are plain `fn`
+//    pointers — no captured state — so they fit in `inventory::submit!`.
+fn my_listener_factory(addr: SocketAddr)
+    -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>>
+{
+    Box::pin(async move { Ok(Box::new(MyListener::bind(addr).await?) as Box<dyn Listener>) })
+}
+fn my_connector_factory(addr: SocketAddr)
+    -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>>
+{
+    Box::pin(async move {
+        let io: Arc<dyn PacketIO> = Arc::new(MyPacketIO::dial(addr).await?);
+        Ok((io, addr))
+    })
 }
 
 inventory::submit! {
@@ -184,7 +235,19 @@ inventory::submit! {
 }
 ```
 
-That's it. From now on `Transport::bind_url("mytransport://addr")` works, and every drift-shaped tool can route over it.
+#### Don't add a second crypto layer
+
+DRIFT already authenticates peers by X25519 pubkey and AEAD-seals every packet. Adapters that wrap a "secure" wire (TLS, Noise, Tor) **should not** validate the wire's authentication — the cert / static key / circuit identity is camouflage, not security. The TLS adapter generates a fresh self-signed cert per `bind` and the client uses a `NoCertVerifier` that accepts anything. This is intentional: it lets the wire shape match what middleboxes expect (an HTTPS handshake) without requiring users to provision real certs. DRIFT's own crypto is what actually secures the channel.
+
+#### One-time process init
+
+If your transport's underlying library needs a global one-shot setup (rustls's crypto provider, a logger registration, a thread pool), wrap it in `std::sync::Once`. See `install_default_crypto_provider` in `drift/src/io.rs` for the pattern. Don't put the init inside the adapter constructor naively — adapters can be constructed many times per process.
+
+#### Testing
+
+Add a script under `drift-http/tests/multi_transport_*.sh` (or a Rust integration test under `drift/tests/`) that spins up a server listening on `myscheme://127.0.0.1:0` plus the existing transports, then has clients fetch the same content via every scheme and compares bytes. The 4-way test (`drift-http/tests/multi_transport_4way.sh`) is the current template — adding your scheme means adding one bind line and one row to the loop.
+
+That's it. From now on `Transport::bind_url("mytransport://addr")` and `Transport::connect_url("mytransport://...")` work, and every drift-shaped tool (`drift-mosh`, `drift-http`, `drift-wormhole`, `drift-bench`, the `drift` CLI) can route over it without a single line of source change.
 
 ## Quick Start (browser / WASM)
 
@@ -243,6 +306,7 @@ drift relay                               # run a mesh relay node
 |-----------|:------:|:-------:|:----:|-------------------|
 | UDP | ✅ | ❌ (browser sandbox) | ✅ `udp://` | ✅ |
 | TCP | ✅ | ❌ (browser sandbox) | ✅ `tcp://` | ✅ |
+| TLS over TCP | ✅ | ❌ (browser sandbox) | ✅ `tls://` | ✅ (`multi_transport_4way.sh`) |
 | WebSocket | ✅ | ✅ | ✅ `ws://` | ✅ WASM↔native + mesh-through-bridge to any medium |
 | WebRTC data channel | ✅ | ✅ | ❌ (signaling out-of-band) | Native↔native ✅ (`webrtc_adapter` test); browser↔native needs app-supplied SDP signaling |
 | WebTransport | ✅ | ✅ | ❌ (cert handoff out-of-band) | Native↔native ✅ (`webtransport_adapter` test); browser↔native ships and is cert-hash-pinnable |
