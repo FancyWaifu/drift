@@ -1,3 +1,4 @@
+pub mod contacts;
 pub mod identity;
 pub mod info;
 pub mod keygen;
@@ -42,6 +43,14 @@ pub enum Command {
     Listen(ListenArgs),
     /// Run a mesh relay node
     Relay(RelayArgs),
+    /// Manage local contacts (petname → pubkey address book)
+    Contacts(ContactsArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ContactsArgs {
+    #[command(subcommand)]
+    pub command: contacts::ContactsCommand,
 }
 
 #[derive(clap::Args)]

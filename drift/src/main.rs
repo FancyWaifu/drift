@@ -19,5 +19,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Send(args) => cli::send::run(args, &cli.identity).await,
         Command::Listen(args) => cli::listen::run(args, &cli.identity).await,
         Command::Relay(args) => cli::relay::run(args).await,
+        Command::Contacts(args) => cli::contacts::run(args).await,
     }
 }
