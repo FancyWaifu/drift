@@ -10,7 +10,6 @@ pub mod known_hosts;
 // Re-export the TOFU prompt helper at crate root so both
 // binaries and external wrappers can use it.
 pub mod scrollback;
-pub mod transport_url;
 pub mod wire;
 
 pub use client_key::ClientKey;

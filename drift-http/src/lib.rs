@@ -20,7 +20,6 @@
 pub mod bridge;
 pub mod identity;
 pub mod io;
-pub mod serve_setup;
 pub mod transport_url;
 
 pub use crate::io::StreamIo;

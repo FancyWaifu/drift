@@ -8,105 +8,18 @@
 use crate::{report::Report, Cli, Workload};
 use anyhow::{Context, Result};
 use drift::identity::Identity;
-use drift::io::{MemPacketIO, PacketIO, TcpPacketIO};
 use drift::{Direction, Transport, TransportConfig};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, TcpStream};
 
-/// Which DRIFT transport this bench is exercising.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum BenchTransport {
-    Udp,
-    Tcp,
-}
-
-/// Parse `<scheme>://<addr>` or bare `<addr>` (defaults to UDP).
-/// Lets us bench DRIFT over either UDP or TCP without changing
-/// any other CLI flags.
-pub fn parse_addr(s: &str) -> Result<(BenchTransport, String)> {
-    if let Some(idx) = s.find("://") {
-        let scheme = &s[..idx];
-        let rest = &s[idx + 3..];
-        let t = match scheme.to_ascii_lowercase().as_str() {
-            "udp" => BenchTransport::Udp,
-            "tcp" => BenchTransport::Tcp,
-            other => anyhow::bail!("unknown transport {:?}", other),
-        };
-        Ok((t, rest.to_string()))
+/// Force a `<scheme>://` prefix on a possibly-bare address. Bare
+/// `host:port` defaults to `udp` so old bench configs keep
+/// working unchanged.
+fn ensure_scheme(s: &str) -> String {
+    if s.contains("://") {
+        s.to_string()
     } else {
-        Ok((BenchTransport::Udp, s.to_string()))
-    }
-}
-
-/// Server-side bind for the given transport. UDP binds the
-/// socket and returns; TCP binds a listener, uses a MemPacketIO
-/// placeholder as the Transport's primary, and spawns an
-/// accept-loop that adds each accepted TCP stream as a new
-/// interface.
-pub async fn bench_server_bind(
-    transport: BenchTransport,
-    addr: SocketAddr,
-    identity: Identity,
-) -> Result<(Arc<Transport>, SocketAddr)> {
-    match transport {
-        BenchTransport::Udp => {
-            let t = Arc::new(Transport::bind(addr, identity).await?);
-            let bound = t.local_addr()?;
-            Ok((t, bound))
-        }
-        BenchTransport::Tcp => {
-            let listener = TcpListener::bind(addr)
-                .await
-                .with_context(|| format!("TCP listen failed on {}", addr))?;
-            let bound = listener.local_addr()?;
-            let (mem, _dead) = MemPacketIO::pair();
-            let primary: Arc<dyn PacketIO> = Arc::new(mem);
-            let t = Arc::new(
-                Transport::bind_with_io(primary, identity, TransportConfig::default()).await?,
-            );
-            let inner = t.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Ok((tcp, peer)) = listener.accept().await {
-                        if let Ok(io) = TcpPacketIO::new(tcp) {
-                            inner.add_interface(format!("tcp-{}", peer), Arc::new(io));
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            });
-            Ok((t, bound))
-        }
-    }
-}
-
-/// Client-side bind. UDP gets a fresh ephemeral socket; TCP
-/// dials the server's listener.
-pub async fn bench_client_bind(
-    transport: BenchTransport,
-    target: SocketAddr,
-    identity: Identity,
-) -> Result<(Arc<Transport>, SocketAddr)> {
-    match transport {
-        BenchTransport::Udp => {
-            let t = Arc::new(
-                Transport::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap(), identity).await?,
-            );
-            Ok((t, target))
-        }
-        BenchTransport::Tcp => {
-            let tcp = TcpStream::connect(target)
-                .await
-                .with_context(|| format!("TCP connect failed to {}", target))?;
-            let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(tcp)?);
-            let t = Arc::new(
-                Transport::bind_with_io(io, identity, TransportConfig::default()).await?,
-            );
-            Ok((t, target))
-        }
+        format!("udp://{}", s)
     }
 }
 
@@ -119,23 +32,21 @@ const CLIENT_SEED: [u8; 32] = [0xBB; 32];
 pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     let server_id = Identity::from_secret_bytes(SERVER_SEED);
     let client_pub = Identity::from_secret_bytes(CLIENT_SEED).public_bytes();
-    let (transport, addr_str) = parse_addr(&cli.listen)?;
-    let listen: SocketAddr = addr_str.parse()?;
-
-    let (server, bound) = bench_server_bind(transport, listen, server_id).await?;
+    let listen_url = ensure_scheme(&cli.listen);
+    let (server, bound_url) = Transport::bind_url(
+        &listen_url,
+        server_id,
+        TransportConfig::default(),
+    )
+    .await
+    .with_context(|| format!("DRIFT server bind on {}", listen_url))?;
+    let server = Arc::new(server);
     // Learn the client identity up front so first incoming DATA
     // doesn't get rejected as "unknown peer" during cold start.
     server
         .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
         .await?;
-    eprintln!(
-        "drift server listening on {}://{}",
-        match transport {
-            BenchTransport::Udp => "udp",
-            BenchTransport::Tcp => "tcp",
-        },
-        bound
-    );
+    eprintln!("drift server listening on {}", bound_url);
 
     match cli.workload {
         Workload::Handshake => {
@@ -188,17 +99,22 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
 
 pub async fn client(cli: &Cli) -> Result<Option<Report>> {
     let server_pub = Identity::from_secret_bytes(SERVER_SEED).public_bytes();
-    let (transport_kind, target_str) = parse_addr(&cli.target)?;
-    let target: SocketAddr = crate::resolve_target(&target_str).await?;
+    let target_url = ensure_scheme(&cli.target);
 
     match cli.workload {
-        Workload::Handshake => run_handshake(cli, server_pub, target, transport_kind).await,
+        Workload::Handshake => run_handshake(cli, server_pub, &target_url).await,
         Workload::Rtt | Workload::Throughput => {
             // Single long-lived session for the data-plane
             // workloads — matches what a real app would do.
             let client_id = Identity::from_secret_bytes(CLIENT_SEED);
-            let (client, peer_addr) =
-                bench_client_bind(transport_kind, target, client_id).await?;
+            let (client, peer_addr) = Transport::connect_url(
+                &target_url,
+                client_id,
+                TransportConfig::default(),
+            )
+            .await
+            .with_context(|| format!("connecting to {}", target_url))?;
+            let client = Arc::new(client);
             let server_peer = client
                 .add_peer(server_pub, peer_addr, Direction::Initiator)
                 .await?;
@@ -214,8 +130,7 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
 async fn run_handshake(
     cli: &Cli,
     server_pub: [u8; 32],
-    target: SocketAddr,
-    transport_kind: BenchTransport,
+    target_url: &str,
 ) -> Result<Option<Report>> {
     let mut report = Report::new("drift", "handshake");
     let mut samples: Vec<u128> = Vec::with_capacity(cli.handshake_iters);
@@ -227,7 +142,13 @@ async fn run_handshake(
     // what a reconnecting client actually pays.
     for _ in 0..cli.handshake_iters {
         let client_id = Identity::from_secret_bytes(CLIENT_SEED);
-        let (client, peer_addr) = bench_client_bind(transport_kind, target, client_id).await?;
+        let (client, peer_addr) = Transport::connect_url(
+            target_url,
+            client_id,
+            TransportConfig::default(),
+        )
+        .await?;
+        let client = Arc::new(client);
         let server_peer = client
             .add_peer(server_pub, peer_addr, Direction::Initiator)
             .await?;

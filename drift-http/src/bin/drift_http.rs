@@ -25,9 +25,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use drift::identity::Identity;
 use drift::streams::StreamManager;
-use drift::{Direction, TransportConfig};
-use drift_http::serve_setup::{build_connect_transport, build_serve_transport};
-use drift_http::transport_url::{parse_addr, parse_drift_url, parse_peer, AddrSpec};
+use drift::{Direction, Transport, TransportConfig};
+use drift_http::transport_url::{parse_drift_url, split_peer};
 use drift_http::{identity as drift_identity, StreamIo};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -201,12 +200,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .map(|b| format!("{:02x}", b))
         .collect();
 
-    // Parse every --bind into an AddrSpec so we know the
-    // transport per-bind. build_serve_transport handles UDP
-    // primary + TCP listener accept-loops + future schemes.
-    let mut binds: Vec<AddrSpec> = Vec::with_capacity(args.bind.len());
-    for b in &args.bind {
-        binds.push(parse_addr(b).with_context(|| format!("parsing --bind {:?}", b))?);
+    if args.bind.is_empty() {
+        return Err(anyhow!("at least one --bind is required"));
     }
 
     // accept_any_peer: anyone with our pubkey can connect, like
@@ -216,27 +211,38 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         accept_any_peer: true,
         ..TransportConfig::default()
     };
-    let serve = build_serve_transport(&binds, identity, tcfg)
+
+    // First --bind becomes the primary; subsequent --binds are
+    // attached via `add_listener`. All transport-specific logic
+    // (UDP socket vs TCP accept-loop vs future WS upgrade) is
+    // hidden inside `drift::Transport` — this binary doesn't
+    // know or care which scheme is which.
+    let (transport, primary_url) = Transport::bind_url(&args.bind[0], identity, tcfg)
         .await
-        .context("setting up DRIFT transport")?;
-    let mgr = StreamManager::bind(serve.transport.clone()).await;
+        .context("setting up primary DRIFT transport")?;
+    let transport = Arc::new(transport);
+    let mut bound_urls = vec![primary_url];
+    for extra in &args.bind[1..] {
+        let bound = transport
+            .add_listener(extra)
+            .await
+            .with_context(|| format!("adding listener {}", extra))?;
+        bound_urls.push(bound);
+    }
+    let mgr = StreamManager::bind(transport.clone()).await;
 
     println!("DRIFT_HTTP_PUB={}", pub_hex);
     // `DRIFT_HTTP_ADDR=<host:port>` carries the first UDP bind
     // unprefixed for back-compat with anything that pre-dates
-    // multi-transport (test scripts, the drift-mosh launcher,
-    // etc.). `DRIFT_HTTP_BIND=<scheme>://<addr>` is the new
-    // form, emitted once per bound transport — that's what
-    // multi-transport-aware callers should parse.
-    if let Some((_, primary_udp)) = serve
-        .addrs
-        .iter()
-        .find(|(k, _)| matches!(k, drift_http::transport_url::Transport::Udp))
-    {
-        println!("DRIFT_HTTP_ADDR={}", primary_udp);
+    // multi-transport (test scripts, drift-mosh launcher).
+    // `DRIFT_HTTP_BIND=<scheme>://<addr>` is the new line per
+    // bound transport — multi-transport-aware callers parse it.
+    if let Some(udp_url) = bound_urls.iter().find(|u| u.starts_with("udp://")) {
+        let bare = &udp_url[6..]; // strip "udp://"
+        println!("DRIFT_HTTP_ADDR={}", bare);
     }
-    for (kind, addr) in &serve.addrs {
-        println!("DRIFT_HTTP_BIND={}://{}", kind.as_str(), addr);
+    for url in &bound_urls {
+        println!("DRIFT_HTTP_BIND={}", url);
     }
     if let Some(root) = &args.root {
         println!("DRIFT_HTTP_MODE=serve-files root={}", root.display());
@@ -246,7 +252,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     println!("DRIFT_HTTP_READY");
     use std::io::Write;
     std::io::stdout().flush().ok();
-    tracing::info!(addrs = ?serve.addrs, "drift-http serve ready");
+    tracing::info!(addrs = ?bound_urls, "drift-http serve ready");
 
     // Accept loop: each new DRIFT stream becomes one HTTP
     // connection (Apache mode) or one tunneled TCP connection
@@ -319,10 +325,14 @@ async fn serve_proxy_on_stream(
 // ─── connect ──────────────────────────────────────────────────────
 
 async fn run_connect(args: ConnectArgs) -> Result<()> {
-    let (server_pub, peer_spec) = parse_peer(&args.peer)?;
+    let (server_pub, peer_url, _transport_kind) = split_peer(&args.peer)?;
 
     let identity = load_identity(args.identity_file)?;
-    let local_udp_bind: SocketAddr = args
+    // `--bind` is now only used as a hint for UDP local-port
+    // selection; ignored for TCP since `connect_url` dials and
+    // owns the local end of the stream. We keep parsing it for
+    // back-compat with old scripts that always passed it.
+    let _local_udp_bind: SocketAddr = args
         .bind
         .parse()
         .with_context(|| format!("--bind {:?} is not a valid ip:port", args.bind))?;
@@ -332,9 +342,10 @@ async fn run_connect(args: ConnectArgs) -> Result<()> {
         .with_context(|| format!("--listen {:?} is not a valid ip:port", args.listen))?;
 
     let (transport, server_addr) =
-        build_connect_transport(local_udp_bind, &peer_spec, identity)
+        Transport::connect_url(&peer_url, identity, TransportConfig::default())
             .await
             .context("setting up DRIFT client transport")?;
+    let transport = Arc::new(transport);
     let server_peer = transport
         .add_peer(server_pub, server_addr, Direction::Initiator)
         .await
@@ -381,17 +392,14 @@ async fn run_connect(args: ConnectArgs) -> Result<()> {
 
 async fn run_open(args: OpenArgs) -> Result<()> {
     let url = parse_drift_url(&args.url).context("parsing drift:// URL")?;
-    let target = format!("{}:{}", url.host, url.port);
-    let mut iter = tokio::net::lookup_host(target.as_str())
-        .await
-        .with_context(|| format!("resolving {}", target))?;
-    let resolved = iter
-        .next()
-        .ok_or_else(|| anyhow!("no addresses for {}", target))?;
-
+    // The connect_url is what `Transport::connect_url` accepts
+    // (e.g. `udp://host:9100`). We pass it through to the
+    // bridge unchanged; the bridge persists it as the per-peer
+    // identity for state tracking.
+    let connect_url = url.connect_url();
     let port = drift_http::bridge::ensure_bridge(
         &url.pub_hex,
-        &resolved,
+        &connect_url,
         url.transport,
         args.identity_file,
     )

@@ -393,7 +393,12 @@ pub struct Transport {
 /// whatever drops with the user-visible handle.
 #[derive(Default)]
 struct TaskGuard {
-    handles: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// `Arc<Mutex<…>>` rather than a plain `Mutex` so background
+    /// loops (like the `bind_url` accept loop) can keep a `Weak`
+    /// reference and push their own dynamically-spawned handles
+    /// here without taking a strong ref that would create a
+    /// drop-cycle.
+    handles: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl TaskGuard {
@@ -407,11 +412,21 @@ impl TaskGuard {
             handle.abort();
         }
     }
+
+    /// Hand out the inner `Arc<Mutex<…>>`. Callers should
+    /// downgrade to `Weak` before storing — keeping a strong
+    /// reference defeats the abort-on-drop guarantee.
+    fn handles_arc(&self) -> std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> {
+        self.handles.clone()
+    }
 }
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        if let Ok(v) = self.handles.get_mut() {
+        // Try to acquire the inner mutex; if successful, abort
+        // every handle. We can't use `get_mut()` anymore since
+        // `handles` is now an Arc<Mutex<...>>.
+        if let Ok(mut v) = self.handles.lock() {
             for h in v.drain(..) {
                 h.abort();
             }
@@ -600,6 +615,187 @@ impl Transport {
             bg.run_recv_loop_for(tx, idx).await;
         }));
         idx
+    }
+
+    /// Bind a `Transport` from a URL like `udp://0.0.0.0:9100`
+    /// or `tcp://0.0.0.0:9100`. The scheme picks the adapter,
+    /// the address part picks where to listen.
+    ///
+    /// For single-shot listeners (UDP), the returned `PacketIO`
+    /// is used as the Transport's primary interface. For
+    /// multi-shot listeners (TCP, WebSocket), the Transport is
+    /// constructed with a `MemPacketIO` placeholder primary and
+    /// an accept-loop runs in the background, attaching each
+    /// inbound connection as a new interface via
+    /// `add_interface`. Application code is identical regardless
+    /// of which transport is in use — that's the plug-and-play
+    /// promise.
+    ///
+    /// Returns the bound URL (with the resolved port for `:0`
+    /// inputs) so the caller can print it in their banner.
+    pub async fn bind_url(
+        url: &str,
+        identity: Identity,
+        config: TransportConfig,
+    ) -> Result<(Self, String)> {
+        let (scheme, _) = url
+            .find("://")
+            .map(|i| (&url[..i], &url[i + 3..]))
+            .unwrap_or(("udp", url));
+        let scheme = scheme.to_string();
+        let mut listener = crate::io::make_listener(url)
+            .await
+            .map_err(DriftError::Io)?;
+        let bound_addr = listener.local_addr().map_err(DriftError::Io)?;
+        let bound_url = format!("{}://{}", scheme, bound_addr);
+
+        if listener.is_multi() {
+            // Multi-shot adapter (TCP, WS, …): primary is a
+            // MemPacketIO placeholder so Transport has something
+            // to satisfy its "needs an iface to be born"
+            // contract. The placeholder never sees traffic; real
+            // peers arrive on the interfaces the accept loop
+            // attaches.
+            let (mem_primary, _mem_dead) = crate::io::MemPacketIO::pair();
+            let primary: Arc<dyn crate::io::PacketIO> = Arc::new(mem_primary);
+            let transport = Self::bind_inner(primary, identity, config).await?;
+            // Spawn the accept loop. On Drop, Transport.tasks
+            // aborts this handle, which drops the loop's local
+            // state. Recv loops registered for individual TCP
+            // interfaces live in Transport.tasks already.
+            let tx = transport.recv_tx.clone();
+            let inner = transport.inner.clone();
+            let tasks_weak = std::sync::Arc::downgrade(
+                &(transport.tasks.handles_arc()),
+            );
+            transport.tasks.push(tokio::spawn(async move {
+                let mut listener = listener;
+                loop {
+                    match listener.accept().await {
+                        Ok(io) => {
+                            let idx = inner.ifaces.add("multi-accept", io);
+                            let bg = inner.clone();
+                            let tx_clone = tx.clone();
+                            let recv_handle = tokio::spawn(async move {
+                                bg.run_recv_loop_for(tx_clone, idx).await
+                            });
+                            // Track the recv-loop handle so it
+                            // gets aborted when the Transport
+                            // drops. Weak so we don't keep the
+                            // TaskGuard alive past Transport's
+                            // own lifetime.
+                            if let Some(handles) = tasks_weak.upgrade() {
+                                if let Ok(mut v) = handles.lock() {
+                                    v.push(recv_handle);
+                                } else {
+                                    recv_handle.abort();
+                                    break;
+                                }
+                            } else {
+                                recv_handle.abort();
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "listener accept failed; backing off");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }));
+            Ok((transport, bound_url))
+        } else {
+            // Single-shot adapter (UDP): the listener's one
+            // PacketIO becomes the Transport's primary
+            // interface directly.
+            let io = listener.accept().await.map_err(DriftError::Io)?;
+            let transport = Self::bind_inner(io, identity, config).await?;
+            Ok((transport, bound_url))
+        }
+    }
+
+    /// Client-side counterpart to `bind_url`. Resolves a peer
+    /// URL like `udp://host:9100` or `tcp://host:9100` and
+    /// returns a `Transport` already wired up to reach that
+    /// peer, plus the resolved `SocketAddr` to pass into
+    /// `add_peer`.
+    pub async fn connect_url(
+        url: &str,
+        identity: Identity,
+        config: TransportConfig,
+    ) -> Result<(Self, SocketAddr)> {
+        let (io, addr) = crate::io::make_connector(url)
+            .await
+            .map_err(DriftError::Io)?;
+        let transport = Self::bind_inner(io, identity, config).await?;
+        Ok((transport, addr))
+    }
+
+    /// Add a second (third, …) listener to a live Transport.
+    /// Useful when you want one server reachable on multiple
+    /// transports simultaneously — e.g. UDP for fast clients
+    /// AND TCP for clients behind UDP-blocking firewalls.
+    ///
+    /// For single-shot listeners (UDP), the listener's one
+    /// `PacketIO` is attached immediately via `add_interface`.
+    /// For multi-shot listeners (TCP, WS, …), an accept loop
+    /// runs in the background and attaches each inbound
+    /// connection as a new interface.
+    ///
+    /// Returns the resolved bound URL (with `:0` ports filled
+    /// in) so the caller can include it in startup banners.
+    pub async fn add_listener(&self, url: &str) -> Result<String> {
+        let (scheme, _) = url
+            .find("://")
+            .map(|i| (&url[..i], &url[i + 3..]))
+            .unwrap_or(("udp", url));
+        let scheme = scheme.to_string();
+        let mut listener = crate::io::make_listener(url)
+            .await
+            .map_err(DriftError::Io)?;
+        let bound_addr = listener.local_addr().map_err(DriftError::Io)?;
+        let bound_url = format!("{}://{}", scheme, bound_addr);
+
+        if listener.is_multi() {
+            let tx = self.recv_tx.clone();
+            let inner = self.inner.clone();
+            let tasks_weak = std::sync::Arc::downgrade(&self.tasks.handles_arc());
+            let label = format!("{}-listen", scheme);
+            self.tasks.push(tokio::spawn(async move {
+                let mut listener = listener;
+                loop {
+                    match listener.accept().await {
+                        Ok(io) => {
+                            let idx = inner.ifaces.add(label.clone(), io);
+                            let bg = inner.clone();
+                            let tx_clone = tx.clone();
+                            let recv_handle = tokio::spawn(async move {
+                                bg.run_recv_loop_for(tx_clone, idx).await
+                            });
+                            if let Some(handles) = tasks_weak.upgrade() {
+                                if let Ok(mut v) = handles.lock() {
+                                    v.push(recv_handle);
+                                } else {
+                                    recv_handle.abort();
+                                    break;
+                                }
+                            } else {
+                                recv_handle.abort();
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "listener accept failed; backing off");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }));
+        } else {
+            let io = listener.accept().await.map_err(DriftError::Io)?;
+            self.add_interface(format!("{}-listen", scheme), io);
+        }
+        Ok(bound_url)
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
