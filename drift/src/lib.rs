@@ -16,6 +16,7 @@ pub use drift_core::short_header;
 pub use drift_core::time;
 
 // Platform-specific modules (tokio).
+pub mod contacts;
 pub mod io;
 pub mod multipath;
 pub mod streams;
