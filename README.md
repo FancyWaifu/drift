@@ -212,17 +212,27 @@ impl Listener for MyListener {
 
 // 3. Register it under a scheme name. Both factories are plain `fn`
 //    pointers — no captured state — so they fit in `inventory::submit!`.
-fn my_listener_factory(addr: SocketAddr)
+//    The address is passed as an opaque `String`; each adapter
+//    parses it however its address space requires (IP host:port
+//    for UDP/TCP/WS/TLS, base32 .onion:port for Tor, etc.).
+fn my_listener_factory(addr_str: String)
     -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>>
 {
-    Box::pin(async move { Ok(Box::new(MyListener::bind(addr).await?) as Box<dyn Listener>) })
+    Box::pin(async move {
+        let addr = my_parse(&addr_str)?;  // your parser (or `parse_ip_addr` for host:port)
+        Ok(Box::new(MyListener::bind(addr).await?) as Box<dyn Listener>)
+    })
 }
-fn my_connector_factory(addr: SocketAddr)
+fn my_connector_factory(addr_str: String)
     -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>>
 {
     Box::pin(async move {
-        let io: Arc<dyn PacketIO> = Arc::new(MyPacketIO::dial(addr).await?);
-        Ok((io, addr))
+        // Non-IP transports synthesize a unique loopback `SocketAddr`
+        // for the peer-table key — the actual destination is held
+        // inside the `PacketIO`.
+        let io: Arc<dyn PacketIO> = Arc::new(MyPacketIO::dial(&addr_str).await?);
+        let peer_key = my_synthesize_peer_addr(&addr_str);
+        Ok((io, peer_key))
     })
 }
 
