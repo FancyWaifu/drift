@@ -1045,17 +1045,22 @@ fn install_default_crypto_provider() {
 // code.
 
 /// Async factory for a server-side `Listener`. Adapters provide
-/// one of these via `SchemeRegistration`. The pinned-Box return
-/// type is what lets us store these as plain `fn` pointers (and
-/// therefore as values inside an `inventory::submit!` block).
+/// one of these via `SchemeRegistration`. The address is passed
+/// as an opaque `String` — each adapter parses it however its
+/// transport addresses bytes (IP `host:port` for UDP/TCP/TLS/WS,
+/// `<base32>.onion:<port>` for Tor, BLE MAC, etc.). The pinned-Box
+/// return type is what lets us store these as plain `fn` pointers
+/// (and therefore as values inside an `inventory::submit!` block).
 pub type ListenerFactory =
-    fn(SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>>;
+    fn(String) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>>;
 
 /// Async factory for a client-side connector. Returns the
 /// connected `PacketIO` plus the remote `SocketAddr` to pass to
-/// `Transport::add_peer`.
+/// `Transport::add_peer`. Non-IP transports (Tor, BLE, …)
+/// synthesize a unique loopback `SocketAddr` for the peer-table
+/// key — the actual destination is held inside the `PacketIO`.
 pub type ConnectorFactory = fn(
-    SocketAddr,
+    String,
 ) -> Pin<
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 >;
@@ -1087,17 +1092,13 @@ fn lookup_scheme(scheme: &str) -> Option<&'static SchemeRegistration> {
         .find(|r| r.scheme == scheme)
 }
 
-/// Build a `Listener` from a URL. Adapter dispatch is by
-/// runtime registry — no edits to this function are needed
-/// when a new transport is added.
+/// Build a `Listener` from a URL. The address portion is
+/// handed to the adapter as an opaque string — each transport
+/// parses it however its address space requires. Adapter
+/// dispatch is by runtime registry; no edits to this function
+/// are needed when a new transport is added.
 pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
     let (scheme, addr_str) = split_url(url)?;
-    let addr: SocketAddr = addr_str.parse().map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a valid host:port {:?}: {}", addr_str, e),
-        )
-    })?;
     let reg = lookup_scheme(scheme).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1108,7 +1109,7 @@ pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
             ),
         )
     })?;
-    (reg.listener)(addr).await
+    (reg.listener)(addr_str.to_string()).await
 }
 
 /// Client-side URL dispatch. Returns the connected `PacketIO`
@@ -1117,12 +1118,6 @@ pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
 /// by runtime registry — same plug-and-play story as listeners.
 pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     let (scheme, addr_str) = split_url(url)?;
-    let addr: SocketAddr = addr_str.parse().map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a valid host:port {:?}: {}", addr_str, e),
-        )
-    })?;
     let reg = lookup_scheme(scheme).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1133,7 +1128,19 @@ pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketA
             ),
         )
     })?;
-    (reg.connector)(addr).await
+    (reg.connector)(addr_str.to_string()).await
+}
+
+/// Helper: parse a `host:port` address string for IP-addressed
+/// transports (UDP, TCP, TLS, WS). Non-IP adapters skip this and
+/// parse their own address shape.
+fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
+    addr_str.parse().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a valid host:port {:?}: {}", addr_str, e),
+        )
+    })
 }
 
 /// All schemes currently registered. Useful for diagnostics
@@ -1153,17 +1160,21 @@ pub fn registered_schemes() -> Vec<&'static str> {
 // anywhere — even outside this file or this crate.
 
 fn udp_listener_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
-    Box::pin(async move { Ok(Box::new(UdpListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+    Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
+        Ok(Box::new(UdpListenerIO::bind(addr).await?) as Box<dyn Listener>)
+    })
 }
 
 fn udp_connector_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
         let io: Arc<dyn PacketIO> = Arc::new(UdpPacketIO::new(Arc::new(sock)));
         Ok((io, addr))
@@ -1179,17 +1190,21 @@ inventory::submit! {
 }
 
 fn tcp_listener_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
-    Box::pin(async move { Ok(Box::new(TcpListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+    Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
+        Ok(Box::new(TcpListenerIO::bind(addr).await?) as Box<dyn Listener>)
+    })
 }
 
 fn tcp_connector_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
         let stream = tokio::net::TcpStream::connect(addr).await?;
         let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(stream)?);
         Ok((io, addr))
@@ -1205,17 +1220,21 @@ inventory::submit! {
 }
 
 fn ws_listener_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
-    Box::pin(async move { Ok(Box::new(WsListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+    Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
+        Ok(Box::new(WsListenerIO::bind(addr).await?) as Box<dyn Listener>)
+    })
 }
 
 fn ws_connector_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
         // tokio-tungstenite's connect_async expects a full
         // ws:// URL — synthesize one from the host:port.
         let url = format!("ws://{}/", addr);
@@ -1236,17 +1255,21 @@ inventory::submit! {
 }
 
 fn tls_listener_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
-    Box::pin(async move { Ok(Box::new(TlsListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+    Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
+        Ok(Box::new(TlsListenerIO::bind(addr).await?) as Box<dyn Listener>)
+    })
 }
 
 fn tls_connector_factory(
-    addr: SocketAddr,
+    addr_str: String,
 ) -> Pin<
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str)?;
         install_default_crypto_provider();
         let tcp = tokio::net::TcpStream::connect(addr).await?;
         let _ = tcp.set_nodelay(true);
