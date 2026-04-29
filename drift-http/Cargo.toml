@@ -1,0 +1,63 @@
+[package]
+name = "drift-http"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP over DRIFT — Apache-style file server + Jellyfin-style proxy with pubkey addressing"
+
+[dependencies]
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["full"] }
+
+# hyper 1.x is I/O-agnostic — its server/client builders accept any
+# AsyncRead+AsyncWrite, so we plug a DRIFT stream straight in instead
+# of a TcpStream. No protocol re-implementation needed.
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "server", "client", "client-legacy"] }
+http-body-util = "0.1"
+
+# tower-http's `ServeDir` gives us range requests, MIME types, index
+# resolution, and 404 handling — the Apache-essential file-server
+# behaviors — without writing them by hand.
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+# CLI surface: `drift-http serve --root /var/www`,
+# `drift-http serve --proxy localhost:8096`,
+# `drift-http connect --peer ...`.
+clap = { version = "4", features = ["derive"] }
+
+anyhow = "1"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Same XDG-aware config dir story as drift-mosh; we share the
+# identity file at ~/.config/drift/identity.key so a friend's
+# pubkey is the same across drift-mosh, drift-http, and any
+# future DRIFT-based tools.
+dirs = "5"
+rand = "0.8"
+
+bytes = "1"
+
+# Parse drift://PUBHEX@HOST:PORT/path. The `url` crate does
+# RFC 3986 parsing for custom schemes without surprises.
+url = "2"
+
+# Cross-platform "open URL in default browser." `open::that(url)`
+# does the right thing on macOS (`open`), Linux (`xdg-open`),
+# and Windows (`start`).
+open = "5"
+
+# Bridge-state files: track which connect bridges are alive
+# per peer pubkey, so repeat `drift-http open` calls reuse the
+# same local port.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "drift-http"
+path = "src/bin/drift_http.rs"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
