@@ -1,0 +1,55 @@
+#!/usr/bin/env expect -f
+# Test that drift-mosh works when run over the TCP transport
+# (corporate-firewall fallback path). Same shape as smoke.exp:
+# spawn server bound to tcp://, client dials with tcp:// scheme,
+# echo round-trips.
+
+set timeout 15
+
+set server_log "/tmp/drift-mosh-tcp-server.log"
+exec rm -f $server_log
+
+# `--bind tcp://...` makes the server speak DRIFT-over-TCP. The
+# server-side helper dials a TcpListener and uses the first
+# accepted connection as the primary transport.
+exec sh -c "../../target/release/drift-mosh-server --bind tcp://127.0.0.1:0 --shell /bin/sh >$server_log 2>&1 &"
+
+set banner ""
+for {set i 0} {$i < 20} {incr i} {
+    after 200
+    if {[file exists $server_log]} {
+        set banner [exec cat $server_log]
+        if {[regexp {DRIFT_MOSH_PUB=([a-f0-9]+).*DRIFT_MOSH_BIND=tcp://([0-9\.:]+)} $banner _ pub addr]} {
+            break
+        }
+    }
+}
+
+if {![info exists pub] || ![info exists addr]} {
+    puts "FAIL: server banner never appeared"
+    puts "log so far: $banner"
+    exit 1
+}
+
+puts "server pub=$pub  tcp_addr=$addr"
+
+# Client connects with scheme prefix on --server-addr.
+spawn ../../target/release/drift-mosh-client \
+    --server-pub $pub --server-addr tcp://$addr
+
+expect {
+    -re {[\$#] *} { }
+    timeout       { puts "FAIL: no prompt within timeout"; exit 1 }
+}
+
+send "echo tcp-transport-works\r"
+expect {
+    "tcp-transport-works" { puts "PASS: echo round-trip over TCP" }
+    timeout               { puts "FAIL: echo round-trip timeout"; exit 1 }
+}
+
+send "exit\r"
+expect eof
+catch {exec pkill -f drift-mosh-server}
+puts "ALL GOOD"
+exit 0

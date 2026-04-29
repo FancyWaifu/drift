@@ -25,7 +25,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use drift::identity::Identity;
 use drift::streams::StreamManager;
-use drift::{Direction, Transport, TransportConfig};
+use drift::{Direction, TransportConfig};
+use drift_http::serve_setup::{build_connect_transport, build_serve_transport};
+use drift_http::transport_url::{parse_addr, parse_drift_url, parse_peer, AddrSpec};
 use drift_http::{identity as drift_identity, StreamIo};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -94,9 +96,16 @@ struct InstallHandlerArgs {
 
 #[derive(Args)]
 struct ServeArgs {
-    /// DRIFT bind address. Default `0.0.0.0:9100` (UDP).
-    #[clap(long, default_value = "0.0.0.0:9100")]
-    bind: String,
+    /// DRIFT bind address. Repeatable: pass `--bind` once per
+    /// transport you want to listen on. Schemes: `udp://`,
+    /// `tcp://`. A bare `host:port` defaults to UDP.
+    ///
+    /// Examples:
+    ///   --bind 0.0.0.0:9100                  (UDP only, default)
+    ///   --bind udp://0.0.0.0:9100 \
+    ///   --bind tcp://0.0.0.0:9100            (UDP + TCP fallback)
+    #[clap(long, default_value = "udp://0.0.0.0:9100")]
+    bind: Vec<String>,
 
     /// Path to the identity key. Defaults to the shared
     /// location at `$CONFIG_DIR/drift/identity.key`.
@@ -117,8 +126,11 @@ struct ServeArgs {
 
 #[derive(Args)]
 struct ConnectArgs {
-    /// Server peer in `PUBHEX@IP:PORT` form. Pubkey is 64 hex
-    /// chars (32 bytes).
+    /// Server peer. Forms accepted:
+    ///   PUBHEX@host:port          (UDP, default)
+    ///   PUBHEX@udp://host:port
+    ///   PUBHEX@tcp://host:port
+    /// Pubkey is 64 hex chars (32 bytes).
     #[clap(long)]
     peer: String,
 
@@ -126,8 +138,9 @@ struct ConnectArgs {
     #[clap(long, default_value = "127.0.0.1:9101")]
     listen: String,
 
-    /// DRIFT bind address (where this client's UDP socket sits).
-    /// Default `0.0.0.0:0` (any interface, ephemeral port).
+    /// Local UDP bind for outbound DRIFT (UDP transport only).
+    /// Ignored when --peer uses tcp://. Default `0.0.0.0:0`
+    /// (any interface, ephemeral port).
     #[clap(long, default_value = "0.0.0.0:0")]
     bind: String,
 
@@ -188,10 +201,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .map(|b| format!("{:02x}", b))
         .collect();
 
-    let bind: SocketAddr = args
-        .bind
-        .parse()
-        .with_context(|| format!("--bind {:?} is not a valid ip:port", args.bind))?;
+    // Parse every --bind into an AddrSpec so we know the
+    // transport per-bind. build_serve_transport handles UDP
+    // primary + TCP listener accept-loops + future schemes.
+    let mut binds: Vec<AddrSpec> = Vec::with_capacity(args.bind.len());
+    for b in &args.bind {
+        binds.push(parse_addr(b).with_context(|| format!("parsing --bind {:?}", b))?);
+    }
 
     // accept_any_peer: anyone with our pubkey can connect, like
     // a public website. App-layer auth (or Jellyfin's own login)
@@ -200,16 +216,28 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         accept_any_peer: true,
         ..TransportConfig::default()
     };
-    let transport = Arc::new(
-        Transport::bind_with_config(bind, identity, tcfg)
-            .await
-            .context("DRIFT transport bind failed")?,
-    );
-    let local_addr = transport.local_addr()?;
-    let mgr = StreamManager::bind(transport.clone()).await;
+    let serve = build_serve_transport(&binds, identity, tcfg)
+        .await
+        .context("setting up DRIFT transport")?;
+    let mgr = StreamManager::bind(serve.transport.clone()).await;
 
     println!("DRIFT_HTTP_PUB={}", pub_hex);
-    println!("DRIFT_HTTP_ADDR={}", local_addr);
+    // `DRIFT_HTTP_ADDR=<host:port>` carries the first UDP bind
+    // unprefixed for back-compat with anything that pre-dates
+    // multi-transport (test scripts, the drift-mosh launcher,
+    // etc.). `DRIFT_HTTP_BIND=<scheme>://<addr>` is the new
+    // form, emitted once per bound transport — that's what
+    // multi-transport-aware callers should parse.
+    if let Some((_, primary_udp)) = serve
+        .addrs
+        .iter()
+        .find(|(k, _)| matches!(k, drift_http::transport_url::Transport::Udp))
+    {
+        println!("DRIFT_HTTP_ADDR={}", primary_udp);
+    }
+    for (kind, addr) in &serve.addrs {
+        println!("DRIFT_HTTP_BIND={}://{}", kind.as_str(), addr);
+    }
     if let Some(root) = &args.root {
         println!("DRIFT_HTTP_MODE=serve-files root={}", root.display());
     } else if let Some(up) = &args.proxy {
@@ -218,7 +246,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     println!("DRIFT_HTTP_READY");
     use std::io::Write;
     std::io::stdout().flush().ok();
-    tracing::info!(addr = %local_addr, "drift-http serve ready");
+    tracing::info!(addrs = ?serve.addrs, "drift-http serve ready");
 
     // Accept loop: each new DRIFT stream becomes one HTTP
     // connection (Apache mode) or one tunneled TCP connection
@@ -291,10 +319,10 @@ async fn serve_proxy_on_stream(
 // ─── connect ──────────────────────────────────────────────────────
 
 async fn run_connect(args: ConnectArgs) -> Result<()> {
-    let (server_pub, server_addr) = parse_peer(&args.peer)?;
+    let (server_pub, peer_spec) = parse_peer(&args.peer)?;
 
     let identity = load_identity(args.identity_file)?;
-    let bind: SocketAddr = args
+    let local_udp_bind: SocketAddr = args
         .bind
         .parse()
         .with_context(|| format!("--bind {:?} is not a valid ip:port", args.bind))?;
@@ -303,11 +331,10 @@ async fn run_connect(args: ConnectArgs) -> Result<()> {
         .parse()
         .with_context(|| format!("--listen {:?} is not a valid ip:port", args.listen))?;
 
-    let transport = Arc::new(
-        Transport::bind(bind, identity)
+    let (transport, server_addr) =
+        build_connect_transport(local_udp_bind, &peer_spec, identity)
             .await
-            .with_context(|| format!("binding local UDP socket {}", bind))?,
-    );
+            .context("setting up DRIFT client transport")?;
     let server_peer = transport
         .add_peer(server_pub, server_addr, Direction::Initiator)
         .await
@@ -353,15 +380,23 @@ async fn run_connect(args: ConnectArgs) -> Result<()> {
 // ─── open ─────────────────────────────────────────────────────────
 
 async fn run_open(args: OpenArgs) -> Result<()> {
-    let url = drift_http::url::parse(&args.url).context("parsing drift:// URL")?;
-    let resolved = url
-        .resolve()
+    let url = parse_drift_url(&args.url).context("parsing drift:// URL")?;
+    let target = format!("{}:{}", url.host, url.port);
+    let mut iter = tokio::net::lookup_host(target.as_str())
         .await
-        .with_context(|| format!("resolving {}:{}", url.host, url.port))?;
+        .with_context(|| format!("resolving {}", target))?;
+    let resolved = iter
+        .next()
+        .ok_or_else(|| anyhow!("no addresses for {}", target))?;
 
-    let port = drift_http::bridge::ensure_bridge(&url.pub_hex, &resolved, args.identity_file)
-        .await
-        .context("ensuring background bridge")?;
+    let port = drift_http::bridge::ensure_bridge(
+        &url.pub_hex,
+        &resolved,
+        url.transport,
+        args.identity_file,
+    )
+    .await
+    .context("ensuring background bridge")?;
 
     let http_url = format!("http://127.0.0.1:{}{}", port, url.path_and_query);
 
@@ -673,22 +708,3 @@ fn install_handler_linux(exe: &std::path::Path, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn parse_peer(s: &str) -> Result<([u8; 32], SocketAddr)> {
-    let (pub_str, addr_str) = s
-        .split_once('@')
-        .ok_or_else(|| anyhow!("--peer must be PUBHEX@IP:PORT (got {:?})", s))?;
-    let bytes = hex::decode(pub_str.trim())
-        .with_context(|| format!("--peer pubkey {:?} isn't valid hex", pub_str))?;
-    if bytes.len() != 32 {
-        return Err(anyhow!(
-            "--peer pubkey must be 32 bytes (64 hex chars); got {}",
-            bytes.len()
-        ));
-    }
-    let mut pubkey = [0u8; 32];
-    pubkey.copy_from_slice(&bytes);
-    let addr: SocketAddr = addr_str
-        .parse()
-        .with_context(|| format!("--peer address {:?} isn't ip:port", addr_str))?;
-    Ok((pubkey, addr))
-}

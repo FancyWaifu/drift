@@ -20,7 +20,8 @@ use clap::Parser;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use drift::identity::Identity;
 use drift::streams::StreamManager;
-use drift::{Direction, Transport};
+use drift::Direction;
+use drift_mosh::transport_url::{build_client_transport, parse_addr};
 use drift_mosh::{ClientKey, Ctrl, PTY_CHUNK_SIZE};
 use futures_util::StreamExt;
 use signal_hook::consts::signal::SIGWINCH;
@@ -93,10 +94,11 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     let server_pub = parse_server_pub(&cli.server_pub)?;
-    let server_addr: SocketAddr = cli
-        .server_addr
-        .parse()
-        .with_context(|| format!("--server-addr {:?} is not a valid ip:port", cli.server_addr))?;
+    // --server-addr accepts either a bare host:port (defaults to
+    // UDP) or a scheme-prefixed form (`udp://...` / `tcp://...`).
+    // Picks which wire DRIFT uses to reach the server.
+    let server_spec = parse_addr(&cli.server_addr)
+        .with_context(|| format!("invalid --server-addr {:?}", cli.server_addr))?;
     let session_id = parse_session_id(cli.session_id.as_deref())?;
 
     // Identity: either explicit --identity-file, or the
@@ -111,11 +113,10 @@ async fn run() -> Result<()> {
         .bind
         .parse()
         .with_context(|| format!("--bind {:?} is not a valid ip:port", cli.bind))?;
-    let transport = Arc::new(
-        Transport::bind(bind_addr, identity)
+    let (transport, server_addr) =
+        build_client_transport(bind_addr, &server_spec, identity)
             .await
-            .with_context(|| format!("failed to bind local UDP socket {}", bind_addr))?,
-    );
+            .context("setting up DRIFT client transport")?;
 
     let server_peer = transport
         .add_peer(server_pub, server_addr, Direction::Initiator)
