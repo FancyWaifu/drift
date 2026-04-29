@@ -25,8 +25,10 @@
 //! `TcpPacketIO` for an example.
 
 use async_trait::async_trait;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
@@ -822,9 +824,45 @@ impl Listener for WsListenerIO {
     }
 }
 
-/// Parse a `<scheme>://<host:port>` URL. Bare `host:port` (no
-/// scheme) defaults to `udp` for back-compat. Returns the
-/// scheme as `&str` and the address part as `&str`.
+// ─── Scheme registry ──────────────────────────────────────────────
+//
+// The URL dispatcher is registry-driven rather than match-driven so
+// new transports register themselves at link time and drift core
+// stays additively-extensible. Each adapter file submits a
+// `SchemeRegistration` via `inventory::submit!`; `make_listener`
+// and `make_connector` find it by iterating the inventory at
+// runtime. Drop in a new file → it works. No edits to existing
+// code.
+
+/// Async factory for a server-side `Listener`. Adapters provide
+/// one of these via `SchemeRegistration`. The pinned-Box return
+/// type is what lets us store these as plain `fn` pointers (and
+/// therefore as values inside an `inventory::submit!` block).
+pub type ListenerFactory =
+    fn(SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>>;
+
+/// Async factory for a client-side connector. Returns the
+/// connected `PacketIO` plus the remote `SocketAddr` to pass to
+/// `Transport::add_peer`.
+pub type ConnectorFactory = fn(
+    SocketAddr,
+) -> Pin<
+    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
+>;
+
+/// One adapter's registration in the URL dispatcher. Each
+/// adapter submits exactly one of these; the `scheme` field
+/// must be unique across all submissions.
+pub struct SchemeRegistration {
+    pub scheme: &'static str,
+    pub listener: ListenerFactory,
+    pub connector: ConnectorFactory,
+}
+
+inventory::collect!(SchemeRegistration);
+
+/// Parse `<scheme>://<host:port>` URL. Bare `host:port` (no
+/// scheme) defaults to `udp` for back-compat.
 fn split_url(url: &str) -> io::Result<(&str, &str)> {
     if let Some(idx) = url.find("://") {
         Ok((&url[..idx], &url[idx + 3..]))
@@ -833,8 +871,15 @@ fn split_url(url: &str) -> io::Result<(&str, &str)> {
     }
 }
 
-/// Build a `Listener` from a URL. New transports plug in by
-/// adding an arm to this match.
+fn lookup_scheme(scheme: &str) -> Option<&'static SchemeRegistration> {
+    inventory::iter::<SchemeRegistration>
+        .into_iter()
+        .find(|r| r.scheme == scheme)
+}
+
+/// Build a `Listener` from a URL. Adapter dispatch is by
+/// runtime registry — no edits to this function are needed
+/// when a new transport is added.
 pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
     let (scheme, addr_str) = split_url(url)?;
     let addr: SocketAddr = addr_str.parse().map_err(|e| {
@@ -843,28 +888,23 @@ pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
             format!("not a valid host:port {:?}: {}", addr_str, e),
         )
     })?;
-    match scheme {
-        "udp" => Ok(Box::new(UdpListenerIO::bind(addr).await?)),
-        "tcp" => Ok(Box::new(TcpListenerIO::bind(addr).await?)),
-        "ws" => Ok(Box::new(WsListenerIO::bind(addr).await?)),
-        other => Err(io::Error::new(
+    let reg = lookup_scheme(scheme).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unsupported listener scheme {:?}", other),
-        )),
-    }
+            format!(
+                "no listener registered for scheme {:?} (registered: {:?})",
+                scheme,
+                registered_schemes()
+            ),
+        )
+    })?;
+    (reg.listener)(addr).await
 }
 
 /// Client-side URL dispatch. Returns the connected `PacketIO`
 /// plus the remote `SocketAddr` that the application should use
-/// when calling `transport.add_peer(...)`.
-///
-/// * `udp://host:port` — binds an ephemeral local UDP socket
-///   and returns its `UdpPacketIO`. The remote addr is
-///   `host:port`.
-/// * `tcp://host:port` — dials the remote TCP listener, wraps
-///   the connected stream in `TcpPacketIO`. The remote addr
-///   is the dialed peer (mostly informational since TCP is
-///   point-to-point).
+/// when calling `transport.add_peer(...)`. Adapter dispatch is
+/// by runtime registry — same plug-and-play story as listeners.
 pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     let (scheme, addr_str) = split_url(url)?;
     let addr: SocketAddr = addr_str.parse().map_err(|e| {
@@ -873,32 +913,114 @@ pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketA
             format!("not a valid host:port {:?}: {}", addr_str, e),
         )
     })?;
-    match scheme {
-        "udp" => {
-            let sock = UdpSocket::bind("0.0.0.0:0").await?;
-            let io: Arc<dyn PacketIO> = Arc::new(UdpPacketIO::new(Arc::new(sock)));
-            Ok((io, addr))
-        }
-        "tcp" => {
-            let stream = tokio::net::TcpStream::connect(addr).await?;
-            let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(stream)?);
-            Ok((io, addr))
-        }
-        "ws" => {
-            // tokio-tungstenite's connect_async expects a full
-            // ws:// URL — synthesize one from the host:port.
-            // The trailing slash is conventional for WS endpoints
-            // and matches what the server's accept_async tolerates.
-            let url = format!("ws://{}/", addr);
-            let (ws, _resp) = tokio_tungstenite::connect_async(&url)
-                .await
-                .map_err(|e| io::Error::other(e))?;
-            let io: Arc<dyn PacketIO> = Arc::new(WsPacketIO::new(ws, addr));
-            Ok((io, addr))
-        }
-        other => Err(io::Error::new(
+    let reg = lookup_scheme(scheme).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unsupported connector scheme {:?}", other),
-        )),
+            format!(
+                "no connector registered for scheme {:?} (registered: {:?})",
+                scheme,
+                registered_schemes()
+            ),
+        )
+    })?;
+    (reg.connector)(addr).await
+}
+
+/// All schemes currently registered. Useful for diagnostics
+/// (printed in the error when an unknown scheme arrives).
+pub fn registered_schemes() -> Vec<&'static str> {
+    inventory::iter::<SchemeRegistration>
+        .into_iter()
+        .map(|r| r.scheme)
+        .collect()
+}
+
+// ─── Built-in adapter registrations ───────────────────────────────
+//
+// The three adapters that ship in drift core register themselves
+// here. New built-ins follow the same pattern. External crates
+// can add their own via the same `inventory::submit!` macro from
+// anywhere — even outside this file or this crate.
+
+fn udp_listener_factory(
+    addr: SocketAddr,
+) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move { Ok(Box::new(UdpListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+}
+
+fn udp_connector_factory(
+    addr: SocketAddr,
+) -> Pin<
+    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
+> {
+    Box::pin(async move {
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        let io: Arc<dyn PacketIO> = Arc::new(UdpPacketIO::new(Arc::new(sock)));
+        Ok((io, addr))
+    })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "udp",
+        listener: udp_listener_factory,
+        connector: udp_connector_factory,
+    }
+}
+
+fn tcp_listener_factory(
+    addr: SocketAddr,
+) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move { Ok(Box::new(TcpListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+}
+
+fn tcp_connector_factory(
+    addr: SocketAddr,
+) -> Pin<
+    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
+> {
+    Box::pin(async move {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(stream)?);
+        Ok((io, addr))
+    })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "tcp",
+        listener: tcp_listener_factory,
+        connector: tcp_connector_factory,
+    }
+}
+
+fn ws_listener_factory(
+    addr: SocketAddr,
+) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move { Ok(Box::new(WsListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+}
+
+fn ws_connector_factory(
+    addr: SocketAddr,
+) -> Pin<
+    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
+> {
+    Box::pin(async move {
+        // tokio-tungstenite's connect_async expects a full
+        // ws:// URL — synthesize one from the host:port.
+        let url = format!("ws://{}/", addr);
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .map_err(|e| io::Error::other(e))?;
+        let io: Arc<dyn PacketIO> = Arc::new(WsPacketIO::new(ws, addr));
+        Ok((io, addr))
+    })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "ws",
+        listener: ws_listener_factory,
+        connector: ws_connector_factory,
     }
 }
