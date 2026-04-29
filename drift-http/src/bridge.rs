@@ -12,6 +12,7 @@
 //! "Alive" is determined by TCP-poking the listed port — the pid
 //! check is informational only (PIDs get reused).
 
+use crate::transport_url::Transport as TpKind;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -47,16 +48,24 @@ fn state_path(pub_hex: &str) -> Result<PathBuf> {
 /// Returns the local TCP port of a healthy bridge to the given
 /// peer. Reuses an existing bridge if one is live; otherwise
 /// spawns a fresh one and returns its port.
+///
+/// `transport` picks which DRIFT wire to reach the peer over —
+/// `udp` (default) or `tcp` (corporate/firewalled networks).
 pub async fn ensure_bridge(
     pub_hex: &str,
     peer_addr: &SocketAddr,
+    transport: TpKind,
     identity_file: Option<PathBuf>,
 ) -> Result<u16> {
     let path = state_path(pub_hex)?;
+    // The state file's peer_addr key includes the transport so a
+    // pubkey reached over both UDP and TCP gets two distinct
+    // bridges instead of one bridge masquerading for the other.
+    let peer_addr_keyed = format!("{}://{}", transport.as_str(), peer_addr);
 
     if let Ok(state) = read_state(&path) {
         if state.peer_pub_hex == pub_hex
-            && state.peer_addr == peer_addr.to_string()
+            && state.peer_addr == peer_addr_keyed
             && tcp_alive(state.port).await
         {
             tracing::debug!(port = state.port, "reusing existing bridge");
@@ -67,13 +76,13 @@ pub async fn ensure_bridge(
         let _ = std::fs::remove_file(&path);
     }
 
-    let port = spawn_bridge(pub_hex, peer_addr, identity_file).await?;
+    let port = spawn_bridge(pub_hex, peer_addr, transport, identity_file).await?;
     write_state(
         &path,
         &BridgeState {
             port,
             pid: std::process::id(),
-            peer_addr: peer_addr.to_string(),
+            peer_addr: peer_addr_keyed,
             peer_pub_hex: pub_hex.to_string(),
         },
     )?;
@@ -99,14 +108,20 @@ async fn tcp_alive(port: u16) -> bool {
 async fn spawn_bridge(
     pub_hex: &str,
     peer_addr: &SocketAddr,
+    transport: TpKind,
     identity_file: Option<PathBuf>,
 ) -> Result<u16> {
     let exe = std::env::current_exe().context("locating drift-http binary")?;
 
     let mut cmd = Command::new(&exe);
+    // Forward the transport choice to the spawned `connect`.
+    // The scheme prefix is parsed by transport_url::parse_peer
+    // on the other side; sending it always (rather than only for
+    // tcp) keeps the command line self-describing.
+    let peer_arg = format!("{}@{}://{}", pub_hex, transport.as_str(), peer_addr);
     cmd.arg("connect")
         .arg("--peer")
-        .arg(format!("{}@{}", pub_hex, peer_addr))
+        .arg(peer_arg)
         .arg("--listen")
         .arg("127.0.0.1:0");
     if let Some(p) = identity_file {

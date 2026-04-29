@@ -24,12 +24,12 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use drift::identity::Identity;
 use drift::streams::{Stream, StreamManager};
-use drift::{Transport, TransportConfig};
+use drift::TransportConfig;
+use drift_mosh::transport_url::{build_server_transport, parse_addr};
 use drift_mosh::{BannerLine, Config, Ctrl, Scrollback, PTY_CHUNK_SIZE, SCROLLBACK_BYTES};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use rand::RngCore;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -108,19 +108,27 @@ async fn main() -> Result<()> {
         accept_any_peer: true,
         ..TransportConfig::default()
     };
-    let bind_sock: SocketAddr = bind_addr.parse().context("invalid --bind address")?;
-    let transport = Arc::new(
-        Transport::bind_with_config(bind_sock, identity, tcfg)
-            .await
-            .context("DRIFT transport bind failed")?,
-    );
-    let local_addr = transport.local_addr()?;
+    // --bind accepts a scheme prefix so the same drift-mosh-server
+    // can run over UDP (default) or TCP (firewalled networks).
+    // Bare `host:port` keeps back-compat with existing scripts and
+    // launcher session files.
+    let bind_spec = parse_addr(&bind_addr).context("invalid --bind")?;
+    let (transport, local_addr) = build_server_transport(&bind_spec, identity, tcfg)
+        .await
+        .context("DRIFT transport setup failed")?;
 
     // Banner: one key=value per line, parseable by the
     // `drift-mosh` launcher.
     println!("{}{}", BannerLine::Pub.prefix(), pub_hex);
     println!("{}{}", BannerLine::PeerId.prefix(), peer_id_hex);
+    // Bare addr line for back-compat with the existing launcher
+    // (and the plain `udp://` scheme assumption baked into older
+    // session files).
     println!("{}{}", BannerLine::Addr.prefix(), local_addr);
+    // New scheme-qualified line. Multi-transport launchers can
+    // parse this to know which DRIFT wire to use; the bare ADDR
+    // line above stays for the default-UDP path.
+    println!("DRIFT_MOSH_BIND={}://{}", bind_spec.transport.as_str(), local_addr);
     println!("{}", BannerLine::Ready.prefix());
     use std::io::Write;
     std::io::stdout().flush().ok();
