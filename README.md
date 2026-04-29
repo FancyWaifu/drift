@@ -320,7 +320,7 @@ drift relay                               # run a mesh relay node
 | UDP | ✅ | ❌ (browser sandbox) | ✅ `udp://` | ✅ |
 | TCP | ✅ | ❌ (browser sandbox) | ✅ `tcp://` | ✅ |
 | TLS over TCP | ✅ | ❌ (browser sandbox) | ✅ `tls://` | ✅ (`multi_transport_4way.sh`) |
-| Tor onion service | ✅ (opt-in via `--features onion`) | ❌ | ✅ `onion://` | Manual smoke test (`onion_self_dial`, ~3-5 min, requires internet) |
+| Tor onion service | ✅ (opt-in via `--features onion`) | ❌ | ✅ `onion://` | ✅ self-dial through live Tor in 117s (`onion_self_dial`, gated `#[ignore]`) |
 | WebSocket | ✅ | ✅ | ✅ `ws://` | ✅ WASM↔native + mesh-through-bridge to any medium |
 | WebRTC data channel | ✅ | ✅ | ❌ (signaling out-of-band) | Native↔native ✅ (`webrtc_adapter` test); browser↔native needs app-supplied SDP signaling |
 | WebTransport | ✅ | ✅ | ❌ (cert handoff out-of-band) | Native↔native ✅ (`webtransport_adapter` test); browser↔native ships and is cert-hash-pinnable |
@@ -340,9 +340,10 @@ Extensive coverage across 60+ integration test files, drift-core unit tests, and
 - **Per-adapter end-to-end**: every `PacketIO` impl has a dedicated test (`tcp_transport`, `webtransport_adapter`, `webrtc_adapter`, `four_medium_bridge`, etc.)
 - **Restart migration**: drift-mosh client SIGKILL'd on one IP, reconnects on another, scrollback intact
 - **Mesh mobility**: post-handshake beacon discipline, stale-route invalidation on send failure, peer self-migration at equal cost
-- **WASM interop**: `drift-wasm-test/` — compiled WASM handshakes with native bridge + mesh-routes to a UDP peer
+- **WASM interop**: `drift-wasm-test/` — compiled WASM handshakes with native bridge + mesh-routes to a UDP peer. Confirmed: bridge log shows `recv from peer=<wasm-id> 16B: "hello from wasm!"` (test-wasm) and the cross-medium UDP peer's log shows `RECV <- ?peer=<wasm-id>: hello-from-wasm-through-bridge-to-udp-peer` (test-mesh — bridge never sees plaintext).
+- **Onion over Tor**: `drift/tests/onion_self_dial.rs` — gated `#[ignore]`, opt-in via `--features onion`. Hosts an onion service in-process, retrieves its `<base32>.onion` address, dials it back through the live Tor network, runs a full handshake + DATA exchange. Confirmed end-to-end in 117s on a real network.
 - **Multi-bridge Docker mesh**: `docker/two-bridge/` — 12 containers, 90 directed messages, 5 of which cross between two bridges
-- **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh`
+- **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh` / `multi_transport_4way.sh` (4/4 transports including TLS pass)
 
 ```bash
 cargo test                # full Rust suite
@@ -350,6 +351,7 @@ cargo bench               # throughput benchmarks
 ./demo-shell.sh           # live multi-IP rotation + multi-identity demo (needs lo0 aliases)
 docker/two-bridge/run.sh  # 12-container two-bridge mesh demo
 cd drift-wasm-test && npm install && node test-mesh.mjs ...  # WASM↔native E2E
+cargo test --features onion --release --test onion_self_dial -- --ignored --nocapture  # DRIFT over live Tor (~3 min)
 ```
 
 ## Performance
