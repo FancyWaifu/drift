@@ -26,6 +26,18 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Observability** — 30+ runtime metrics. Structured NDJSON qlog. XOR-based FEC for lossy links.
 
+## Tools built on DRIFT
+
+End-user binaries shipped from this repo. Each has its own README with install + usage.
+
+| Tool | What it is | Install |
+|---|---|---|
+| **[drift-mosh](drift-mosh/README.md)** | Mobile-shell replacement (mosh-style) — survives wifi-to-cellular, laptop suspend, client crash. UDP / TCP / WebSocket. | `cargo install --path drift-mosh --bin drift-mosh` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
+| **[drift-http](drift-http/README.md)** | Apache-style file server + Jellyfin-style proxy + system-wide `drift://` URL handler. Pubkey-addressed; no DDNS, no reverse proxy, no TLS cert. | `cargo install --path drift-http --bin drift-http` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
+| **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`. | `cargo install --path drift` |
+| **[drift-bench](drift-bench/)** | Cross-protocol benchmark: DRIFT vs QUIC vs WireGuard, identical workloads. | `cargo build --release -p drift-bench` |
+| **[drift-ffi](drift-ffi/README.md)** | C ABI — call DRIFT from C, C++, Python, Go, Swift, anything. | `cargo build --release -p drift-ffi` |
+
 ## Workspace layout
 
 ```
@@ -42,7 +54,9 @@ drift/           native tokio-based stack built on drift-core
   src/
     lib.rs           Transport re-exports
     main.rs          `drift` CLI (keygen, info, send, listen, relay)
-    io.rs            PacketIO trait + UDP / TCP / WebSocket / WebRTC / WebTransport / Memory adapters
+    io.rs            PacketIO + Listener traits, UDP / TCP / WebSocket / WebRTC /
+                       WebTransport / Memory adapters, inventory-based scheme registry
+                       (Transport::bind_url / connect_url / add_listener)
     streams.rs       Reliable streams, NewReno + BBR congestion control
     multipath.rs     RTT-weighted path selection
     transport/
@@ -65,6 +79,18 @@ drift-wasm/      browser-side stack, same drift-core compiled to wasm32
     wire_ws.rs            WebSocket adapter
     wire_webrtc.rs        Browser WebRTC RTCDataChannel adapter
     wire_webtransport.rs  Browser WebTransport HTTP/3 adapter (cert-hash pinnable)
+
+drift-mosh/      Mobile-shell replacement built on DRIFT. Multi-transport CLI,
+                   restart migration, scrollback reattach, TOFU known-hosts.
+drift-http/      HTTP-over-DRIFT: Apache-style file server, opaque proxy,
+                   drift:// URL handler with macOS / Linux registration.
+drift-bench/     Cross-protocol benchmark harness (DRIFT vs QUIC vs WireGuard).
+drift-ffi/       C ABI for invoking DRIFT from C / Python / Go / Swift / anywhere
+                   that speaks the C ABI.
+drift-wasm-test/ Node harness verifying drift-wasm interops with the native stack
+                   over WebSocket (and through a bridge to a UDP peer).
+docker/two-bridge/ 12-container demo: 2 DRIFT bridges + 10 clients (5 per bridge),
+                   end-to-end mesh routing across the bridge link.
 ```
 
 ## Quick Start (native)
@@ -196,6 +222,7 @@ drift relay                               # run a mesh relay node
 - **`drift-shell`** (`drift/examples/drift_shell.rs`) — tiny command server (`time`, `count`, `whoami`, `echo`, …) reachable over DRIFT. Used by `demo-shell.sh` to demonstrate server mobility: one identity migrates across IPs, clients keep reaching it by peer_id.
 - **`drift-kv`** (`drift/examples/drift_kv.rs`) — port of the Tokio team's `mini-redis` to run over DRIFT. Implements the Redis RESP protocol (PING / GET / SET / DEL) with the bridge accepting clients on UDP / TCP / WS / WebRTC simultaneously.
 - **`drift-medium-demo`** (`drift/examples/medium_demo.rs`) — three distinct source IPs on three mediums bridged end to end.
+- **`two-bridge-demo`** (`drift/examples/two_bridge_demo.rs`, run via [`docker/two-bridge/run.sh`](docker/two-bridge/run.sh)) — 12 Docker containers: 2 DRIFT bridges + 10 clients (5 connected to each bridge). 90 directed messages all-to-all; cross-bridge sends prove mesh routing forwards through chained bridges with E2E AEAD intact.
 - **`drift-wasm-test/`** — end-to-end Node harness that loads the compiled WASM and verifies (a) a direct DRIFT handshake against a native bridge over WebSocket, and (b) full mesh routing — a browser-equivalent client sending to a UDP peer through the bridge with DRIFT's E2E crypto intact.
 
 ## Wire Format
@@ -222,22 +249,25 @@ External crates can register their own adapters via `inventory::submit!` from an
 
 ## Testing
 
-~206 tests across 61 integration files + 43 drift-core + 162 drift lib tests:
+Extensive coverage across 60+ integration test files, drift-core unit tests, and tool-level e2e tests:
 
 - **Correctness**: wire format KAT, header proptests, handshake state machine, rekey, resumption, route migration at equal cost
 - **Security**: 17+ attack scenarios (replay, hijack, amplification, flood, beacon poisoning, weak keys)
 - **Reliability**: 10–65% packet loss, 2s RTT satellite links, 10 Kbps bandwidth caps, intermittent connectivity
 - **Scale**: 1000 concurrent handshakes, 64-client fan-in, 5-node full mesh
-- **Cross-medium**: four-medium bridge (UDP + TCP + Memory + WebSocket) with streams, datagrams, and coalescing; five-medium extended via WebRTC + WebTransport through the `drift-chat` bridge
+- **Cross-medium full mesh**: `loopback_full_mesh.rs` — 4 peers on 127.0.0.1–.4, every message lands across UDP / TCP / WebSocket / WebRTC / WebTransport / mixed-protocol topologies
+- **Per-adapter end-to-end**: every `PacketIO` impl has a dedicated test (`tcp_transport`, `webtransport_adapter`, `webrtc_adapter`, `four_medium_bridge`, etc.)
+- **Restart migration**: drift-mosh client SIGKILL'd on one IP, reconnects on another, scrollback intact
 - **Mesh mobility**: post-handshake beacon discipline, stale-route invalidation on send failure, peer self-migration at equal cost
 - **WASM interop**: `drift-wasm-test/` — compiled WASM handshakes with native bridge + mesh-routes to a UDP peer
-- **WebTransport**: `drift/tests/webtransport_adapter.rs` — native↔native handshake + DATA round-trip over QUIC datagrams
-- **Docker**: 30+ compose scenarios (mesh, NAT, chaos, extreme loss)
+- **Multi-bridge Docker mesh**: `docker/two-bridge/` — 12 containers, 90 directed messages, 5 of which cross between two bridges
+- **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh`
 
 ```bash
-cargo test                # full suite
+cargo test                # full Rust suite
 cargo bench               # throughput benchmarks
 ./demo-shell.sh           # live multi-IP rotation + multi-identity demo (needs lo0 aliases)
+docker/two-bridge/run.sh  # 12-container two-bridge mesh demo
 cd drift-wasm-test && npm install && node test-mesh.mjs ...  # WASM↔native E2E
 ```
 
@@ -310,6 +340,22 @@ The bench suite also includes `cargo bench --bench throughput` (header encode/de
 | **Transport mediums** | Any | Any (via PacketIO trait): UDP, TCP, WebSocket, WebRTC, WebTransport, memory, serial-ready |
 | **Browser client** | Third-party only | First-party WASM (drift-wasm), same wire protocol |
 | **Implementation** | Python | Rust (+ WASM) |
+
+## Releases
+
+Tagged releases of the user-facing tools fire a GitHub Actions matrix that builds for macOS arm64 + amd64 and Linux amd64 + arm64:
+
+- **`drift-mosh-vX.Y.Z`** → [`Release drift-mosh`](.github/workflows/release-drift-mosh.yml) → tarballs at [github.com/FancyWaifu/drift/releases](https://github.com/FancyWaifu/drift/releases)
+- **`drift-http-vX.Y.Z`** → [`Release drift-http`](.github/workflows/release-drift-http.yml) → same matrix, same release page
+
+```bash
+TARGET=aarch64-apple-darwin   # pick yours
+TAG=drift-mosh-v0.1.0
+curl -L -o pkg.tar.gz \
+  https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-mosh-$TAG-$TARGET.tar.gz
+tar xzf pkg.tar.gz
+sudo mv drift-mosh-$TAG-$TARGET/drift-mosh* /usr/local/bin/
+```
 
 ## Inspiration
 
