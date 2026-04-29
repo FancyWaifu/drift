@@ -784,6 +784,44 @@ impl Listener for TcpListenerIO {
     }
 }
 
+/// WebSocket listener — wraps a `tokio::net::TcpListener` and
+/// runs the HTTP→WebSocket upgrade handshake on each accepted
+/// connection before handing the resulting `WsPacketIO` back.
+/// Multi-shot.
+///
+/// Useful as a port-443 fallback transport: WebSocket-over-TCP
+/// gets through HTTP-only proxies and corporate firewalls that
+/// block UDP and even raw TCP on non-HTTP ports. To clients in
+/// such environments, drift-http traffic is indistinguishable
+/// from a normal HTTPS WebSocket app.
+pub struct WsListenerIO {
+    listener: tokio::net::TcpListener,
+}
+
+impl WsListenerIO {
+    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Ok(Self { listener })
+    }
+}
+
+#[async_trait]
+impl Listener for WsListenerIO {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+    fn is_multi(&self) -> bool {
+        true
+    }
+    async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
+        let (stream, peer) = self.listener.accept().await?;
+        let ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .map_err(|e| io::Error::other(e))?;
+        Ok(Arc::new(WsPacketIO::new(ws, peer)))
+    }
+}
+
 /// Parse a `<scheme>://<host:port>` URL. Bare `host:port` (no
 /// scheme) defaults to `udp` for back-compat. Returns the
 /// scheme as `&str` and the address part as `&str`.
@@ -808,6 +846,7 @@ pub async fn make_listener(url: &str) -> io::Result<Box<dyn Listener>> {
     match scheme {
         "udp" => Ok(Box::new(UdpListenerIO::bind(addr).await?)),
         "tcp" => Ok(Box::new(TcpListenerIO::bind(addr).await?)),
+        "ws" => Ok(Box::new(WsListenerIO::bind(addr).await?)),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported listener scheme {:?}", other),
@@ -843,6 +882,18 @@ pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketA
         "tcp" => {
             let stream = tokio::net::TcpStream::connect(addr).await?;
             let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(stream)?);
+            Ok((io, addr))
+        }
+        "ws" => {
+            // tokio-tungstenite's connect_async expects a full
+            // ws:// URL — synthesize one from the host:port.
+            // The trailing slash is conventional for WS endpoints
+            // and matches what the server's accept_async tolerates.
+            let url = format!("ws://{}/", addr);
+            let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|e| io::Error::other(e))?;
+            let io: Arc<dyn PacketIO> = Arc::new(WsPacketIO::new(ws, addr));
             Ok((io, addr))
         }
         other => Err(io::Error::new(

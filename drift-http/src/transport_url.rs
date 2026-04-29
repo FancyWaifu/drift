@@ -23,19 +23,23 @@ use anyhow::{anyhow, Context, Result};
 /// Identifies the DRIFT wire to talk to a peer over. Only
 /// retained here so the URL handler's logged metadata is
 /// human-readable; real adapter selection happens in
-/// `drift::io::make_connector` / `make_listener`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Transport {
-    Udp,
-    Tcp,
-}
+/// `drift::io::make_connector` / `make_listener`. Stored as a
+/// short string rather than a closed enum so we don't need to
+/// gate-keep new transports — when drift::io grows a new
+/// scheme, the URL handler picks it up automatically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transport(pub String);
 
 impl Transport {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Transport::Udp => "udp",
-            Transport::Tcp => "tcp",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn udp() -> Self {
+        Transport("udp".to_string())
+    }
+    pub fn tcp() -> Self {
+        Transport("tcp".to_string())
     }
 }
 
@@ -58,16 +62,16 @@ pub fn split_peer(s: &str) -> Result<([u8; 32], String, Transport)> {
     let mut pubkey = [0u8; 32];
     pubkey.copy_from_slice(&bytes);
 
+    // Trust drift::io's URL dispatcher to validate the scheme.
+    // We only split it out here so callers can log/route by
+    // human-readable transport name; if drift gains a new
+    // scheme (ws, webrtc, …), this parser doesn't need to be
+    // edited.
     let (transport, url) = if let Some(idx) = rest.find("://") {
-        let scheme = &rest[..idx];
-        let t = match scheme.to_ascii_lowercase().as_str() {
-            "udp" => Transport::Udp,
-            "tcp" => Transport::Tcp,
-            other => return Err(anyhow!("unknown transport {:?}", other)),
-        };
-        (t, rest.to_string())
+        let scheme = rest[..idx].to_ascii_lowercase();
+        (Transport(scheme), rest.to_string())
     } else {
-        (Transport::Udp, format!("udp://{}", rest))
+        (Transport::udp(), format!("udp://{}", rest))
     };
     Ok((pubkey, url, transport))
 }
@@ -96,22 +100,17 @@ impl DriftUrl {
 pub fn parse_drift_url(input: &str) -> Result<DriftUrl> {
     let parsed = ::url::Url::parse(input).context("parsing as URL")?;
     let scheme = parsed.scheme();
+    // `drift://...`         → UDP (back-compat default)
+    // `drift+<wire>://...`  → that wire (udp / tcp / ws / …),
+    //                          validated downstream by
+    //                          `drift::io::make_connector`.
     let transport = if scheme == "drift" {
-        Transport::Udp
+        Transport::udp()
     } else if let Some(suffix) = scheme.strip_prefix("drift+") {
-        match suffix.to_ascii_lowercase().as_str() {
-            "udp" => Transport::Udp,
-            "tcp" => Transport::Tcp,
-            _ => {
-                return Err(anyhow!(
-                    "scheme {:?} is not a recognized DRIFT transport",
-                    scheme
-                ));
-            }
-        }
+        Transport(suffix.to_ascii_lowercase())
     } else {
         return Err(anyhow!(
-            "expected scheme `drift://` or `drift+<transport>://`, got {:?}",
+            "expected scheme `drift://` or `drift+<wire>://`, got {:?}",
             scheme
         ));
     };
@@ -167,28 +166,28 @@ mod tests {
     #[test]
     fn split_peer_no_scheme_is_udp() {
         let (_, url, t) = split_peer(&format!("{}@1.2.3.4:9100", hex64())).unwrap();
-        assert_eq!(t, Transport::Udp);
+        assert_eq!(t, Transport::udp());
         assert_eq!(url, "udp://1.2.3.4:9100");
     }
 
     #[test]
     fn split_peer_explicit_tcp() {
         let (_, url, t) = split_peer(&format!("{}@tcp://1.2.3.4:9100", hex64())).unwrap();
-        assert_eq!(t, Transport::Tcp);
+        assert_eq!(t, Transport::tcp());
         assert_eq!(url, "tcp://1.2.3.4:9100");
     }
 
     #[test]
     fn drift_url_default_udp() {
         let u = parse_drift_url(&format!("drift://{}@host:9100/p", hex64())).unwrap();
-        assert_eq!(u.transport, Transport::Udp);
+        assert_eq!(u.transport, Transport::udp());
         assert_eq!(u.connect_url(), "udp://host:9100");
     }
 
     #[test]
     fn drift_url_explicit_tcp() {
         let u = parse_drift_url(&format!("drift+tcp://{}@host:9100/", hex64())).unwrap();
-        assert_eq!(u.transport, Transport::Tcp);
+        assert_eq!(u.transport, Transport::tcp());
         assert_eq!(u.connect_url(), "tcp://host:9100");
     }
 }
