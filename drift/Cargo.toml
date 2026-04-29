@@ -155,6 +155,10 @@ name = "drift-mesh-node-v2"
 path = "examples/mesh_node.rs"
 
 [[example]]
+name = "two-bridge-demo"
+path = "examples/two_bridge_demo.rs"
+
+[[example]]
 name = "drift-churn-node"
 path = "examples/churn_node.rs"
 

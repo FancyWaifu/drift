@@ -1,0 +1,103 @@
+# Two-bridge mesh: bridge-a and bridge-b on the same Docker
+# bridge network, plus 10 clients (5 connected to bridge-a, 5
+# connected to bridge-b). Each client sends a unique message
+# to every other client; cross-bridge sends prove that DRIFT's
+# mesh routing forwards between two relay nodes.
+#
+# Usage: from the repo root,
+#   docker compose -f docker/two-bridge/docker-compose.yml \
+#       --project-directory . up --build --abort-on-container-exit
+# (--project-directory . so the build context is the workspace
+# root, since the Dockerfile pulls the whole workspace.)
+
+networks:
+  drift-net:
+    driver: bridge
+
+x-base: &base
+  build:
+    # Build context is the workspace root, two levels up
+    # from this compose file. Dockerfile path is relative to
+    # that context.
+    context: ../..
+    dockerfile: docker/two-bridge/Dockerfile
+  networks: [drift-net]
+
+services:
+  bridge-a:
+    <<: *base
+    container_name: bridge-a
+    environment:
+      NODE_ROLE: bridge
+      NODE_INDEX: "0"
+
+  bridge-b:
+    <<: *base
+    container_name: bridge-b
+    environment:
+      NODE_ROLE: bridge
+      NODE_INDEX: "1"
+
+  # ─── clients on bridge-a (clients 1-5, indices 2-6) ─────────────
+
+  client-1:
+    <<: *base
+    container_name: client-1
+    environment: { NODE_ROLE: client, NODE_INDEX: "2" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-2:
+    <<: *base
+    container_name: client-2
+    environment: { NODE_ROLE: client, NODE_INDEX: "3" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-3:
+    <<: *base
+    container_name: client-3
+    environment: { NODE_ROLE: client, NODE_INDEX: "4" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-4:
+    <<: *base
+    container_name: client-4
+    environment: { NODE_ROLE: client, NODE_INDEX: "5" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-5:
+    <<: *base
+    container_name: client-5
+    environment: { NODE_ROLE: client, NODE_INDEX: "6" }
+    depends_on: [bridge-a, bridge-b]
+
+  # ─── clients on bridge-b (clients 6-10, indices 7-11) ───────────
+
+  client-6:
+    <<: *base
+    container_name: client-6
+    environment: { NODE_ROLE: client, NODE_INDEX: "7" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-7:
+    <<: *base
+    container_name: client-7
+    environment: { NODE_ROLE: client, NODE_INDEX: "8" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-8:
+    <<: *base
+    container_name: client-8
+    environment: { NODE_ROLE: client, NODE_INDEX: "9" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-9:
+    <<: *base
+    container_name: client-9
+    environment: { NODE_ROLE: client, NODE_INDEX: "10" }
+    depends_on: [bridge-a, bridge-b]
+
+  client-10:
+    <<: *base
+    container_name: client-10
+    environment: { NODE_ROLE: client, NODE_INDEX: "11" }
+    depends_on: [bridge-a, bridge-b]
