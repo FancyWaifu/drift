@@ -62,10 +62,33 @@ Options:
   -p, --ssh-port <PORT>       SSH port [default: 22]
       --no-ssh                Skip SSH launch; connect to a server you started manually
       --server-pub <HEX>      Server pubkey (required with --no-ssh)
-      --server-addr <IP:PORT> Server address (required with --no-ssh)
+      --server-addr <ADDR>    Server address. Bare host:port = UDP (default).
+                              Scheme prefix selects transport:
+                                udp://host:port  (UDP, the default)
+                                tcp://host:port  (TCP — firewalled networks)
+                                ws://host:port   (WebSocket)
       --remote-server-path <PATH>
                               Path to drift-mosh-server on the remote host
 ```
+
+### Transport selection
+
+`drift-mosh-server` and `drift-mosh-client` both accept scheme-prefixed addresses, so you can pick whichever wire works for the network you're on. UDP is the default and fastest; TCP/WebSocket are firewall-friendly fallbacks that get through corporate networks blocking UDP:
+
+```bash
+# UDP (default, lowest latency):
+drift-mosh-server --bind 0.0.0.0:9400
+
+# TCP (corporate firewall fallback):
+drift-mosh-server --bind tcp://0.0.0.0:9400
+drift-mosh-client --server-pub <pub> --server-addr tcp://host:9400
+
+# WebSocket (port-443 friendly, gets through HTTP-only proxies):
+drift-mosh-server --bind ws://0.0.0.0:443
+drift-mosh-client --server-pub <pub> --server-addr ws://host:443
+```
+
+A single drift-mosh-server runs over one transport at a time — sessions are point-to-point, so simultaneous-multi-bind isn't useful here. (drift-http needs that pattern; drift-mosh doesn't.) The transport choice is in the URL the launcher persists, so `drift-mosh user@host` Just Works once the server is configured.
 
 ### Config file
 
@@ -92,7 +115,9 @@ bind_addr = "0.0.0.0:0"                    # what the remote server binds to (0 
 | Survives laptop suspend | ❌ | ✅ |
 | Reattach after client crash | ❌ | ✅ (within `keepalive_secs`) |
 | Identity-first (no hostnames) | ❌ | ✅ (pubkey is the address) |
-| Multi-medium (UDP/TCP/WS) | TCP only | any DRIFT transport |
+| Multi-medium (UDP / TCP / WS) | TCP only | any DRIFT transport, scheme-prefix CLI |
+| Restart migration across IPs | ❌ | ✅ (verified cross-loopback in CI) |
+| Coalesced rendering | ❌ | ✅ (~6.5× faster than the MVP for bursty output) |
 
 ## How it's different from mosh
 
@@ -145,12 +170,24 @@ Server convention: accept first stream as pty, second as control. Client opens i
 ```bash
 cd drift-mosh/tests
 
-# Basic end-to-end: handshake, echo round-trip, resize.
+# Basic end-to-end over UDP: handshake, echo round-trip, resize.
 ./smoke.exp
 
-# Session/reattach protocol — session_id is well-formed +
-# round-tripped.
+# Same shape but over TCP — firewall-fallback path.
+./tcp_transport.exp
+
+# Same shape but over WebSocket — port-443 / HTTP-proxy fallback.
+./ws_transport.exp
+
+# Session/reattach protocol — session_id is well-formed and
+# round-trips through Attach/AttachAck.
 ./reattach.exp
+```
+
+Plus the scrollback unit tests:
+
+```bash
+cargo test -p drift-mosh --lib
 ```
 
 ## Manual migration demo
