@@ -34,6 +34,7 @@ mod session;
 mod wire_webrtc;
 mod wire_webtransport;
 mod wire_ws;
+mod wire_ws_stream;
 
 use drift_core::crypto::derive_peer_id;
 use drift_core::identity::Identity;
@@ -169,6 +170,27 @@ impl DriftClient {
     ) -> Result<DriftClient, JsValue> {
         let server_pub = parse_pubkey(server_pub_hex)?;
         let session = wire_ws::connect(url, identity.secret, server_pub).await?;
+        Ok(DriftClient { session })
+    }
+
+    /// Connect over `WebSocketStream` — the streams-based
+    /// variant of `WebSocket`. Same wire (server can be the
+    /// same `tokio-tungstenite`-backed listener), but the
+    /// browser-side API gets automatic backpressure: writes
+    /// block when the underlying buffer fills, instead of
+    /// queuing without bound.
+    ///
+    /// Currently Chromium-only. If the browser doesn't expose
+    /// `WebSocketStream` the constructor rejects — fall back to
+    /// `connectWebSocket`.
+    #[wasm_bindgen(js_name = "connectWebSocketStream")]
+    pub async fn connect_web_socket_stream(
+        url: &str,
+        identity: &DriftIdentity,
+        server_pub_hex: &str,
+    ) -> Result<DriftClient, JsValue> {
+        let server_pub = parse_pubkey(server_pub_hex)?;
+        let session = wire_ws_stream::connect(url, identity.secret, server_pub).await?;
         Ok(DriftClient { session })
     }
 
