@@ -43,14 +43,37 @@ impl Transport {
     }
 }
 
-/// Pull the pubkey + connect URL out of a `PUB@<addr>` peer
-/// string. The connect URL is whatever was on the right side of
-/// `@`; if it had no `://` scheme, we prepend `udp://` so
-/// `Transport::connect_url` accepts it directly.
+/// Pull the pubkey + connect URL out of a peer string.
+///
+/// Two forms accepted:
+///   1. **Petname** (e.g. `bob-laptop`) — looked up in the
+///      shared `~/.config/drift/contacts.toml` address book.
+///      Pubkey + last-known address come from the contact.
+///   2. **Literal** (`PUBHEX@HOST:PORT` or
+///      `PUBHEX@scheme://HOST:PORT`) — used on first contact
+///      when no contact entry exists yet.
 pub fn split_peer(s: &str) -> Result<([u8; 32], String, Transport)> {
-    let (pub_str, rest) = s
-        .split_once('@')
-        .ok_or_else(|| anyhow!("--peer expects PUBHEX@HOST:PORT (or PUBHEX@scheme://HOST:PORT)"))?;
+    if !s.contains('@') {
+        // Petname path. If a contact matches, use it.
+        let book =
+            drift::contacts::Contacts::load_default().context("loading contacts file")?;
+        let contact = book.resolve(s).ok_or_else(|| {
+            anyhow!(
+                "no contact named {:?} (and the value isn't a PUBHEX@addr literal). \
+                 Run `drift contacts list` to see saved contacts.",
+                s
+            )
+        })?;
+        let pubkey = drift::contacts::parse_pubkey_hex(&contact.pubkey)?;
+        let (transport, url) = if let Some(idx) = contact.address.find("://") {
+            let scheme = contact.address[..idx].to_ascii_lowercase();
+            (Transport(scheme), contact.address.clone())
+        } else {
+            (Transport::udp(), format!("udp://{}", contact.address))
+        };
+        return Ok((pubkey, url, transport));
+    }
+    let (pub_str, rest) = s.split_once('@').unwrap();
     let bytes = hex::decode(pub_str.trim())
         .with_context(|| format!("--peer pubkey {:?} isn't valid hex", pub_str))?;
     if bytes.len() != 32 {
@@ -63,10 +86,6 @@ pub fn split_peer(s: &str) -> Result<([u8; 32], String, Transport)> {
     pubkey.copy_from_slice(&bytes);
 
     // Trust drift::io's URL dispatcher to validate the scheme.
-    // We only split it out here so callers can log/route by
-    // human-readable transport name; if drift gains a new
-    // scheme (ws, webrtc, …), this parser doesn't need to be
-    // edited.
     let (transport, url) = if let Some(idx) = rest.find("://") {
         let scheme = rest[..idx].to_ascii_lowercase();
         (Transport(scheme), rest.to_string())

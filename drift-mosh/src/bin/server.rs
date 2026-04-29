@@ -50,6 +50,14 @@ struct Cli {
 
     #[clap(long)]
     keepalive_secs: Option<u64>,
+
+    /// Self-advertised name. Sent to clients so they can
+    /// auto-record this server under a friendly petname in
+    /// their local contacts file. Defaults to the shared
+    /// drift self-name from `~/.config/drift/self-name` if
+    /// one is configured; otherwise no name is advertised.
+    #[clap(long)]
+    name: Option<String>,
 }
 
 /// One attached shell session. `last_detached = None` means a
@@ -127,6 +135,16 @@ async fn main() -> Result<()> {
         .unwrap_or(&bound_url)
         .to_string();
 
+    // Resolve the self-advertised name once: explicit --name
+    // wins, otherwise the shared drift self-name file, else
+    // none. Captured in an Arc so per-session workers can
+    // include it in their AttachAck without reloading.
+    let self_name = match cli.name {
+        Some(n) => Some(n),
+        None => drift::contacts::self_name::load().ok().flatten(),
+    };
+    let self_name_arc: Arc<Option<String>> = Arc::new(self_name.clone());
+
     // Banner: one key=value per line, parseable by the
     // `drift-mosh` launcher.
     println!("{}{}", BannerLine::Pub.prefix(), pub_hex);
@@ -138,6 +156,9 @@ async fn main() -> Result<()> {
     // New scheme-qualified line. Multi-transport launchers can
     // parse this to know which DRIFT wire to use.
     println!("DRIFT_MOSH_BIND={}", bound_url);
+    if let Some(n) = &self_name {
+        println!("{}{}", BannerLine::Name.prefix(), n);
+    }
     println!("{}", BannerLine::Ready.prefix());
     use std::io::Write;
     std::io::stdout().flush().ok();
@@ -195,8 +216,19 @@ async fn main() -> Result<()> {
 
         let sessions = sessions.clone();
         let shell = shell.clone();
+        let self_name = self_name_arc.clone();
+        let transport_for_worker = transport.clone();
         tokio::spawn(async move {
-            if let Err(e) = session_worker(sessions, peer_id, pty_stream, ctrl_stream, &shell).await
+            if let Err(e) = session_worker(
+                sessions,
+                peer_id,
+                pty_stream,
+                ctrl_stream,
+                &shell,
+                self_name.as_ref().clone(),
+                transport_for_worker,
+            )
+            .await
             {
                 tracing::warn!(error = ?e, peer = ?peer_id, "session worker exited with error");
             }
@@ -212,6 +244,8 @@ async fn session_worker(
     pty_stream: Stream,
     ctrl_stream: Stream,
     shell: &str,
+    self_name: Option<String>,
+    transport: Arc<drift::Transport>,
 ) -> Result<()> {
     // ── Step 1: receive the client's Attach message. ──
     //
@@ -224,10 +258,30 @@ async fn session_worker(
         .ok_or_else(|| anyhow!("client hung up before sending Attach"))?;
     let attach: Ctrl =
         bincode::deserialize(&first).context("first control msg isn't a valid Ctrl")?;
-    let client_session_id = match attach {
-        Ctrl::Attach { session_id } => session_id,
+    let (client_session_id, client_name) = match attach {
+        Ctrl::Attach { session_id, name } => (session_id, name),
         other => return Err(anyhow!("expected Attach, got {:?}", other)),
     };
+    // Auto-record this client in our local contacts file so
+    // the server admin can see who connected and reach them
+    // by petname later. Best-effort: contacts I/O failures
+    // never break a session.
+    if let Some(client_pub) = transport.peer_public(&peer_id).await {
+        if let Ok(mut book) = drift::contacts::Contacts::load_default() {
+            // Address `0.0.0.0:0` because we don't have a
+            // routable back-address for an inbound peer.
+            // Recording the identity is still useful — the
+            // admin can `drift contacts list` to see who
+            // connected.
+            let placeholder = "0.0.0.0:0".parse().unwrap();
+            if book
+                .record(client_pub, placeholder, client_name.as_deref())
+                .is_ok()
+            {
+                let _ = book.save();
+            }
+        }
+    }
 
     // ── Step 2: is it a reattach? ──
     //
@@ -297,6 +351,7 @@ async fn session_worker(
         session_id: session.id,
         reattach_ok: reattaching,
         scrollback: scrollback_bytes,
+        name: self_name,
     };
     let ack_bytes = bincode::serialize(&ack)?;
     ctrl_stream.send(&ack_bytes).await?;

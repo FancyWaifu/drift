@@ -29,13 +29,27 @@ pub enum Ctrl {
     /// reattach me to it. Otherwise start fresh." Session ids
     /// are 16 random bytes minted by the server on first
     /// connect.
-    Attach { session_id: [u8; 16] },
+    ///
+    /// `name` is the client's self-advertised petname (loaded
+    /// from `~/.config/drift/self-name`). Optional and
+    /// hearsay — server records it for display, never trusts
+    /// it as identity (DRIFT pubkey is the truth).
+    Attach {
+        session_id: [u8; 16],
+        #[serde(default)]
+        name: Option<String>,
+    },
 
     /// Server → client right after a successful Attach:
     /// confirms the session was found (reattach_ok = true) or
     /// that a fresh session was started (reattach_ok = false).
     /// The `session_id` is what the client should remember
     /// for next reconnect.
+    ///
+    /// `name` is the server's self-advertised petname so the
+    /// client can record it in their contacts file under that
+    /// name (or auto-disambiguated equivalent if the petname
+    /// is already taken).
     AttachAck {
         session_id: [u8; 16],
         reattach_ok: bool,
@@ -44,6 +58,8 @@ pub enum Ctrl {
         /// these to stdout before resuming live streaming.
         /// Empty on a brand-new session.
         scrollback: Vec<u8>,
+        #[serde(default)]
+        name: Option<String>,
     },
 
     /// Either direction: polite shutdown. The peer closes its
@@ -65,6 +81,9 @@ pub enum BannerLine {
     PeerId,
     /// `DRIFT_MOSH_ADDR=<ip:port>`
     Addr,
+    /// `DRIFT_MOSH_NAME=<self-name>` — optional, only emitted
+    /// when the server has a configured self-name.
+    Name,
     /// `DRIFT_MOSH_READY` — last line, end of banner.
     Ready,
 }
@@ -77,6 +96,7 @@ impl BannerLine {
             BannerLine::Pub => "DRIFT_MOSH_PUB=",
             BannerLine::PeerId => "DRIFT_MOSH_PEER_ID=",
             BannerLine::Addr => "DRIFT_MOSH_ADDR=",
+            BannerLine::Name => "DRIFT_MOSH_NAME=",
             BannerLine::Ready => "DRIFT_MOSH_READY",
         }
     }
