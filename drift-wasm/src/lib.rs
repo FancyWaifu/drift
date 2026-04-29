@@ -31,6 +31,7 @@
 
 mod peer_session;
 mod session;
+mod wire_http;
 mod wire_webrtc;
 mod wire_webtransport;
 mod wire_ws;
@@ -191,6 +192,32 @@ impl DriftClient {
     ) -> Result<DriftClient, JsValue> {
         let server_pub = parse_pubkey(server_pub_hex)?;
         let session = wire_ws_stream::connect(url, identity.secret, server_pub).await?;
+        Ok(DriftClient { session })
+    }
+
+    /// Connect over plain HTTP/SSE. Fallback wire for
+    /// environments where WebSocket upgrades get blocked but
+    /// plain HTTP gets through (corporate proxies, captive
+    /// portals).
+    ///
+    /// Two HTTP requests per session: a streamed `GET
+    /// /drift-sse` for downstream events (one base64-encoded
+    /// DRIFT packet per SSE event) and a `POST /drift-send` per
+    /// uplink packet. The server's `http://` adapter
+    /// (`drift::wire_http`) speaks the matching wire.
+    ///
+    /// `url` is the server origin without trailing slash, e.g.
+    /// `http://relay.example.com:9000`. Higher-latency than
+    /// `connectWebSocket` but goes through anything that
+    /// proxies HTTP at all.
+    #[wasm_bindgen(js_name = "connectHttp")]
+    pub async fn connect_http(
+        url: &str,
+        identity: &DriftIdentity,
+        server_pub_hex: &str,
+    ) -> Result<DriftClient, JsValue> {
+        let server_pub = parse_pubkey(server_pub_hex)?;
+        let session = wire_http::connect(url, identity.secret, server_pub).await?;
         Ok(DriftClient { session })
     }
 

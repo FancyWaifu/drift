@@ -47,6 +47,7 @@ const BRIDGE_TCP: &str = "127.0.0.1:9201";
 const BRIDGE_WS: &str = "127.0.0.1:9202";
 const BRIDGE_RTC_SIGNALING: &str = "127.0.0.1:9203";
 const BRIDGE_WEBTRANSPORT_PORT: u16 = 9204;
+const BRIDGE_HTTP: &str = "127.0.0.1:9205";
 
 const CHAT_IPS: [&str; 4] = ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4"];
 
@@ -258,6 +259,16 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
         });
+    }
+
+    // HTTP/SSE — fallback wire for browser clients behind
+    // WS-stripping proxies. Server-Sent Events downstream + per-
+    // packet POST upstream. Routed through `add_listener("http://...")`
+    // (the URL dispatcher picks up `wire_http`'s registration).
+    let http_url = format!("http://{}", BRIDGE_HTTP);
+    match bridge.add_listener(&http_url).await {
+        Ok(bound) => println!("[bridge] HTTP/SSE listening on {}", bound),
+        Err(e) => eprintln!("[bridge] HTTP/SSE bind failed: {}", e),
     }
 
     // Drain recv so warmups don't back up the channel.

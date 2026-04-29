@@ -18,7 +18,7 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry. Peer self-migration at equal cost.
 
-**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebSocketStream (Chromium-only, automatic backpressure), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), plain HTTP/SSE (`GET /drift-sse` downstream + `POST /drift-send` per-packet upstream — fallback for proxies that strip WS upgrades), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
 
 **Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
 
@@ -59,6 +59,9 @@ drift/           native tokio-based stack built on drift-core
                        WebRTC / WebTransport / Memory adapters, inventory-based
                        scheme registry (Transport::bind_url / connect_url /
                        add_listener)
+    wire_http.rs     `http://` adapter — Server-Sent Events downstream + per-
+                       packet POST upstream. Browser-fallback wire when WS is
+                       blocked by middleboxes
     wire_onion.rs    `onion://` Tor adapter via arti — hidden-service hosting
                        + dialing (gated behind `--features onion`)
     streams.rs       Reliable streams, NewReno + BBR congestion control
@@ -81,6 +84,10 @@ drift-wasm/      browser-side stack, same drift-core compiled to wasm32
     session.rs            Wire-agnostic protocol state + mesh handshake flow
     peer_session.rs       Per-peer crypto state
     wire_ws.rs            WebSocket adapter
+    wire_ws_stream.rs     WebSocketStream adapter (Chromium-only, streams API
+                            with automatic backpressure)
+    wire_http.rs          HTTP/SSE fallback adapter — EventSource downstream +
+                            fetch() POST upstream
     wire_webrtc.rs        Browser WebRTC RTCDataChannel adapter
     wire_webtransport.rs  Browser WebTransport HTTP/3 adapter (cert-hash pinnable)
 
@@ -322,6 +329,8 @@ drift relay                               # run a mesh relay node
 | TLS over TCP | ✅ | ❌ (browser sandbox) | ✅ `tls://` | ✅ (`multi_transport_4way.sh`) |
 | Tor onion service | ✅ (opt-in via `--features onion`) | ❌ | ✅ `onion://` | ✅ self-dial through live Tor in 117s (`onion_self_dial`, gated `#[ignore]`) |
 | WebSocket | ✅ | ✅ | ✅ `ws://` | ✅ WASM↔native + mesh-through-bridge to any medium |
+| WebSocketStream | ❌ (no native peer needed — same wire as WS) | ✅ Chromium-only | n/a (uses WS server) | Wire-shared with `ws://` (already covered) |
+| HTTP/SSE | ✅ (server-only — `http://` listener; native dial is browser's job) | ✅ | ✅ `http://` (server side) | ✅ WASM client → native bridge: `test-http.mjs` |
 | WebRTC data channel | ✅ | ✅ | ❌ (signaling out-of-band) | Native↔native ✅ (`webrtc_adapter` test); browser↔native needs app-supplied SDP signaling |
 | WebTransport | ✅ | ✅ | ❌ (cert handoff out-of-band) | Native↔native ✅ (`webtransport_adapter` test); browser↔native ships and is cert-hash-pinnable |
 | In-memory | ✅ | ❌ | n/a (no addr) | ✅ (used internally by tests + bridge placeholders) |
@@ -341,6 +350,7 @@ Extensive coverage across 60+ integration test files, drift-core unit tests, and
 - **Restart migration**: drift-mosh client SIGKILL'd on one IP, reconnects on another, scrollback intact
 - **Mesh mobility**: post-handshake beacon discipline, stale-route invalidation on send failure, peer self-migration at equal cost
 - **WASM interop**: `drift-wasm-test/` — compiled WASM handshakes with native bridge + mesh-routes to a UDP peer. Confirmed: bridge log shows `recv from peer=<wasm-id> 16B: "hello from wasm!"` (test-wasm) and the cross-medium UDP peer's log shows `RECV <- ?peer=<wasm-id>: hello-from-wasm-through-bridge-to-udp-peer` (test-mesh — bridge never sees plaintext).
+- **HTTP/SSE fallback**: `drift-wasm-test/test-http.mjs` — WASM client (no WebSocket, no streams, just `EventSource` + `fetch()` POST) handshakes with the native bridge over plain HTTP/1.1. Confirmed: bridge log shows `recv from peer=<wasm-id> 26B: "hello from wasm over http!"`. Routes through anything that proxies HTTP at all.
 - **Onion over Tor**: `drift/tests/onion_self_dial.rs` — gated `#[ignore]`, opt-in via `--features onion`. Hosts an onion service in-process, retrieves its `<base32>.onion` address, dials it back through the live Tor network, runs a full handshake + DATA exchange. Confirmed end-to-end in 117s on a real network.
 - **Multi-bridge Docker mesh**: `docker/two-bridge/` — 12 containers, 90 directed messages, 5 of which cross between two bridges
 - **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh` / `multi_transport_4way.sh` (4/4 transports including TLS pass)
