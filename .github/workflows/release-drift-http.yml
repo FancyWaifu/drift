@@ -1,0 +1,93 @@
+name: Release drift-http
+
+# Fires on tags like `drift-http-v0.1.0`. Builds the
+# drift-http binary for macOS + Linux, both amd64 and arm64,
+# packages each into a tarball, and attaches them to a GitHub
+# release. Mirrors release-drift-mosh.yml.
+
+on:
+  push:
+    tags: ['drift-http-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. drift-http-v0.1.0)'
+        required: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cross-compile aarch64-linux on the amd64 GitHub-hosted
+      # runner via qemu + a cross toolchain.
+      - name: Install cross (aarch64-linux only)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build drift-http binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build -p drift-http --release --target ${{ matrix.target }} --bin drift-http
+          else
+            cargo build -p drift-http --release --target ${{ matrix.target }} --bin drift-http
+          fi
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          STAGE=drift-http-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/drift-http "$STAGE/"
+          cp drift-http/README.md "$STAGE/"
+          cp LICENSE* "$STAGE/" 2>/dev/null || true
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "STAGE=$STAGE" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.tar.gz
+
+  release:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/drift-http-v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.tar.gz
+          generate_release_notes: true
+          name: drift-http ${{ github.ref_name }}
+          body: |
+            Pre-built drift-http binaries for macOS + Linux.
+            See each tarball's `README.md` for install + usage.
