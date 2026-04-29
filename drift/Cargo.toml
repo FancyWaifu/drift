@@ -43,6 +43,14 @@ toml = "0.8"
 # on macOS, %APPDATA% on Windows) for the contacts file.
 dirs = "5"
 hex = "0.4"
+# TLS-shaped DRIFT transport (`tls://...`). The wire is plain
+# TCP wrapped in TLS so middleboxes that allow only HTTPS-shaped
+# traffic can't tell DRIFT apart from a normal web app. The TLS
+# cert is self-signed and ignored by clients — DRIFT's own AEAD
+# is what actually authenticates peers.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rcgen = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

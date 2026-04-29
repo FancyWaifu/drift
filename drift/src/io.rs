@@ -824,6 +824,216 @@ impl Listener for WsListenerIO {
     }
 }
 
+// ─── TLS-wrapped TCP (`tls://`) ──────────────────────────────────
+//
+// DRIFT-shaped traffic disguised as HTTPS. The framing on the
+// wire is identical to `TcpPacketIO` (length-prefix per packet);
+// the only difference is the bytes are inside a TLS record stream
+// instead of a raw TCP one. From a middlebox's perspective this
+// looks like a normal HTTPS connection — TLS handshake, then
+// encrypted application data.
+//
+// Important — the TLS layer adds NO security. DRIFT already
+// authenticates peers by X25519 pubkey + AEAD-seals every packet.
+// The cert is a randomly-generated self-signed cert, the client
+// doesn't validate it, and the keys are ephemeral. It's pure
+// camouflage — designed to pass DPI middleboxes that allow only
+// HTTPS-shaped traffic, not to add a second layer of crypto.
+
+/// One-shot constructor of a self-signed cert + key for the TLS
+/// listener. Generated fresh on each `bind`. The client side
+/// won't validate it (see [`NoCertVerifier`]).
+fn generate_self_signed_cert() -> io::Result<(
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+        .map_err(|e| io::Error::other(format!("rcgen: {}", e)))?;
+    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        cert.key_pair.serialize_der(),
+    ));
+    Ok((vec![cert_der], key_der))
+}
+
+/// Cert verifier that blindly accepts any server cert. Used on
+/// the client side because DRIFT auth happens at the AEAD layer,
+/// not the TLS layer.
+#[derive(Debug)]
+struct NoCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ED448,
+        ]
+    }
+}
+
+/// Adapter for an established TLS-over-TCP connection. Same
+/// length-prefix framing as `TcpPacketIO` — just lives inside
+/// a TLS record stream. The concrete TLS stream type is split
+/// into read/write halves before being type-erased into trait
+/// objects, so the same struct holds either server- or client-
+/// side TLS streams.
+pub struct TlsPacketIO {
+    reader: tokio::sync::Mutex<
+        Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
+    >,
+    writer: tokio::sync::Mutex<
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>,
+    >,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+}
+
+impl TlsPacketIO {
+    /// Wrap an established TLS stream — either a server- or
+    /// client-side `tokio_rustls::TlsStream`. Splits the stream
+    /// in half so reader / writer can run concurrently.
+    pub fn new<S>(stream: S, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
+    {
+        let (r, w) = tokio::io::split(stream);
+        let boxed_r: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static> =
+            Box::new(r);
+        let boxed_w: Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static> =
+            Box::new(w);
+        Self {
+            reader: tokio::sync::Mutex::new(boxed_r),
+            writer: tokio::sync::Mutex::new(boxed_w),
+            peer_addr,
+            local_addr,
+        }
+    }
+}
+
+#[async_trait]
+impl PacketIO for TlsPacketIO {
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+        use tokio::io::AsyncWriteExt;
+        if buf.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "packet too large for TLS framing (max 65535)",
+            ));
+        }
+        let len_bytes = (buf.len() as u16).to_be_bytes();
+        let mut writer = self.writer.lock().await;
+        writer.write_all(&len_bytes).await?;
+        writer.write_all(buf).await?;
+        writer.flush().await?;
+        Ok(buf.len())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        use tokio::io::AsyncReadExt;
+        let mut reader = self.reader.lock().await;
+        let mut len_buf = [0u8; 2];
+        reader.read_exact(&mut len_buf).await?;
+        let len = u16::from_be_bytes(len_buf) as usize;
+        if len > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("TLS frame too large: {} > buffer {}", len, buf.len()),
+            ));
+        }
+        reader.read_exact(&mut buf[..len]).await?;
+        Ok((len, self.peer_addr))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.local_addr)
+    }
+}
+
+/// TLS listener — wraps a `tokio::net::TcpListener` and runs
+/// the TLS handshake on each accept with a self-signed cert.
+pub struct TlsListenerIO {
+    listener: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl TlsListenerIO {
+    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        // Install a default crypto provider exactly once per
+        // process. rustls 0.23 requires this for ServerConfig
+        // builders that don't take an explicit provider.
+        install_default_crypto_provider();
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let (certs, key) = generate_self_signed_cert()?;
+        let server_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| io::Error::other(format!("rustls server config: {}", e)))?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+        Ok(Self { listener, acceptor })
+    }
+}
+
+#[async_trait]
+impl Listener for TlsListenerIO {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+    fn is_multi(&self) -> bool {
+        true
+    }
+    async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
+        let (tcp, peer) = self.listener.accept().await?;
+        let local = tcp.local_addr()?;
+        let _ = tcp.set_nodelay(true);
+        let tls = self
+            .acceptor
+            .accept(tcp)
+            .await
+            .map_err(|e| io::Error::other(format!("TLS handshake: {}", e)))?;
+        Ok(Arc::new(TlsPacketIO::new(tls, peer, local)))
+    }
+}
+
+/// Install the default rustls crypto provider once per process.
+/// Safe to call multiple times; subsequent calls are no-ops.
+fn install_default_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 // ─── Scheme registry ──────────────────────────────────────────────
 //
 // The URL dispatcher is registry-driven rather than match-driven so
@@ -1022,5 +1232,48 @@ inventory::submit! {
         scheme: "ws",
         listener: ws_listener_factory,
         connector: ws_connector_factory,
+    }
+}
+
+fn tls_listener_factory(
+    addr: SocketAddr,
+) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move { Ok(Box::new(TlsListenerIO::bind(addr).await?) as Box<dyn Listener>) })
+}
+
+fn tls_connector_factory(
+    addr: SocketAddr,
+) -> Pin<
+    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
+> {
+    Box::pin(async move {
+        install_default_crypto_provider();
+        let tcp = tokio::net::TcpStream::connect(addr).await?;
+        let _ = tcp.set_nodelay(true);
+        let local = tcp.local_addr()?;
+        let client_cfg = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
+        // SNI just needs to be a syntactically-valid DNS name —
+        // the cert isn't validated. "localhost" works for any
+        // peer.
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| io::Error::other(format!("server name: {}", e)))?;
+        let tls = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| io::Error::other(format!("TLS handshake: {}", e)))?;
+        let io: Arc<dyn PacketIO> = Arc::new(TlsPacketIO::new(tls, addr, local));
+        Ok((io, addr))
+    })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "tls",
+        listener: tls_listener_factory,
+        connector: tls_connector_factory,
     }
 }
