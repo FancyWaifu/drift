@@ -2,12 +2,18 @@ use crate::crypto::{derive_peer_id, PeerId};
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 pub const STATIC_KEY_LEN: usize = 32;
 pub const NONCE_LEN: usize = 16;
 
 /// A long-term X25519 identity. Both endpoints hold one of these.
 /// The public half is what peers recognize each other by.
+///
+/// `StaticSecret` zeroes its bytes when `Identity` drops thanks
+/// to x25519-dalek's `zeroize` feature — so an attacker who
+/// snapshots the process memory after `Identity` has been freed
+/// will not find the long-term private key.
 pub struct Identity {
     secret: StaticSecret,
     public: PublicKey,
@@ -58,12 +64,19 @@ impl Identity {
 /// — after the handshake both sides destroy their ephemeral private
 /// keys, so later compromise of the static keys cannot recover past
 /// session keys.
+///
+/// Returns `Zeroizing<[u8; 32]>` so the stack copy held by the
+/// caller scrubs itself when it goes out of scope. Caller passes
+/// `&*key` into `SessionKey::new`. The session key bytes that
+/// land inside ring's `LessSafeKey` are not zeroed by ring (a
+/// documented design choice in `ring`); see the `SessionKey`
+/// docs for the residual exposure window.
 pub fn derive_session_key(
     static_dh: &[u8; 32],
     ephemeral_dh: &[u8; 32],
     client_nonce: &[u8; NONCE_LEN],
     server_nonce: &[u8; NONCE_LEN],
-) -> [u8; 32] {
+) -> Zeroizing<[u8; 32]> {
     let mut hasher = Blake2b::<U32>::new();
     hasher.update(b"drift-session-v2");
     hasher.update(static_dh);
@@ -71,7 +84,7 @@ pub fn derive_session_key(
     hasher.update(client_nonce);
     hasher.update(server_nonce);
     let result = hasher.finalize();
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
     key.copy_from_slice(&result);
     key
 }
@@ -84,13 +97,16 @@ pub fn derive_session_key(
 /// Both sides compute this deterministically from the same
 /// inputs, so an attacker who doesn't already know the current
 /// session key cannot produce or predict the new one.
-pub fn rekey_derive(old_key: &[u8; 32], salt: &[u8; 32]) -> [u8; 32] {
+///
+/// Returns `Zeroizing<[u8; 32]>` for the same stack-scrub
+/// reason as `derive_session_key`.
+pub fn rekey_derive(old_key: &[u8; 32], salt: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     let mut hasher = Blake2b::<U32>::new();
     hasher.update(b"drift-rekey-v1");
     hasher.update(old_key);
     hasher.update(salt);
     let result = hasher.finalize();
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&result);
     out
 }

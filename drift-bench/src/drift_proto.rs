@@ -23,54 +23,34 @@ fn ensure_scheme(s: &str) -> String {
     }
 }
 
-// Fixed identity seeds so server + client always derive the
-// same peer_ids regardless of which container hits the net
-// first. Hardcoding is fine — this is a bench, not prod.
+// Fixed *server* seed so the client knows the server's peer_id
+// up front (avoids a discovery step in the measurement). The
+// client uses `Identity::generate()` for fresh static keys per
+// iteration where the workload demands it (`Workload::Handshake`).
 const SERVER_SEED: [u8; 32] = [0xAA; 32];
-const CLIENT_SEED: [u8; 32] = [0xBB; 32];
 
 pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     let server_id = Identity::from_secret_bytes(SERVER_SEED);
-    let client_pub = Identity::from_secret_bytes(CLIENT_SEED).public_bytes();
     let listen_url = ensure_scheme(&cli.listen);
-    let (server, bound_url) = Transport::bind_url(
-        &listen_url,
-        server_id,
-        TransportConfig::default(),
-    )
-    .await
-    .with_context(|| format!("DRIFT server bind on {}", listen_url))?;
+    // `accept_any_peer = true` so each fresh client identity
+    // (Handshake workload) gets admitted via the responder path
+    // without us pre-registering its pubkey. Single-session
+    // workloads (Rtt, Throughput) work fine under the same flag.
+    let mut config = TransportConfig::default();
+    config.accept_any_peer = true;
+    let (server, bound_url) = Transport::bind_url(&listen_url, server_id, config)
+        .await
+        .with_context(|| format!("DRIFT server bind on {}", listen_url))?;
     let server = Arc::new(server);
-    // Learn the client identity up front so first incoming DATA
-    // doesn't get rejected as "unknown peer" during cold start.
-    server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await?;
     eprintln!("drift server listening on {}", bound_url);
 
     match cli.workload {
-        Workload::Handshake => {
-            // For DRIFT, a "cold handshake" per iter means a
-            // *fresh client identity* (new static keys, new
-            // session state). The client picks a new identity
-            // each time and adds the server as a peer; the
-            // server side just echoes whatever arrives. The
-            // server never needs to rebuild — it accepts any
-            // configured peer — so a single long-running
-            // server loop handles all N handshake samples.
-            for _ in 0..cli.handshake_iters {
-                match tokio::time::timeout(Duration::from_secs(10), server.recv()).await {
-                    Ok(Some(msg)) => {
-                        let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
-                    }
-                    _ => break,
-                }
-            }
-        }
-        Workload::Rtt => {
-            // Echo-until-client-disconnects. The client drives
-            // `rtt_iters` iterations, we echo each one back.
-            // Keep going until the client stops sending.
+        Workload::Handshake | Workload::Rtt | Workload::Throughput => {
+            // All three workloads echo every received DATA back
+            // to its sender. Throughput uses the echo to measure
+            // round-trip goodput on the client side; Rtt uses it
+            // for ping-pong timing; Handshake uses it as the
+            // "first byte acked" boundary.
             loop {
                 match tokio::time::timeout(Duration::from_secs(30), server.recv()).await {
                     Ok(Some(msg)) => {
@@ -79,19 +59,6 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                     _ => break,
                 }
             }
-        }
-        Workload::Throughput => {
-            // Drain until idle; the client sends for
-            // `duration_secs` then stops. Count bytes for a
-            // sanity check echo.
-            let mut total = 0u64;
-            loop {
-                match tokio::time::timeout(Duration::from_secs(30), server.recv()).await {
-                    Ok(Some(msg)) => total += msg.payload.len() as u64,
-                    _ => break,
-                }
-            }
-            eprintln!("drift server received {} bytes", total);
         }
     }
     Ok(None)
@@ -104,9 +71,11 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
     match cli.workload {
         Workload::Handshake => run_handshake(cli, server_pub, &target_url).await,
         Workload::Rtt | Workload::Throughput => {
-            // Single long-lived session for the data-plane
-            // workloads — matches what a real app would do.
-            let client_id = Identity::from_secret_bytes(CLIENT_SEED);
+            // Fresh client identity per data-plane run too — the
+            // long-lived session is meant to mirror "first
+            // connect from a new process," not "reconnect with
+            // saved keys."
+            let client_id = Identity::generate();
             let (client, peer_addr) = Transport::connect_url(
                 &target_url,
                 client_id,
@@ -120,8 +89,8 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
                 .await?;
             match cli.workload {
                 Workload::Rtt => run_rtt(cli, &client, &server_peer).await,
-                Workload::Throughput => run_throughput(cli, &client, &server_peer).await,
-                _ => unreachable!(),
+                Workload::Throughput => run_throughput(cli, client.clone(), &server_peer).await,
+                Workload::Handshake => unreachable!("dispatched above"),
             }
         }
     }
@@ -135,13 +104,20 @@ async fn run_handshake(
     let mut report = Report::new("drift", "handshake");
     let mut samples: Vec<u128> = Vec::with_capacity(cli.handshake_iters);
 
-    // Each iter: fresh client Transport (fresh socket, fresh
-    // peer table, fresh session). The server keeps the same
-    // peer_pub across all iters, so "cold" here means
-    // "fresh client state, full HELLO/HELLO_ACK" — which is
-    // what a reconnecting client actually pays.
+    // Each iter: fresh client identity (new X25519 static keys),
+    // fresh Transport (fresh socket, fresh peer table, fresh
+    // session). What we measure is from `send_data` (the
+    // implicit handshake trigger) to the first `recv` from the
+    // server's echo — i.e. **handshake completion plus one
+    // application round-trip**. We deliberately don't try to
+    // separate the two: there's no public DRIFT API surface
+    // that fires precisely at "HELLO_ACK seen and verified" on
+    // the client side, so any split would be lying about its
+    // boundary. Reporting "first-byte time" is the honest
+    // measure that matches what every other benched protocol
+    // (QUIC, WireGuard) reports: connect → first byte echoed.
     for _ in 0..cli.handshake_iters {
-        let client_id = Identity::from_secret_bytes(CLIENT_SEED);
+        let client_id = Identity::generate();
         let (client, peer_addr) = Transport::connect_url(
             target_url,
             client_id,
@@ -194,27 +170,66 @@ async fn run_rtt(
 
 async fn run_throughput(
     cli: &Cli,
-    client: &Transport,
+    client: Arc<Transport>,
     server_peer: &[u8; 8],
 ) -> Result<Option<Report>> {
     let mut report = Report::new("drift", "throughput");
     let payload = vec![0xA5u8; cli.payload_bytes];
 
-    // Warm the handshake.
-    client.send_data(server_peer, &[0u8; 8], 0, 0).await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Warm the handshake (echoed back by the server-side loop).
+    client.send_data(server_peer, b"warm", 0, 0).await?;
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.recv()).await?;
 
     let duration = Duration::from_secs(cli.duration_secs);
     let start = Instant::now();
-    let mut bytes = 0u64;
+
+    // Drain the server's echoed packets *concurrently* with our
+    // sends. The headline number is "bytes that round-tripped"
+    // — i.e. goodput, not pump-rate. If our sends outpace the
+    // server's ability to echo back, the gap shows up as the
+    // recv side falling behind, which is exactly how a real
+    // application's flow control would look.
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+    let recv_bytes = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let recv_client = client.clone();
+    let recv_bytes_for_task = recv_bytes.clone();
+    let stop_for_task = stop.clone();
+    let recv_task = tokio::spawn(async move {
+        while !stop_for_task.load(AtomicOrdering::Relaxed) {
+            match tokio::time::timeout(Duration::from_millis(200), recv_client.recv()).await {
+                Ok(Some(msg)) => {
+                    recv_bytes_for_task.fetch_add(msg.payload.len() as u64, AtomicOrdering::Relaxed);
+                }
+                _ => continue,
+            }
+        }
+    });
+
+    let mut sent_bytes = 0u64;
     while start.elapsed() < duration {
         client.send_data(server_peer, &payload, 0, 0).await?;
-        bytes += payload.len() as u64;
+        sent_bytes += payload.len() as u64;
     }
-    let elapsed = start.elapsed().as_secs_f64();
 
-    report.bytes_moved = Some(bytes);
+    // Grace period to let the last few echoes come back.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.store(true, AtomicOrdering::Relaxed);
+    let _ = recv_task.await;
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let goodput_bytes = recv_bytes.load(AtomicOrdering::Relaxed);
+
+    eprintln!(
+        "drift throughput: sent {} B, echoed back {} B in {:.2}s ({:.1}% return ratio)",
+        sent_bytes,
+        goodput_bytes,
+        elapsed,
+        (goodput_bytes as f64 / sent_bytes as f64) * 100.0,
+    );
+
+    report.bytes_moved = Some(goodput_bytes);
     report.duration_s = Some(elapsed);
-    report.throughput_mbps = Some((bytes as f64 * 8.0) / (elapsed * 1_000_000.0));
+    report.throughput_mbps = Some((goodput_bytes as f64 * 8.0) / (elapsed * 1_000_000.0));
     Ok(Some(report))
 }

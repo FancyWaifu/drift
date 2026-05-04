@@ -1207,7 +1207,7 @@ impl Inner {
             let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
                 HandshakeState::Established {
                     tx, rx, key_bytes, ..
-                } => (tx.clone(), rx.clone(), *key_bytes),
+                } => (tx.clone(), rx.clone(), key_bytes.clone()),
                 _ => return Err(DriftError::UnknownPeer),
             };
 
@@ -1235,7 +1235,7 @@ impl Inner {
             peer.handshake = HandshakeState::Established {
                 tx: new_tx,
                 rx: new_rx,
-                key_bytes: new_key_bytes,
+                key_bytes: new_key_bytes.clone(),
                 prev: Some(PrevSession {
                     tx: old_tx,
                     rx: old_rx,
@@ -1280,7 +1280,7 @@ impl Inner {
             let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
                 HandshakeState::Established {
                     tx, rx, key_bytes, ..
-                } => (tx.clone(), rx.clone(), *key_bytes),
+                } => (tx.clone(), rx.clone(), key_bytes.clone()),
                 _ => return Err(DriftError::UnknownPeer),
             };
 
@@ -1311,7 +1311,7 @@ impl Inner {
             peer.handshake = HandshakeState::Established {
                 tx: new_tx,
                 rx: new_rx,
-                key_bytes: new_key_bytes_val,
+                key_bytes: new_key_bytes_val.clone(),
                 prev: Some(PrevSession {
                     tx: old_tx,
                     rx: old_rx,
@@ -2435,7 +2435,7 @@ impl Inner {
         // Definite assignment verified by the compiler: the inner
         // block either hits the early `return Ok(())` (no use) or
         // assigns via the `Established` path before falling out.
-        let cid_key_for_install: Option<[u8; 32]>;
+        let cid_key_for_install: Option<drift_core::Zeroizing<[u8; 32]>>;
         // Track how many bytes we shipped from the flush so we
         // can update the metric after releasing the lock — lock
         // is held during the sends themselves to serialize with
@@ -2512,7 +2512,7 @@ impl Inner {
             peer.handshake = HandshakeState::Established {
                 tx,
                 rx,
-                key_bytes: session_key_bytes,
+                key_bytes: session_key_bytes.clone(),
                 prev: None,
             };
             if mesh_next_hop.is_some() {
@@ -2664,7 +2664,7 @@ impl Inner {
             Option<(Vec<u8>, SocketAddr)>,
             bool,
             Vec<(Vec<u8>, SocketAddr, usize)>,
-            Option<[u8; 32]>,
+            Option<drift_core::Zeroizing<[u8; 32]>>,
         ) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
@@ -2728,7 +2728,7 @@ impl Inner {
             }
 
             let mut just_established = false;
-            let mut just_established_key: Option<[u8; 32]> = None;
+            let mut just_established_key: Option<drift_core::Zeroizing<[u8; 32]>> = None;
             let mut flushed: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::new();
             if matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
                 if let HandshakeState::AwaitingData {
@@ -2738,7 +2738,7 @@ impl Inner {
                     peer.handshake = HandshakeState::Established {
                         tx,
                         rx,
-                        key_bytes,
+                        key_bytes: key_bytes.clone(),
                         prev: None,
                     };
                     self.metrics

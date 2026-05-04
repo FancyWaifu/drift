@@ -5,6 +5,7 @@ use crate::identity::{Identity, NONCE_LEN};
 use crate::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use zeroize::Zeroizing;
 
 const REPLAY_WINDOW: u32 = 1024;
 const COALESCE_STATE_CAPACITY: usize = 256;
@@ -67,7 +68,7 @@ pub enum HandshakeState {
     AwaitingData {
         tx: SessionKey,
         rx: SessionKey,
-        key_bytes: [u8; 32],
+        key_bytes: Zeroizing<[u8; 32]>,
         cached_ack: Vec<u8>,
         cached_client_nonce: [u8; NONCE_LEN],
     },
@@ -88,7 +89,7 @@ pub enum HandshakeState {
     Established {
         tx: SessionKey,
         rx: SessionKey,
-        key_bytes: [u8; 32],
+        key_bytes: Zeroizing<[u8; 32]>,
         prev: Option<PrevSession>,
     },
 }
@@ -206,7 +207,7 @@ pub struct Peer {
 #[derive(Clone)]
 pub struct PendingResumption {
     pub ticket_id: [u8; 16],
-    pub psk: [u8; 32],
+    pub psk: Zeroizing<[u8; 32]>,
 }
 
 /// A pending path-validation probe issued after an AEAD-valid DATA

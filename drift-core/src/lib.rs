@@ -18,3 +18,7 @@ pub use crypto::{derive_peer_id, Direction, PeerId, SessionKey, KEY_LEN, PEER_ID
 pub use error::{DriftError, Result};
 pub use header::{Header, PacketType, HEADER_LEN};
 pub use identity::{Identity, STATIC_KEY_LEN};
+// Re-export so downstream crates (drift, drift-wasm) can use
+// `Zeroizing` via drift-core without taking a separate zeroize
+// dep.
+pub use zeroize::Zeroizing;
