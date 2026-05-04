@@ -71,9 +71,11 @@ pub const TICKET_DEFAULT_TTL: Duration = Duration::from_secs(24 * 3600);
 /// handshakes and accumulates tickets forever.
 pub const RESUMPTION_STORE_MAX: usize = 100_000;
 
-/// Server-side stored ticket record.
+/// Server-side stored ticket record. `psk` is wrapped in
+/// `Zeroizing` so the secret zeroes on entry-eviction or store
+/// teardown, not just on the next allocator reuse.
 struct ServerEntry {
-    psk: [u8; TICKET_PSK_LEN],
+    psk: drift_core::Zeroizing<[u8; TICKET_PSK_LEN]>,
     expiry: SystemTime,
     /// Bound to the original client's static pubkey so a leaked
     /// ticket can't be redeemed by a different identity.
@@ -97,7 +99,7 @@ impl ResumptionStore {
     pub(crate) fn insert(
         &mut self,
         ticket_id: [u8; TICKET_ID_LEN],
-        psk: [u8; TICKET_PSK_LEN],
+        psk: drift_core::Zeroizing<[u8; TICKET_PSK_LEN]>,
         expiry: SystemTime,
         client_static_pub: [u8; STATIC_KEY_LEN],
     ) {
@@ -132,7 +134,7 @@ impl ResumptionStore {
         &mut self,
         ticket_id: &[u8; TICKET_ID_LEN],
         client_static_pub: &[u8; STATIC_KEY_LEN],
-    ) -> Option<([u8; TICKET_PSK_LEN], SystemTime)> {
+    ) -> Option<(drift_core::Zeroizing<[u8; TICKET_PSK_LEN]>, SystemTime)> {
         let entry = self.entries.get(ticket_id)?;
         if entry.expiry <= SystemTime::now() {
             self.entries.remove(ticket_id);
@@ -144,7 +146,7 @@ impl ResumptionStore {
             // to ignore, not a state mutation).
             return None;
         }
-        let psk = entry.psk;
+        let psk = entry.psk.clone();
         let expiry = entry.expiry;
         // Single-use: a ticket only resumes once. The client
         // gets a fresh ticket on the resumed session.
@@ -154,12 +156,13 @@ impl ResumptionStore {
 }
 
 /// Client-side persistent ticket: what the app exports/imports
-/// across restarts. The PSK is sensitive material — treat the
-/// blob like a private key when persisting.
+/// across restarts. The PSK is sensitive material — wrapped in
+/// `Zeroizing` so a dropped `ClientTicket` scrubs its key bytes
+/// from memory.
 #[derive(Clone)]
 pub struct ClientTicket {
     pub ticket_id: [u8; TICKET_ID_LEN],
-    pub psk: [u8; TICKET_PSK_LEN],
+    pub psk: drift_core::Zeroizing<[u8; TICKET_PSK_LEN]>,
     pub expiry: SystemTime,
     pub server_id: PeerId,
     pub server_static_pub: [u8; STATIC_KEY_LEN],
@@ -180,7 +183,7 @@ impl ClientTicket {
         let mut out = Vec::with_capacity(EXPORT_BLOB_LEN);
         out.push(EXPORT_BLOB_VERSION);
         out.extend_from_slice(&self.ticket_id);
-        out.extend_from_slice(&self.psk);
+        out.extend_from_slice(self.psk.as_ref());
         let expiry_ms = self
             .expiry
             .duration_since(UNIX_EPOCH)
@@ -200,7 +203,7 @@ impl ClientTicket {
         }
         let mut ticket_id = [0u8; TICKET_ID_LEN];
         ticket_id.copy_from_slice(&blob[1..1 + TICKET_ID_LEN]);
-        let mut psk = [0u8; TICKET_PSK_LEN];
+        let mut psk = drift_core::Zeroizing::new([0u8; TICKET_PSK_LEN]);
         let psk_off = 1 + TICKET_ID_LEN;
         psk.copy_from_slice(&blob[psk_off..psk_off + TICKET_PSK_LEN]);
         let exp_off = psk_off + TICKET_PSK_LEN;
@@ -237,13 +240,13 @@ impl ClientTicket {
 pub(crate) fn derive_psk(
     session_key: &[u8; 32],
     ticket_id: &[u8; TICKET_ID_LEN],
-) -> [u8; TICKET_PSK_LEN] {
+) -> drift_core::Zeroizing<[u8; TICKET_PSK_LEN]> {
     let mut h = Blake2b::<U32>::new();
     h.update(b"drift-resume-psk-v1");
     h.update(session_key);
     h.update(ticket_id);
     let result = h.finalize();
-    let mut out = [0u8; TICKET_PSK_LEN];
+    let mut out = drift_core::Zeroizing::new([0u8; TICKET_PSK_LEN]);
     out.copy_from_slice(&result);
     out
 }
@@ -256,7 +259,7 @@ pub(crate) fn derive_resumption_key(
     ephemeral_dh: &[u8; 32],
     client_nonce: &[u8; NONCE_LEN],
     server_nonce: &[u8; NONCE_LEN],
-) -> [u8; 32] {
+) -> drift_core::Zeroizing<[u8; 32]> {
     let mut h = Blake2b::<U32>::new();
     h.update(b"drift-resume-key-v1");
     h.update(psk);
@@ -264,7 +267,7 @@ pub(crate) fn derive_resumption_key(
     h.update(client_nonce);
     h.update(server_nonce);
     let result = h.finalize();
-    let mut out = [0u8; 32];
+    let mut out = drift_core::Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&result);
     out
 }
@@ -289,7 +292,7 @@ impl Inner {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
             let session_key_bytes = match &peer.handshake {
-                HandshakeState::Established { key_bytes, .. } => *key_bytes,
+                HandshakeState::Established { key_bytes, .. } => key_bytes.clone(),
                 _ => return Err(DriftError::UnknownPeer),
             };
             let client_static_pub = peer.peer_static_pub;
@@ -368,7 +371,7 @@ impl Inner {
                 return Ok(());
             };
             let session_key_bytes = match &peer.handshake {
-                HandshakeState::Established { key_bytes, .. } => *key_bytes,
+                HandshakeState::Established { key_bytes, .. } => key_bytes.clone(),
                 _ => return Ok(()),
             };
             let static_pub = peer.peer_static_pub;

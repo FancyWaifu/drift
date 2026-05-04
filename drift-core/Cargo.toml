@@ -5,7 +5,12 @@ edition = "2021"
 description = "Platform-independent DRIFT protocol primitives"
 
 [dependencies]
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+# Wraps derived session keys / rekey outputs in
+# `Zeroizing<[u8; 32]>` so stack copies of key bytes get
+# scrubbed at end of scope. Long-term `Identity` keys zero via
+# x25519-dalek's `zeroize` feature above.
+zeroize = { version = "1", features = ["derive"] }
 blake2 = "0.10"
 siphasher = "1"
 ml-kem = "0.2"

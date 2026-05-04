@@ -376,37 +376,39 @@ cd bench/docker
 NETEM_DELAY=20ms NETEM_LOSS=1% ./run.sh     # simulate WAN with tc/netem
 ```
 
-### Results (two Docker containers, shared bridge, Apple Silicon host)
+### Methodology
 
-**Cold handshake** (connect → first byte acked, 30 samples):
+Three workloads, all measured client-side:
 
-| Protocol   | p50      | p95      | p99      |
-|------------|----------|----------|----------|
-| **DRIFT**  | **330 µs** | 715 µs   | 795 µs   |
-| WireGuard  | 396 µs   | 826 µs   | 1,150 µs |
-| QUIC       | 2,832 µs | 3,847 µs | 4,208 µs |
+- **Handshake**: fresh `Identity::generate()` per iteration (new X25519 static keypair every sample, full HELLO/HELLO_ACK with fresh ephemeral DH). Reports the time from `connect_url` → `send_data("go")` → first byte echoed back. **This includes one application round-trip in the measurement** — there's no public DRIFT API surface that fires precisely at "HELLO_ACK seen and verified," so any split would be fictional. We deliberately report the full first-byte-time so it's directly comparable to QUIC and WireGuard, which report the same thing.
+- **RTT**: single long-lived session, 1000 `send_data` → `recv` ping-pong iterations after a handshake-warm pass. Reports samples in microseconds.
+- **Throughput**: single long-lived session. Client sends 1 KB DATA packets in a tight loop while a *concurrent* recv task counts bytes echoed back by the server. Reports **goodput** (bytes that round-tripped), not pump-rate. The "return ratio" stderr line shows what fraction of sent bytes made it back — anything below ~99% means the recv side is falling behind, which is the honest signal that the client is outpacing the round trip.
 
-DRIFT's X25519-only handshake is 1.2× faster than WireGuard's Noise_IKpsk2 and 8.6× faster than QUIC's TLS 1.3 + transport-params negotiation.
+### Results (loopback, single Apple Silicon host)
+
+These are local-machine numbers from this repo at the current commit. Docker-bridge numbers (vethpair overhead, two containers, `tc/netem` shaping) are reproduced via `bench/docker/run.sh` and will differ.
+
+**Handshake** (connect → first byte echoed, 30 samples, fresh identity per iter):
+
+| Protocol  | p50    | p95    | p99    |
+|-----------|--------|--------|--------|
+| **DRIFT** | **264 µs** | 437 µs | 611 µs |
 
 **RTT** (ping-pong, 1 KB payload, 1000 samples):
 
-| Protocol   | p50      | p95      | p99      |
-|------------|----------|----------|----------|
-| WireGuard  | 57 µs    | 115 µs   | 183 µs   |
-| **DRIFT**  | **93 µs** | 143 µs   | 275 µs   |
-| QUIC       | 152 µs   | 192 µs   | 338 µs   |
+| Protocol  | p50    | p95    | p99    |
+|-----------|--------|--------|--------|
+| **DRIFT** | **30 µs** | 126 µs | 151 µs |
 
-DRIFT beats QUIC 1.6×; loses to WireGuard ~1.6× on the hot path — the gap is Tokio's mpsc + task-wakeup tax, not protocol work. A sync `poll_recv` variant is on the roadmap to close most of it.
+**Throughput** (sustained 1 KB sends, 10 s, round-trip goodput):
 
-**Throughput** (sustained 1 KB sends, 10 s, real flow control):
+| Protocol  | Goodput   | Return ratio |
+|-----------|-----------|--------------|
+| **DRIFT** | **591 Mbps** | 87.3% |
 
-| Protocol   | Throughput   |
-|------------|--------------|
-| WireGuard  | 1,746 Mbps   |
-| **DRIFT**  | **1,672 Mbps** |
-| QUIC       | 1,020 Mbps   |
+The return ratio < 100% reflects that on loopback DRIFT can pump faster than the recv-side echo loop drains; an application that paces sends to inbound rate would see goodput closer to the line rate.
 
-DRIFT matches WireGuard on throughput (same AEAD primitive, same UDP-syscall rate); QUIC's per-packet ACK + stream flow-control machinery drops it ~40%.
+A previous version of this README reported 1,672 Mbps "with real flow control" — that was a bug in the bench harness. The old code measured pump-rate (`bytes_pushed_into_API / wall_clock`) without draining the receive channel, so it was reporting how fast we could call `send_data` in a loop, not how fast bytes round-tripped. Fixed in `drift_proto.rs` (recv drainer + goodput report); the smaller number is the honest one.
 
 ### Crypto micro-benchmarks
 

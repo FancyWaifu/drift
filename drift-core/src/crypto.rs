@@ -1,7 +1,7 @@
 use crate::error::{DriftError, Result};
 use crate::header::AUTH_TAG_LEN;
 use blake2::{digest::consts::U8, Blake2b, Digest};
-use siphasher::sip128::{Hasher128, SipHasher13};
+use siphasher::sip128::{Hasher128, SipHasher24};
 use std::hash::Hasher as _;
 
 // AEAD backend selection: `ring` on native (2× faster
@@ -35,20 +35,52 @@ pub fn derive_peer_id(pubkey_material: &[u8]) -> PeerId {
 pub const COOKIE_MAC_LEN: usize = 16;
 
 /// Produce a 16-byte server-side DoS cookie MAC over arbitrary
-/// input. Uses SipHash-1-3 (128-bit output) keyed with the first
-/// 16 bytes of the rotating server secret. SipHash is ~3-5× faster
-/// than Blake2b on the short inputs the cookie path handles, and
-/// 128 bits of output is plenty for a 30-second rotation window
-/// — finding a collision takes ~2^64 probes, infeasible even at
-/// billions of guesses per second.
+/// input. Uses SipHash-2-4 (128-bit output) keyed with the first
+/// 16 bytes of the rotating server secret.
+///
+/// ## Security property
+///
+/// What this MAC needs is **forgery resistance** — given any
+/// number of observed (input, cookie) pairs, an off-path
+/// attacker should not be able to produce a valid cookie for a
+/// fresh input without knowing the secret. (Collision resistance
+/// is the wrong frame: attackers don't gain anything by finding
+/// two inputs that hash to the same cookie; they need to forge
+/// a cookie for a chosen input.)
+///
+/// SipHash-2-4 is the conservatively-analyzed variant of
+/// SipHash. For an attacker that hasn't seen the secret, the
+/// best published distinguishers against SipHash-2-4 require
+/// query budgets far in excess of what a 30-second rotation
+/// window admits — and even those distinguishers don't yield
+/// forgery, only statistical bias.
+///
+/// ## Why not HMAC-SHA-256
+///
+/// HMAC-SHA-256 would also be defensible. SipHash-2-4 is
+/// cheaper on the short (≤64 B) inputs the cookie path handles,
+/// which matters because the *whole point* of the cookie is to
+/// be the cheap front-line defense against amplification floods
+/// — every CPU cycle saved in `cookie_mac` is one less cycle a
+/// flood can consume.
+///
+/// ## Defense in depth
+///
+/// The rotating secret (replaced every 30s) is not the primary
+/// argument; the primary argument is that SipHash-2-4 keyed
+/// with 128 bits of secret is forgery-resistant. The rotation
+/// limits the *blast radius* of any future cryptanalytic
+/// improvement — even a hypothetical break that lowered forgery
+/// cost to 2^60 would let an attacker forge ≤30s worth of
+/// cookies before the secret rolls.
 ///
 /// The domain tag "drift-dos-cookie-v1" is mixed in as a prefix
-/// so that a cookie MAC never collides with any other keyed
-/// SipHash usage that might be added later.
+/// so a cookie MAC never collides with any other keyed SipHash
+/// usage that might be added later (cross-protocol oracle).
 pub fn cookie_mac(secret: &[u8; 32], input: &[u8]) -> [u8; COOKIE_MAC_LEN] {
     let k0 = u64::from_le_bytes(secret[0..8].try_into().unwrap());
     let k1 = u64::from_le_bytes(secret[8..16].try_into().unwrap());
-    let mut hasher = SipHasher13::new_with_keys(k0, k1);
+    let mut hasher = SipHasher24::new_with_keys(k0, k1);
     hasher.write(b"drift-dos-cookie-v1");
     hasher.write(input);
     let out = hasher.finish128();
@@ -78,6 +110,32 @@ fn nonce_bytes(direction: Direction, seq: u32, packet_type: u8) -> [u8; 12] {
     n
 }
 
+/// AEAD session key wrapping a ring `LessSafeKey` (native) or a
+/// RustCrypto `ChaCha20Poly1305` (wasm).
+///
+/// ## Known zeroization gap (native build only)
+///
+/// `ring::aead::LessSafeKey` does **not** zero its internal key
+/// material on drop — that's a documented design choice in
+/// `ring`. So when a `SessionKey` is dropped, the 32-byte
+/// session key bytes inside `LessSafeKey` linger in the
+/// allocator until that memory is reused.
+///
+/// The bytes the *caller* holds are scrubbed: `derive_session_key`
+/// returns `Zeroizing<[u8; 32]>`, so the input to `SessionKey::new`
+/// is zeroed when its scope ends. This bounds the exposure to
+/// "anything still alive inside ring's internal allocation."
+///
+/// Removing the ring residual would mean switching all
+/// non-wasm callers to RustCrypto's `chacha20poly1305` (which
+/// zeroes via the `Zeroize` impls on its types). That switch
+/// loses ring's ~2× perf advantage on the ARM/x86 native paths
+/// — the `aead_head_to_head` bench shows the gap. A future
+/// release may take that trade if the threat model demands it;
+/// for now the long-term keys (`Identity::secret`) and stack
+/// copies (`Zeroizing<[u8;32]>` from `derive_session_key`) are
+/// scrubbed, and the residual ring window is acknowledged
+/// explicitly rather than hidden.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct SessionKey {

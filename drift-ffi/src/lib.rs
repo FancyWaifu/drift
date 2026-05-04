@@ -83,6 +83,54 @@ fn map_err(e: drift::error::DriftError) -> DriftResultCode {
     }
 }
 
+// ──────────────────────── Panic catch helpers ────────────────────────
+//
+// Unwinding across an FFI boundary is undefined behavior on every
+// supported target. We wrap every entry point in `catch_unwind` so
+// a panic inside the Rust side becomes a clean error code (or
+// NULL pointer) instead of UB. `AssertUnwindSafe` is acceptable
+// here because we either return immediately or drop owned values
+// — we never observe inconsistent state in the C caller.
+
+macro_rules! ffi_catch_code {
+    ($body:block) => {{
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(code) => code,
+            Err(_) => DriftResultCode::DRIFT_ERR_INTERNAL,
+        }
+    }};
+}
+
+macro_rules! ffi_catch_ptr {
+    ($body:block) => {{
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(p) => p,
+            Err(_) => std::ptr::null_mut(),
+        }
+    }};
+}
+
+macro_rules! ffi_catch_value {
+    ($default:expr, $body:block) => {{
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(v) => v,
+            Err(_) => $default,
+        }
+    }};
+}
+
+/// Build a slice from a (possibly NULL) pointer + length. Rust's
+/// `slice::from_raw_parts` requires a non-null pointer even for
+/// zero-length slices — passing NULL there is documented UB. So
+/// we hand back an empty slice explicitly when `len == 0`.
+unsafe fn slice_or_empty<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ptr, len)
+    }
+}
+
 // ──────────────────────── Identity ────────────────────────
 
 /// Opaque handle to a DRIFT identity (X25519 keypair).
@@ -91,20 +139,24 @@ pub struct DriftIdentity(Identity);
 /// Generate a fresh random identity.
 #[no_mangle]
 pub extern "C" fn drift_identity_generate() -> *mut DriftIdentity {
-    Box::into_raw(Box::new(DriftIdentity(Identity::generate())))
+    ffi_catch_ptr!({
+        Box::into_raw(Box::new(DriftIdentity(Identity::generate())))
+    })
 }
 
 /// Build an identity deterministically from a 32-byte seed.
 /// Returns NULL if `secret` is NULL.
 #[no_mangle]
 pub unsafe extern "C" fn drift_identity_from_secret(secret: *const u8) -> *mut DriftIdentity {
-    if secret.is_null() {
-        return ptr::null_mut();
-    }
-    let slice = std::slice::from_raw_parts(secret, 32);
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(slice);
-    Box::into_raw(Box::new(DriftIdentity(Identity::from_secret_bytes(seed))))
+    ffi_catch_ptr!({
+        if secret.is_null() {
+            return ptr::null_mut();
+        }
+        let slice = std::slice::from_raw_parts(secret, 32);
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(slice);
+        Box::into_raw(Box::new(DriftIdentity(Identity::from_secret_bytes(seed))))
+    })
 }
 
 /// Copy the 32-byte public key into `out`. Returns non-zero on
@@ -114,14 +166,16 @@ pub unsafe extern "C" fn drift_identity_public_key(
     id: *const DriftIdentity,
     out: *mut u8,
 ) -> DriftResultCode {
-    if id.is_null() || out.is_null() {
-        return DriftResultCode::DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let id = &(*id).0;
-    let pub_bytes = id.public_bytes();
-    let dst = std::slice::from_raw_parts_mut(out, 32);
-    dst.copy_from_slice(&pub_bytes);
-    DriftResultCode::DRIFT_OK
+    ffi_catch_code!({
+        if id.is_null() || out.is_null() {
+            return DriftResultCode::DRIFT_ERR_INVALID_ARGUMENT;
+        }
+        let id = &(*id).0;
+        let pub_bytes = id.public_bytes();
+        let dst = std::slice::from_raw_parts_mut(out, 32);
+        dst.copy_from_slice(&pub_bytes);
+        DriftResultCode::DRIFT_OK
+    })
 }
 
 /// Copy the 8-byte peer_id (BLAKE2b-truncated pubkey) into
@@ -131,22 +185,26 @@ pub unsafe extern "C" fn drift_identity_peer_id(
     id: *const DriftIdentity,
     out: *mut u8,
 ) -> DriftResultCode {
-    if id.is_null() || out.is_null() {
-        return DriftResultCode::DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let id = &(*id).0;
-    let pid = id.peer_id();
-    let dst = std::slice::from_raw_parts_mut(out, 8);
-    dst.copy_from_slice(&pid);
-    DriftResultCode::DRIFT_OK
+    ffi_catch_code!({
+        if id.is_null() || out.is_null() {
+            return DriftResultCode::DRIFT_ERR_INVALID_ARGUMENT;
+        }
+        let id = &(*id).0;
+        let pid = id.peer_id();
+        let dst = std::slice::from_raw_parts_mut(out, 8);
+        dst.copy_from_slice(&pid);
+        DriftResultCode::DRIFT_OK
+    })
 }
 
 /// Free an identity. Safe to call with NULL.
 #[no_mangle]
 pub unsafe extern "C" fn drift_identity_free(id: *mut DriftIdentity) {
-    if !id.is_null() {
-        drop(Box::from_raw(id));
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !id.is_null() {
+            drop(Box::from_raw(id));
+        }
+    }));
 }
 
 // ──────────────────────── Transport ────────────────────────
@@ -165,31 +223,33 @@ pub unsafe extern "C" fn drift_transport_bind(
     identity: *mut DriftIdentity,
     out: *mut *mut DriftTransport,
 ) -> DriftResultCode {
-    use DriftResultCode::*;
-    if addr.is_null() || identity.is_null() || out.is_null() {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-
-    // Take ownership of the identity so it's freed whether we
-    // succeed or fail.
-    let identity = Box::from_raw(identity).0;
-
-    let addr_str = match CStr::from_ptr(addr).to_str() {
-        Ok(s) => s,
-        Err(_) => return DRIFT_ERR_INVALID_ARGUMENT,
-    };
-    let sock_addr: SocketAddr = match addr_str.parse() {
-        Ok(a) => a,
-        Err(_) => return DRIFT_ERR_INVALID_ADDR,
-    };
-
-    match RUNTIME.block_on(Transport::bind(sock_addr, identity)) {
-        Ok(t) => {
-            *out = Box::into_raw(Box::new(DriftTransport(t)));
-            DRIFT_OK
+    ffi_catch_code!({
+        use DriftResultCode::*;
+        if addr.is_null() || identity.is_null() || out.is_null() {
+            return DRIFT_ERR_INVALID_ARGUMENT;
         }
-        Err(e) => map_err(e),
-    }
+
+        // Take ownership of the identity so it's freed whether we
+        // succeed or fail.
+        let identity = Box::from_raw(identity).0;
+
+        let addr_str = match CStr::from_ptr(addr).to_str() {
+            Ok(s) => s,
+            Err(_) => return DRIFT_ERR_INVALID_ARGUMENT,
+        };
+        let sock_addr: SocketAddr = match addr_str.parse() {
+            Ok(a) => a,
+            Err(_) => return DRIFT_ERR_INVALID_ADDR,
+        };
+
+        match RUNTIME.block_on(Transport::bind(sock_addr, identity)) {
+            Ok(t) => {
+                *out = Box::into_raw(Box::new(DriftTransport(t)));
+                DRIFT_OK
+            }
+            Err(e) => map_err(e),
+        }
+    })
 }
 
 /// Register a peer by its 32-byte public key and remote address.
@@ -204,37 +264,39 @@ pub unsafe extern "C" fn drift_transport_add_peer(
     initiator: c_int,
     out_pid: *mut u8,
 ) -> DriftResultCode {
-    use DriftResultCode::*;
-    if transport.is_null() || peer_pub.is_null() || addr.is_null() || out_pid.is_null() {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let t = &(*transport).0;
-
-    let mut pub_bytes = [0u8; 32];
-    pub_bytes.copy_from_slice(std::slice::from_raw_parts(peer_pub, 32));
-
-    let addr_str = match CStr::from_ptr(addr).to_str() {
-        Ok(s) => s,
-        Err(_) => return DRIFT_ERR_INVALID_ARGUMENT,
-    };
-    let sock_addr: SocketAddr = match addr_str.parse() {
-        Ok(a) => a,
-        Err(_) => return DRIFT_ERR_INVALID_ADDR,
-    };
-
-    let direction = if initiator != 0 {
-        Direction::Initiator
-    } else {
-        Direction::Responder
-    };
-
-    match RUNTIME.block_on(t.add_peer(pub_bytes, sock_addr, direction)) {
-        Ok(pid) => {
-            std::slice::from_raw_parts_mut(out_pid, 8).copy_from_slice(&pid);
-            DRIFT_OK
+    ffi_catch_code!({
+        use DriftResultCode::*;
+        if transport.is_null() || peer_pub.is_null() || addr.is_null() || out_pid.is_null() {
+            return DRIFT_ERR_INVALID_ARGUMENT;
         }
-        Err(e) => map_err(e),
-    }
+        let t = &(*transport).0;
+
+        let mut pub_bytes = [0u8; 32];
+        pub_bytes.copy_from_slice(std::slice::from_raw_parts(peer_pub, 32));
+
+        let addr_str = match CStr::from_ptr(addr).to_str() {
+            Ok(s) => s,
+            Err(_) => return DRIFT_ERR_INVALID_ARGUMENT,
+        };
+        let sock_addr: SocketAddr = match addr_str.parse() {
+            Ok(a) => a,
+            Err(_) => return DRIFT_ERR_INVALID_ADDR,
+        };
+
+        let direction = if initiator != 0 {
+            Direction::Initiator
+        } else {
+            Direction::Responder
+        };
+
+        match RUNTIME.block_on(t.add_peer(pub_bytes, sock_addr, direction)) {
+            Ok(pid) => {
+                std::slice::from_raw_parts_mut(out_pid, 8).copy_from_slice(&pid);
+                DRIFT_OK
+            }
+            Err(e) => map_err(e),
+        }
+    })
 }
 
 /// Send an encrypted DATA packet to `peer_id`.
@@ -249,18 +311,23 @@ pub unsafe extern "C" fn drift_transport_send_data(
     deadline_ms: u16,
     coalesce_group: u32,
 ) -> DriftResultCode {
-    use DriftResultCode::*;
-    if transport.is_null() || peer_id.is_null() || (payload.is_null() && payload_len != 0) {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let t = &(*transport).0;
-    let mut pid = [0u8; 8];
-    pid.copy_from_slice(std::slice::from_raw_parts(peer_id, 8));
-    let slice = std::slice::from_raw_parts(payload, payload_len);
-    match RUNTIME.block_on(t.send_data(&pid, slice, deadline_ms, coalesce_group)) {
-        Ok(()) => DRIFT_OK,
-        Err(e) => map_err(e),
-    }
+    ffi_catch_code!({
+        use DriftResultCode::*;
+        if transport.is_null() || peer_id.is_null() || (payload.is_null() && payload_len != 0) {
+            return DRIFT_ERR_INVALID_ARGUMENT;
+        }
+        let t = &(*transport).0;
+        let mut pid = [0u8; 8];
+        pid.copy_from_slice(std::slice::from_raw_parts(peer_id, 8));
+        // `slice::from_raw_parts(NULL, 0)` is UB; route through
+        // `slice_or_empty` to get an empty slice for the zero-len
+        // case.
+        let slice = slice_or_empty(payload, payload_len);
+        match RUNTIME.block_on(t.send_data(&pid, slice, deadline_ms, coalesce_group)) {
+            Ok(()) => DRIFT_OK,
+            Err(e) => map_err(e),
+        }
+    })
 }
 
 /// Receive one decrypted DATA packet. Blocks up to `timeout_ms`
@@ -274,42 +341,40 @@ pub unsafe extern "C" fn drift_transport_recv(
     timeout_ms: u64,
     out_msg: *mut *mut DriftMessage,
 ) -> DriftResultCode {
-    use DriftResultCode::*;
-    if transport.is_null() || out_msg.is_null() {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    *out_msg = ptr::null_mut();
-    let t = &(*transport).0;
-
-    // Build the future + timeout *inside* block_on — tokio
-    // timers are registered at construction time, not at first
-    // poll, so calling `tokio::time::timeout(...)` outside a
-    // runtime context panics with "there is no reactor
-    // running".
-    let received = RUNTIME.block_on(async {
-        if timeout_ms == 0 {
-            Ok(t.recv().await)
-        } else {
-            tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                t.recv(),
-            )
-            .await
+    ffi_catch_code!({
+        use DriftResultCode::*;
+        if transport.is_null() || out_msg.is_null() {
+            return DRIFT_ERR_INVALID_ARGUMENT;
         }
-    });
+        *out_msg = ptr::null_mut();
+        let t = &(*transport).0;
 
-    let received = match received {
-        Ok(v) => v,
-        Err(_) => return DRIFT_ERR_TIMEOUT,
-    };
+        // Build the future + timeout *inside* block_on — tokio
+        // timers are registered at construction time, not at first
+        // poll, so calling `tokio::time::timeout(...)` outside a
+        // runtime context panics with "there is no reactor
+        // running".
+        let received = RUNTIME.block_on(async {
+            if timeout_ms == 0 {
+                Ok(t.recv().await)
+            } else {
+                tokio::time::timeout(Duration::from_millis(timeout_ms), t.recv()).await
+            }
+        });
 
-    match received {
-        Some(msg) => {
-            *out_msg = Box::into_raw(Box::new(DriftMessage(msg)));
-            DRIFT_OK
+        let received = match received {
+            Ok(v) => v,
+            Err(_) => return DRIFT_ERR_TIMEOUT,
+        };
+
+        match received {
+            Some(msg) => {
+                *out_msg = Box::into_raw(Box::new(DriftMessage(msg)));
+                DRIFT_OK
+            }
+            None => DRIFT_ERR_IO, // channel closed — transport was torn down
         }
-        None => DRIFT_ERR_IO, // channel closed — transport was torn down
-    }
+    })
 }
 
 /// Current transport metrics. Lightweight snapshot — atomic
@@ -318,10 +383,12 @@ pub unsafe extern "C" fn drift_transport_recv(
 pub unsafe extern "C" fn drift_transport_handshakes_completed(
     transport: *const DriftTransport,
 ) -> u64 {
-    if transport.is_null() {
-        return 0;
-    }
-    (*transport).0.metrics().handshakes_completed
+    ffi_catch_value!(0u64, {
+        if transport.is_null() {
+            return 0;
+        }
+        (*transport).0.metrics().handshakes_completed
+    })
 }
 
 /// Write the transport's local socket address into `out_buf`
@@ -335,34 +402,38 @@ pub unsafe extern "C" fn drift_transport_local_addr(
     out_buf: *mut c_char,
     buf_len: usize,
 ) -> DriftResultCode {
-    use DriftResultCode::*;
-    if transport.is_null() || out_buf.is_null() || buf_len == 0 {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let t = &(*transport).0;
-    let addr = match t.local_addr() {
-        Ok(a) => a,
-        Err(_) => return DRIFT_ERR_IO,
-    };
-    let s = addr.to_string();
-    let bytes = s.as_bytes();
-    // Leave one byte for the NUL terminator.
-    if bytes.len() + 1 > buf_len {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let dst = std::slice::from_raw_parts_mut(out_buf as *mut u8, buf_len);
-    dst[..bytes.len()].copy_from_slice(bytes);
-    dst[bytes.len()] = 0;
-    DRIFT_OK
+    ffi_catch_code!({
+        use DriftResultCode::*;
+        if transport.is_null() || out_buf.is_null() || buf_len == 0 {
+            return DRIFT_ERR_INVALID_ARGUMENT;
+        }
+        let t = &(*transport).0;
+        let addr = match t.local_addr() {
+            Ok(a) => a,
+            Err(_) => return DRIFT_ERR_IO,
+        };
+        let s = addr.to_string();
+        let bytes = s.as_bytes();
+        // Leave one byte for the NUL terminator.
+        if bytes.len() + 1 > buf_len {
+            return DRIFT_ERR_INVALID_ARGUMENT;
+        }
+        let dst = std::slice::from_raw_parts_mut(out_buf as *mut u8, buf_len);
+        dst[..bytes.len()].copy_from_slice(bytes);
+        dst[bytes.len()] = 0;
+        DRIFT_OK
+    })
 }
 
 /// Free a transport. Safe to call with NULL. Aborts all
 /// background tasks on drop.
 #[no_mangle]
 pub unsafe extern "C" fn drift_transport_free(transport: *mut DriftTransport) {
-    if !transport.is_null() {
-        drop(Box::from_raw(transport));
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !transport.is_null() {
+            drop(Box::from_raw(transport));
+        }
+    }));
 }
 
 // ──────────────────────── Message ────────────────────────
@@ -373,20 +444,24 @@ pub struct DriftMessage(Received);
 /// Number of bytes in the payload.
 #[no_mangle]
 pub unsafe extern "C" fn drift_message_payload_len(msg: *const DriftMessage) -> usize {
-    if msg.is_null() {
-        return 0;
-    }
-    (*msg).0.payload.len()
+    ffi_catch_value!(0usize, {
+        if msg.is_null() {
+            return 0;
+        }
+        (*msg).0.payload.len()
+    })
 }
 
 /// Pointer to the payload bytes. Valid until `drift_message_free`
 /// is called on this handle.
 #[no_mangle]
 pub unsafe extern "C" fn drift_message_payload(msg: *const DriftMessage) -> *const u8 {
-    if msg.is_null() {
-        return ptr::null();
-    }
-    (*msg).0.payload.as_ptr()
+    ffi_catch_value!(std::ptr::null(), {
+        if msg.is_null() {
+            return ptr::null();
+        }
+        (*msg).0.payload.as_ptr()
+    })
 }
 
 /// Copy the sender peer_id (8 bytes) into `out`.
@@ -395,19 +470,23 @@ pub unsafe extern "C" fn drift_message_peer_id(
     msg: *const DriftMessage,
     out: *mut u8,
 ) -> DriftResultCode {
-    use DriftResultCode::*;
-    if msg.is_null() || out.is_null() {
-        return DRIFT_ERR_INVALID_ARGUMENT;
-    }
-    let pid = (*msg).0.peer_id;
-    std::slice::from_raw_parts_mut(out, 8).copy_from_slice(&pid);
-    DRIFT_OK
+    ffi_catch_code!({
+        use DriftResultCode::*;
+        if msg.is_null() || out.is_null() {
+            return DRIFT_ERR_INVALID_ARGUMENT;
+        }
+        let pid = (*msg).0.peer_id;
+        std::slice::from_raw_parts_mut(out, 8).copy_from_slice(&pid);
+        DRIFT_OK
+    })
 }
 
 /// Free a received message. Safe to call with NULL.
 #[no_mangle]
 pub unsafe extern "C" fn drift_message_free(msg: *mut DriftMessage) {
-    if !msg.is_null() {
-        drop(Box::from_raw(msg));
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !msg.is_null() {
+            drop(Box::from_raw(msg));
+        }
+    }));
 }
