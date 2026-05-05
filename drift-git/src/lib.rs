@@ -40,14 +40,36 @@ pub struct DriftGitUrl {
 }
 
 impl DriftGitUrl {
-    /// Parse `drift://<peerhex>@<host>:<port>/<repo-path>`.
+    /// Parse `drift[+<scheme>]://<peerhex>@<host>:<port>/<repo-path>`.
+    ///
+    /// Bare `drift://` defaults to UDP. `drift+tcp://`, `drift+tls://`,
+    /// `drift+ws://`, `drift+http://`, `drift+onion://` all dispatch
+    /// through DRIFT's URL registry to the matching adapter.
     pub fn parse(url: &str) -> Result<Self> {
-        let body = url
-            .strip_prefix("drift://")
-            .ok_or_else(|| anyhow!("URL must start with drift://"))?;
+        // Pull off `drift://` or `drift+<scheme>://`.
+        let (wire_scheme, body) = if let Some(rest) = url.strip_prefix("drift+") {
+            // rest = "<scheme>://<peerhex>@host:port/path"
+            let scheme_end = rest.find("://").ok_or_else(|| {
+                anyhow!("malformed URL: drift+<scheme>:// expected, got {:?}", url)
+            })?;
+            let scheme = &rest[..scheme_end];
+            let body = &rest[scheme_end + 3..];
+            if scheme.is_empty() {
+                return Err(anyhow!(
+                    "drift+:// missing transport scheme (try drift+tcp://, drift+tls://, drift+ws://, …)"
+                ));
+            }
+            (scheme.to_string(), body)
+        } else {
+            let body = url
+                .strip_prefix("drift://")
+                .ok_or_else(|| anyhow!("URL must start with drift:// or drift+<scheme>://"))?;
+            ("udp".to_string(), body)
+        };
+
         let at_idx = body
             .find('@')
-            .ok_or_else(|| anyhow!("URL missing `@` separator (drift://<peerhex>@<host>:<port>/<path>)"))?;
+            .ok_or_else(|| anyhow!("URL missing `@` separator (need <peerhex>@<host>:<port>/<path>)"))?;
         let (peer_hex, rest) = body.split_at(at_idx);
         let rest = &rest[1..]; // skip '@'
         if peer_hex.len() != 64 {
@@ -67,8 +89,7 @@ impl DriftGitUrl {
         let host_port = &rest[..slash_idx];
         let repo_path = &rest[slash_idx..]; // keep leading slash
 
-        // v1: always UDP. Future: support drift+tls://, drift+ws://.
-        let wire_url = format!("udp://{}", host_port);
+        let wire_url = format!("{}://{}", wire_scheme, host_port);
         Ok(Self {
             peer_pub,
             wire_url,
@@ -279,6 +300,41 @@ mod tests {
     #[test]
     fn parse_url_rejects_bad_hex_length() {
         assert!(DriftGitUrl::parse("drift://abc@127.0.0.1:9000/x").is_err());
+    }
+
+    #[test]
+    fn parse_url_drift_plus_tcp() {
+        let u = DriftGitUrl::parse(
+            "drift+tcp://aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899@127.0.0.1:9000/r.git",
+        )
+        .unwrap();
+        assert_eq!(u.wire_url, "tcp://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn parse_url_drift_plus_tls() {
+        let u = DriftGitUrl::parse(
+            "drift+tls://aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899@127.0.0.1:9000/r.git",
+        )
+        .unwrap();
+        assert_eq!(u.wire_url, "tls://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn parse_url_drift_plus_ws() {
+        let u = DriftGitUrl::parse(
+            "drift+ws://aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899@127.0.0.1:9000/r.git",
+        )
+        .unwrap();
+        assert_eq!(u.wire_url, "ws://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn parse_url_rejects_drift_plus_empty_scheme() {
+        assert!(DriftGitUrl::parse(
+            "drift+://aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899@127.0.0.1:9000/r.git"
+        )
+        .is_err());
     }
 
     #[test]
