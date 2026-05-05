@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use drift::identity::Identity;
 use drift::streams::StreamManager;
-use drift::{Transport, TransportConfig};
+use drift::{Direction, Transport, TransportConfig};
 use drift_core::PeerId;
 use drift_git::{
     build_err_reply, build_ok_reply, frame_data, frame_eod, parse_frame, parse_request, Frame,
@@ -26,8 +26,20 @@ use tracing::{info, warn};
 #[clap(name = "drift-git-server", about = "Git daemon over DRIFT")]
 struct Cli {
     /// DRIFT URL to listen on (e.g. `udp://0.0.0.0:9100`).
-    #[clap(long, default_value = "udp://0.0.0.0:9100")]
-    bind: String,
+    /// Mutually exclusive with `--connect`.
+    #[clap(long, conflicts_with = "connect")]
+    bind: Option<String>,
+
+    /// Instead of listening, dial a bridge node and accept
+    /// incoming streams over the resulting mesh connection.
+    /// Use this when the server lives behind NAT/firewall and
+    /// can't be dialed directly. Requires `--bridge-pub`.
+    #[clap(long, requires = "bridge_pub")]
+    connect: Option<String>,
+
+    /// Bridge node's pubkey (hex). Required with `--connect`.
+    #[clap(long)]
+    bridge_pub: Option<String>,
 
     /// Path to a 32-byte identity secret (raw or 64-char hex).
     /// If omitted, a fresh ephemeral identity is generated and
@@ -75,16 +87,72 @@ async fn main() -> Result<()> {
     };
     let pub_hex = hex::encode(identity.public_bytes());
     info!("server pubkey: {}", pub_hex);
+    // Use stderr-style flushing for the banner so callers
+    // capturing stdout-to-file see it immediately. `println!`
+    // is fully buffered when stdout isn't a TTY, which leaves
+    // the banner stuck until 4KB of output accumulates.
     println!("DRIFT_GIT_PUB={}", pub_hex);
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 
     let mut config = TransportConfig::default();
     config.accept_any_peer = true; // we ACL on the stream side
-    let (transport, bound_url) = Transport::bind_url(&cli.bind, identity, config)
-        .await
-        .with_context(|| format!("binding {}", cli.bind))?;
-    let transport = Arc::new(transport);
-    info!("listening on {}", bound_url);
-    println!("DRIFT_GIT_BIND={}", bound_url);
+
+    // Two modes:
+    //   --bind  → listen on a wire (existing flow)
+    //   --connect → dial a bridge, accept streams over the
+    //               mesh-forwarded connection.
+    let transport = match (&cli.bind, &cli.connect) {
+        (Some(bind_url), None) => {
+            let (t, bound_url) = Transport::bind_url(bind_url, identity, config)
+                .await
+                .with_context(|| format!("binding {}", bind_url))?;
+            info!("listening on {}", bound_url);
+            println!("DRIFT_GIT_BIND={}", bound_url);
+            let _ = std::io::stdout().flush();
+            Arc::new(t)
+        }
+        (None, Some(bridge_url)) => {
+            let bridge_pub_hex = cli
+                .bridge_pub
+                .as_ref()
+                .ok_or_else(|| anyhow!("--connect requires --bridge-pub"))?;
+            let bridge_pub = parse_pubkey_hex(bridge_pub_hex)?;
+            let bridge_pid = drift_core::derive_peer_id(&bridge_pub);
+            let (t, bridge_addr) = Transport::connect_url(bridge_url, identity, config)
+                .await
+                .with_context(|| format!("dialing bridge {}", bridge_url))?;
+            let t = Arc::new(t);
+            t.add_peer(bridge_pub, bridge_addr, Direction::Initiator)
+                .await
+                .context("registering bridge as outbound peer")?;
+            // Warmup: a single DATA packet to the bridge so the
+            // bridge's peer-table records our interface and starts
+            // announcing us in beacons. Without this, subsequent
+            // mesh handshakes from peers connected to the same
+            // bridge can't find us.
+            let _ = t.send_data(&bridge_pid, b"warmup", 0, 0).await;
+            // Beacon propagation: the bridge needs ~1s to emit
+            // its next beacon round; we wait so other peers'
+            // mesh-routing tables have us before they try to
+            // open streams to us.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            info!(
+                bridge_pub = %hex::encode(bridge_pub),
+                bridge = %bridge_url,
+                "connected to bridge + warmed; accepting streams over mesh"
+            );
+            println!("DRIFT_GIT_BRIDGE={}", bridge_url);
+            let _ = std::io::stdout().flush();
+            t
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!("--bind and --connect are mutually exclusive"));
+        }
+        (None, None) => {
+            return Err(anyhow!("must specify either --bind or --connect"));
+        }
+    };
 
     let manager = StreamManager::bind(transport.clone()).await;
 

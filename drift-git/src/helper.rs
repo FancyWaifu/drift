@@ -125,19 +125,63 @@ async fn run_tunnel(
     let identity_secret = load_or_make_helper_identity()?;
     let identity = Identity::from_secret_bytes(identity_secret);
 
-    let (transport, peer_addr) = Transport::connect_url(
-        &url.wire_url,
-        identity,
-        TransportConfig::default(),
-    )
-    .await
-    .with_context(|| format!("connecting to {}", url.wire_url))?;
-    let transport = Arc::new(transport);
-
-    let server_peer_id = transport
-        .add_peer(url.peer_pub, peer_addr, Direction::Initiator)
+    // Two routing modes:
+    //   1. Direct: connect to url.wire_url, server is the
+    //      direct wire peer.
+    //   2. Bridged: env vars DRIFT_GIT_BRIDGE_URL +
+    //      DRIFT_GIT_BRIDGE_PUB tell us to connect to a bridge
+    //      instead, then mesh-route to the server pubkey from
+    //      the URL.
+    let (transport, server_peer_id) = if let Ok(bridge_url) = env::var("DRIFT_GIT_BRIDGE_URL") {
+        let bridge_pub_hex = env::var("DRIFT_GIT_BRIDGE_PUB")
+            .context("DRIFT_GIT_BRIDGE_URL set but DRIFT_GIT_BRIDGE_PUB missing")?;
+        let bridge_pub = parse_pubkey_hex_str(&bridge_pub_hex)?;
+        let bridge_pid = drift_core::derive_peer_id(&bridge_pub);
+        let (t, bridge_addr) = Transport::connect_url(
+            &bridge_url,
+            identity,
+            TransportConfig::default(),
+        )
         .await
-        .context("registering server as peer")?;
+        .with_context(|| format!("connecting to bridge {}", bridge_url))?;
+        let t = Arc::new(t);
+        // Register the bridge as our direct peer (wire-level
+        // handshake). Mesh routing toward the server happens
+        // via the bridge's mesh tables.
+        t.add_peer(bridge_pub, bridge_addr, Direction::Initiator)
+            .await
+            .context("handshaking with bridge")?;
+        // Warmup: send a probe so the bridge's peer-table
+        // records us and announces us in beacons.
+        let _ = t.send_data(&bridge_pid, b"warmup", 0, 0).await;
+        // Wait for the bridge's beacon round so mesh routes
+        // toward the server are populated in our routing
+        // table. (1–2s on loopback; longer on real networks.)
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Register the server's pubkey for mesh routing — the
+        // bridge_addr is a placeholder; mesh delivery uses the
+        // routes built from beacons.
+        let server_pid = t
+            .add_peer(url.peer_pub, bridge_addr, Direction::Initiator)
+            .await
+            .context("registering server as mesh peer")?;
+        (t, server_pid)
+    } else {
+        let (t, peer_addr) = Transport::connect_url(
+            &url.wire_url,
+            identity,
+            TransportConfig::default(),
+        )
+        .await
+        .with_context(|| format!("connecting to {}", url.wire_url))?;
+        let t = Arc::new(t);
+        let server_pid = t
+            .add_peer(url.peer_pub, peer_addr, Direction::Initiator)
+            .await
+            .context("registering server as peer")?;
+        (t, server_pid)
+    };
+    let transport = transport;
 
     let manager = StreamManager::bind(transport.clone()).await;
     let stream = manager
@@ -240,6 +284,20 @@ async fn run_tunnel(
     // Now safe to close — both directions have signaled EOD.
     let _ = stream.close().await;
     Ok(())
+}
+
+fn parse_pubkey_hex_str(s: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(s.trim())
+        .with_context(|| format!("invalid hex pubkey: {:?}", s))?;
+    if bytes.len() != 32 {
+        return Err(anyhow!(
+            "pubkey must be 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        ));
+    }
+    let mut k = [0u8; 32];
+    k.copy_from_slice(&bytes);
+    Ok(k)
 }
 
 /// Helper-side identity. v1 reads from the env var
