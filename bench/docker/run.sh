@@ -125,6 +125,35 @@ run_one() {
         return
     fi
 
+    # For throughput, replace the client's pump-rate number with
+    # the server-reported goodput (BENCH_BYTES_RECEIVED /
+    # BENCH_DURATION_S). All three protocol servers emit these
+    # markers, so the comparison is apples-to-apples regardless
+    # of how each protocol's send-side flow control behaves.
+    if [[ "$workload" == "throughput" ]]; then
+        local server_logs recv_bytes recv_secs
+        server_logs=$(docker logs "$SERVER_NAME" 2>&1 || true)
+        # `|| true` on the greps because a no-match exits 1
+        # under `set -e + pipefail`, which would kill the script
+        # right after the only-printable-result line ran.
+        recv_bytes=$(echo "$server_logs" | grep -oE 'BENCH_BYTES_RECEIVED=[0-9]+' | tail -1 | cut -d= -f2 || true)
+        recv_secs=$(echo "$server_logs" | grep -oE 'BENCH_DURATION_S=[0-9.]+' | tail -1 | cut -d= -f2 || true)
+        if [[ -n "$recv_bytes" && -n "$recv_secs" ]]; then
+            result=$(echo "$result" | python3 -c "
+import json, sys
+r = json.loads(sys.stdin.read())
+r['client_bytes_pumped'] = r.get('bytes_moved')
+r['client_pump_mbps'] = r.get('throughput_mbps')
+r['bytes_moved'] = $recv_bytes
+r['duration_s'] = $recv_secs
+r['throughput_mbps'] = ($recv_bytes * 8.0) / ($recv_secs * 1000000.0)
+print(json.dumps(r))
+")
+        else
+            echo "   WARNING: server didn't emit BENCH_BYTES_RECEIVED markers; using client pump-rate"
+        fi
+    fi
+
     echo "   $result"
     echo "$result" >> "$RESULTS_FILE"
 
