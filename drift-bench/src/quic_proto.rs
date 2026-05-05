@@ -125,13 +125,29 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let mut recv = connection.accept_uni().await?;
             let mut buf = vec![0u8; 65536];
             let mut total = 0u64;
+            let mut first_recv: Option<Instant> = None;
+            let mut last_recv: Option<Instant> = None;
             loop {
                 match recv.read(&mut buf).await? {
-                    Some(n) if n > 0 => total += n as u64,
+                    Some(n) if n > 0 => {
+                        let now = Instant::now();
+                        if first_recv.is_none() {
+                            first_recv = Some(now);
+                        }
+                        last_recv = Some(now);
+                        total += n as u64;
+                    }
                     _ => break,
                 }
             }
-            eprintln!("quic server received {} bytes", total);
+            // Standardized markers — matches DRIFT and WG so
+            // the bench harness can compute one canonical
+            // goodput number across all three protocols.
+            if let (Some(s), Some(l)) = (first_recv, last_recv) {
+                let dur = (l - s).as_secs_f64();
+                eprintln!("BENCH_BYTES_RECEIVED={}", total);
+                eprintln!("BENCH_DURATION_S={:.6}", dur);
+            }
         }
     }
     Ok(None)

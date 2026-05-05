@@ -164,9 +164,11 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let server_sk = StaticSecret::from(SERVER_SEED);
             let mut tunn = Tunn::new(server_sk, client_pk, None, None, 1, None);
             let mut total = 0u64;
+            let mut first_recv: Option<Instant> = None;
+            let mut last_recv: Option<Instant> = None;
             loop {
                 let recv =
-                    tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf))
+                    tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
                         .await;
                 let (n, src) = match recv {
                     Ok(Ok(v)) => v,
@@ -175,10 +177,21 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                 if let Some(data) =
                     handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
                 {
+                    let now = Instant::now();
+                    if first_recv.is_none() {
+                        first_recv = Some(now);
+                    }
+                    last_recv = Some(now);
                     total += data.len() as u64;
                 }
             }
-            eprintln!("wg server received {} bytes", total);
+            // Standardized markers — see drift_proto.rs for
+            // rationale.
+            if let (Some(s), Some(l)) = (first_recv, last_recv) {
+                let dur = (l - s).as_secs_f64();
+                eprintln!("BENCH_BYTES_RECEIVED={}", total);
+                eprintln!("BENCH_DURATION_S={:.6}", dur);
+            }
         }
     }
     Ok(None)

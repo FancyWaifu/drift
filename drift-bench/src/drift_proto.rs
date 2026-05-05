@@ -23,6 +23,30 @@ fn ensure_scheme(s: &str) -> String {
     }
 }
 
+/// DRIFT's URL dispatcher parses the address portion as a literal
+/// `SocketAddr`, so a Docker hostname like `server:9000` would
+/// fail. Resolve via `crate::resolve_target` and rewrite the URL
+/// with the resulting IP.
+async fn resolve_url(url: &str) -> Result<String> {
+    if let Some(idx) = url.find("://") {
+        let scheme = &url[..idx];
+        let host = &url[idx + 3..];
+        // Already an IP literal? Skip resolution.
+        if host.parse::<std::net::SocketAddr>().is_ok() {
+            return Ok(url.to_string());
+        }
+        let addr = crate::resolve_target(host).await?;
+        Ok(format!("{}://{}", scheme, addr))
+    } else {
+        // No scheme — resolve, then default to udp.
+        if url.parse::<std::net::SocketAddr>().is_ok() {
+            return Ok(format!("udp://{}", url));
+        }
+        let addr = crate::resolve_target(url).await?;
+        Ok(format!("udp://{}", addr))
+    }
+}
+
 // Fixed *server* seed so the client knows the server's peer_id
 // up front (avoids a discovery step in the measurement). The
 // client uses `Identity::generate()` for fresh static keys per
@@ -45,12 +69,9 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     eprintln!("drift server listening on {}", bound_url);
 
     match cli.workload {
-        Workload::Handshake | Workload::Rtt | Workload::Throughput => {
-            // All three workloads echo every received DATA back
-            // to its sender. Throughput uses the echo to measure
-            // round-trip goodput on the client side; Rtt uses it
-            // for ping-pong timing; Handshake uses it as the
-            // "first byte acked" boundary.
+        Workload::Handshake | Workload::Rtt => {
+            // Handshake: echo so the client measures connect→
+            // first-byte-back. Rtt: echo for ping-pong timing.
             loop {
                 match tokio::time::timeout(Duration::from_secs(30), server.recv()).await {
                     Ok(Some(msg)) => {
@@ -60,13 +81,42 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                 }
             }
         }
+        Workload::Throughput => {
+            // One-way bulk transfer (iperf3-shaped). Drain the
+            // recv channel without echoing; track first/last
+            // packet times + total bytes; emit standardized
+            // markers on idle. The harness scrapes these from
+            // server stderr to compute goodput, so all three
+            // protocols measure the same thing.
+            let mut total_bytes = 0u64;
+            let mut first_recv: Option<Instant> = None;
+            let mut last_recv: Option<Instant> = None;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), server.recv()).await {
+                    Ok(Some(msg)) => {
+                        let now = Instant::now();
+                        if first_recv.is_none() {
+                            first_recv = Some(now);
+                        }
+                        last_recv = Some(now);
+                        total_bytes += msg.payload.len() as u64;
+                    }
+                    _ => break,
+                }
+            }
+            if let (Some(s), Some(l)) = (first_recv, last_recv) {
+                let dur = (l - s).as_secs_f64();
+                eprintln!("BENCH_BYTES_RECEIVED={}", total_bytes);
+                eprintln!("BENCH_DURATION_S={:.6}", dur);
+            }
+        }
     }
     Ok(None)
 }
 
 pub async fn client(cli: &Cli) -> Result<Option<Report>> {
     let server_pub = Identity::from_secret_bytes(SERVER_SEED).public_bytes();
-    let target_url = ensure_scheme(&cli.target);
+    let target_url = resolve_url(&ensure_scheme(&cli.target)).await?;
 
     match cli.workload {
         Workload::Handshake => run_handshake(cli, server_pub, &target_url).await,
@@ -177,59 +227,38 @@ async fn run_throughput(
     let payload = vec![0xA5u8; cli.payload_bytes];
 
     // Warm the handshake (echoed back by the server-side loop).
+    // Warmup probe so the handshake completes before timing
+    // starts. The server doesn't echo in throughput mode any
+    // more, so we don't recv() — just sleep briefly to let
+    // HELLO_ACK arrive.
     client.send_data(server_peer, b"warm", 0, 0).await?;
-    let _ = tokio::time::timeout(Duration::from_secs(5), client.recv()).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let duration = Duration::from_secs(cli.duration_secs);
     let start = Instant::now();
 
-    // Drain the server's echoed packets *concurrently* with our
-    // sends. The headline number is "bytes that round-tripped"
-    // — i.e. goodput, not pump-rate. If our sends outpace the
-    // server's ability to echo back, the gap shows up as the
-    // recv side falling behind, which is exactly how a real
-    // application's flow control would look.
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-    let recv_bytes = Arc::new(AtomicU64::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let recv_client = client.clone();
-    let recv_bytes_for_task = recv_bytes.clone();
-    let stop_for_task = stop.clone();
-    let recv_task = tokio::spawn(async move {
-        while !stop_for_task.load(AtomicOrdering::Relaxed) {
-            match tokio::time::timeout(Duration::from_millis(200), recv_client.recv()).await {
-                Ok(Some(msg)) => {
-                    recv_bytes_for_task.fetch_add(msg.payload.len() as u64, AtomicOrdering::Relaxed);
-                }
-                _ => continue,
-            }
-        }
-    });
-
+    // One-way pump. The server tracks bytes received + duration
+    // and emits BENCH_BYTES_RECEIVED / BENCH_DURATION_S markers
+    // on stderr; the bench harness uses those to compute the
+    // canonical throughput (so all three protocols measure the
+    // same thing). The numbers we report client-side are
+    // pump-rate — informational, not the headline.
     let mut sent_bytes = 0u64;
     while start.elapsed() < duration {
         client.send_data(server_peer, &payload, 0, 0).await?;
         sent_bytes += payload.len() as u64;
     }
-
-    // Grace period to let the last few echoes come back.
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    stop.store(true, AtomicOrdering::Relaxed);
-    let _ = recv_task.await;
-
     let elapsed = start.elapsed().as_secs_f64();
-    let goodput_bytes = recv_bytes.load(AtomicOrdering::Relaxed);
 
     eprintln!(
-        "drift throughput: sent {} B, echoed back {} B in {:.2}s ({:.1}% return ratio)",
+        "drift client pumped {} B in {:.2}s ({:.1} Mbps pump-rate; canonical goodput from server stderr)",
         sent_bytes,
-        goodput_bytes,
         elapsed,
-        (goodput_bytes as f64 / sent_bytes as f64) * 100.0,
+        (sent_bytes as f64 * 8.0) / (elapsed * 1_000_000.0),
     );
 
-    report.bytes_moved = Some(goodput_bytes);
+    report.bytes_moved = Some(sent_bytes);
     report.duration_s = Some(elapsed);
-    report.throughput_mbps = Some((goodput_bytes as f64 * 8.0) / (elapsed * 1_000_000.0));
+    report.throughput_mbps = Some((sent_bytes as f64 * 8.0) / (elapsed * 1_000_000.0));
     Ok(Some(report))
 }
