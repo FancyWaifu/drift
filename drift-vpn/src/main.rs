@@ -1,0 +1,82 @@
+//! `drift-vpn` — identity-routed multi-transport VPN built on
+//! DRIFT. See drift-vpn/README.md for design + config docs.
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+mod config;
+mod identity;
+mod routing;
+
+#[cfg(target_os = "linux")]
+mod daemon;
+
+#[derive(Parser)]
+#[clap(name = "drift-vpn", about = "Identity-routed multi-transport VPN over DRIFT")]
+struct Cli {
+    #[clap(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Bring up the VPN. Reads a TOML config and runs the
+    /// daemon in the foreground; SIGINT to stop.
+    Up {
+        /// Path to TOML config.
+        #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
+        config: PathBuf,
+    },
+    /// Generate a fresh identity keypair, write the secret
+    /// to `--out`, and print the pubkey hex to stdout.
+    Keygen {
+        #[clap(short, long, default_value = "identity.key")]
+        out: PathBuf,
+    },
+    /// Print the pubkey for an existing identity file.
+    Show {
+        #[clap(short, long)]
+        identity_file: PathBuf,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "drift_vpn=info,drift=warn".into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Keygen { out } => {
+            let pub_hex = identity::keygen(&out).await?;
+            eprintln!("wrote secret to {}", out.display());
+            println!("{}", pub_hex);
+        }
+        Cmd::Show { identity_file } => {
+            let id = identity::load(&identity_file).await?;
+            println!("{}", hex::encode(id.public_bytes()));
+        }
+        Cmd::Up { config: path } => {
+            #[cfg(target_os = "linux")]
+            {
+                let cfg = config::Config::load(&path).await?;
+                let id = identity::load(&cfg.interface.identity_file).await?;
+                daemon::run(cfg, id).await?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = path;
+                anyhow::bail!(
+                    "drift-vpn `up` is Linux-only in v0.1 (TUN device support); \
+                     other commands (keygen, show) work cross-platform"
+                );
+            }
+        }
+    }
+    Ok(())
+}

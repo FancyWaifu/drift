@@ -1,0 +1,30 @@
+[package]
+name = "drift-vpn"
+version = "0.1.0"
+edition = "2021"
+description = "Identity-routed multi-transport VPN built on DRIFT"
+
+[dependencies]
+drift = { path = "../drift" }
+drift-core = { path = "../drift-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "fs", "signal"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+hex = "0.4"
+ipnet = { version = "2", features = ["serde"] }
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Linux-only: the `tun` crate gives us /dev/net/tun + Tokio
+# AsyncRead/AsyncWrite. macOS has utun support via the same
+# crate but the test path is Docker (Linux), so we keep the
+# dep cfg-gated to Linux only for now.
+[target.'cfg(target_os = "linux")'.dependencies]
+tun = { version = "0.6", features = ["async"] }
+
+[[bin]]
+name = "drift-vpn"
+path = "src/main.rs"
