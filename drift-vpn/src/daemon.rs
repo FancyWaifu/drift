@@ -108,7 +108,7 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
         } else {
             Direction::Responder
         };
-        let chosen = register_peer(&transport, peer_pub, &endpoints, dir).await?;
+        let chosen = try_endpoints(&transport, peer_pub, &peer_pid, &endpoints, dir).await?;
         info!(
             peer = %hex::encode(peer_pid),
             endpoint = %chosen,
@@ -251,40 +251,87 @@ async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow!("no addresses resolved for {:?}", addr))
 }
 
-/// Register a peer at `endpoints[0]`. v0.2 limitation: we use
-/// the first endpoint and rely on DRIFT's HELLO retransmits to
-/// connect. The config schema accepts an `endpoints = [...]`
-/// array for forward-compatibility, but actual *runtime
-/// fallover* across endpoints requires DRIFT primitives
-/// (`restart_handshake`, per-endpoint outbound Transports)
-/// that aren't yet in the public API. That ships in v0.3.
+/// Happy-eyeballs across a peer's `endpoints` list (v0.3).
 ///
-/// What v0.2 *does* deliver:
-/// - **Server-side multi-listen** (`listen = [...]`): one
-///   daemon serves clients on whichever wire works for their
-///   network. Each client picks its endpoint at config time;
-///   the server accepts on UDP / TCP / TLS / WS / HTTP / Tor
-///   simultaneously.
-/// - **Forward-compatible config schema**: ship a config with
-///   `endpoints = [...]` today; v0.3's runtime fallover will
-///   pick it up without config changes.
-async fn register_peer(
+/// Try each endpoint in priority order:
+///   1. Resolve `url` → SocketAddr.
+///   2. On the first attempt, `add_peer` at that addr.
+///      On subsequent attempts, `update_peer_addr` + `restart_handshake`
+///      to wipe the previous session state and re-arm HELLO.
+///   3. Send a 1-byte probe to trigger handshake.
+///   4. Watch the global `handshakes_completed` counter for
+///      advancement within `PROBE_TIMEOUT`. First endpoint
+///      that lands a session wins.
+///
+/// If no endpoint lands a session at startup (peer isn't up
+/// yet), the peer stays registered at `endpoints[0]` and DRIFT's
+/// HELLO retransmit will recover when the peer comes online.
+async fn try_endpoints(
     transport: &Arc<Transport>,
     peer_pub: [u8; 32],
+    peer_pid: &PeerId,
     endpoints: &[String],
     dir: Direction,
 ) -> Result<String> {
-    let primary = &endpoints[0];
-    let addr = resolve_endpoint(primary).await?;
-    transport.add_peer(peer_pub, addr, dir).await?;
-    if endpoints.len() > 1 {
-        debug!(
-            primary = %primary,
-            fallbacks = ?&endpoints[1..],
-            "v0.2 uses primary endpoint only; fallbacks land in v0.3"
-        );
+    use std::time::Duration;
+    const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+    let first_addr = resolve_endpoint(&endpoints[0]).await?;
+    transport.add_peer(peer_pub, first_addr, dir).await?;
+
+    for (i, url) in endpoints.iter().enumerate() {
+        let addr = match resolve_endpoint(url).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(endpoint = %url, error = %e, "endpoint resolve failed — trying next");
+                continue;
+            }
+        };
+
+        if i > 0 {
+            // Swap addr + wipe the previous attempt's session
+            // state so the next send triggers a fresh HELLO at
+            // the new addr.
+            if !transport.update_peer_addr(peer_pid, addr).await {
+                warn!(endpoint = %url, "peer disappeared mid-fallback — re-adding");
+                transport.add_peer(peer_pub, addr, dir).await?;
+            }
+            if let Err(e) = transport.restart_handshake(peer_pid).await {
+                warn!(endpoint = %url, error = %e, "restart_handshake failed — trying next");
+                continue;
+            }
+        }
+
+        let before = transport.metrics().handshakes_completed;
+        let _ = transport.send_data(peer_pid, b"\x00", 0, 0).await;
+
+        let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+        let mut completed = false;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if transport.metrics().handshakes_completed > before {
+                completed = true;
+                break;
+            }
+        }
+        if completed {
+            info!(
+                endpoint = %url,
+                tried = i + 1,
+                of = endpoints.len(),
+                "happy-eyeballs winner"
+            );
+            return Ok(url.clone());
+        }
+        warn!(endpoint = %url, "no handshake within timeout — trying next");
     }
-    Ok(primary.clone())
+
+    warn!(
+        peer = %hex::encode(peer_pid),
+        "no endpoint completed handshake at startup; \
+         tunnel may be one-sided until peer connects"
+    );
+    Ok(endpoints[0].clone())
 }
 
 #[allow(dead_code)]

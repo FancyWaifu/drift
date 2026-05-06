@@ -2,23 +2,24 @@
 
 Identity-routed VPN built on DRIFT. WireGuard-shaped config, but the wire is DRIFT — which means **multi-transport fallback is on the roadmap**: same daemon, same identity, can ride UDP / TCP / TLS / WS / HTTP / Tor depending on what your network allows.
 
-## Status: v0.2 (Linux, multi-listen)
+## Status: v0.3 (Linux, multi-listen, client happy-eyeballs)
 
 What works today:
 - Linux TUN device, configurable address + MTU + interface name
 - **Server-side multi-listen** (`listen = [...]` array): one daemon binds UDP + TCP + TLS + WS + HTTP simultaneously. Each client picks whichever wire works for their network.
-- WireGuard-shaped TOML config (forward-compatible array forms for both `listen` and peer `endpoints`)
+- **Client-side happy-eyeballs** across `endpoints = [...]`: try each in priority order; first to land a session wins. Powered by DRIFT's new `restart_handshake` primitive (added in this release) — between endpoints we `update_peer_addr` + `restart_handshake` so the next outbound triggers a fresh HELLO at the new addr.
+- WireGuard-shaped TOML config (single-string and array forms both accepted)
 - `allowed_ips` routing (forward + reverse-path validation)
-- Tests: `tests/two_node.sh` (basic UDP) + `tests/two_node_fallback.sh` (multi-listen UDP+TCP)
+- Tests: `tests/two_node.sh` (basic UDP) + `tests/two_node_fallback.sh` (dead endpoint → real endpoint fallover)
 
 What's *not* yet shipped (be honest):
-- **Client-side runtime endpoint fallover.** v0.2 accepts `endpoints = [...]` in config but uses `endpoints[0]` only. Cross-endpoint switching during a session needs DRIFT primitives (`restart_handshake`, per-endpoint outbound Transports) we haven't built yet.
-- **Cross-scheme outbound from one Transport.** If your *listen* is UDP and your *peer endpoint* is TLS, the daemon uses UDP for outbound (matching the primary listener). Per-peer outbound interface pinning lands in v0.3.
+- **Runtime auto-failover** during an established session. v0.3 does happy-eyeballs *at startup*. If the active wire degrades mid-session, we don't yet probe alternates and migrate. That's the next obvious feature.
+- **Cross-scheme outbound from one Transport.** All endpoints in a peer's list must share a scheme (e.g., all UDP, or all TLS). Cross-scheme (UDP fallback to TLS) needs per-peer outbound Transport instances.
 
 What's planned:
-- v0.3 — Real client-side happy-eyeballs + runtime fallover (THE differentiator vs WireGuard). Needs DRIFT API additions.
-- v0.4 — macOS + Windows TUN support
-- v0.5 — Mesh peers (peers reachable via another peer, no direct endpoint)
+- v0.4 — Runtime auto-failover (probe alternates when active path degrades; migrate via DRIFT's `PathChallenge`)
+- v0.5 — macOS + Windows TUN support
+- v0.6 — Mesh peers (peers reachable via another peer, no direct endpoint)
 
 ## Quick start (Docker tests)
 
@@ -26,11 +27,14 @@ What's planned:
 # v0.1 simple: single-listen UDP, ping across the tunnel
 bash drift-vpn/tests/two_node.sh
 
-# v0.2 multi-listen: bind UDP + TCP simultaneously, ping still works
+# v0.3 happy-eyeballs: each peer has [dead, real] endpoints,
+# multi-listen (UDP+TCP) on each side. Daemons try the dead
+# endpoint, fall through to the real one via update_peer_addr +
+# restart_handshake, ping works.
 bash drift-vpn/tests/two_node_fallback.sh
 ```
 
-Both end with PASS/RESULT lines. The v0.2 test exercises the multi-listen path; the TCP listener is idle but live, demonstrating that one daemon can offer multiple wires for clients with diverse network constraints.
+Both end with PASS/RESULT lines. The fallback test verifies the actual differentiator — when an endpoint is unreachable, the daemon falls through to the next without manual intervention.
 
 ## Manual setup
 
@@ -92,15 +96,16 @@ sudo drift-vpn up -c /etc/drift-vpn/config.toml
 
 The architectural choice DRIFT makes that WG doesn't: separate the identity layer from the transport layer. WireGuard hardcodes UDP as the transport. drift-vpn doesn't — the same identity can be reached over any DRIFT adapter, swappable at runtime.
 
-## Limitations (v0.2, listed honestly)
+## Limitations (v0.3, listed honestly)
 
-- **Server-side multi-listen ships; client-side runtime fallover does not yet.** v0.2 accepts `endpoints = [...]` in config (forward-compatible) but only uses `endpoints[0]`. Real "try UDP, fall back to TLS" requires per-peer outbound Transport instances or DRIFT-side `restart_handshake` — both v0.3 work.
-- **Linux only.** macOS utun + Windows WinTun are mostly portage; v0.4.
+- **Happy-eyeballs runs at startup only.** If the active path degrades mid-session, v0.3 doesn't probe alternates. The active session breaks, daemons re-handshake, and on the next probe round it'll pick whatever endpoint works. Smarter runtime auto-failover (probe alternates while the current path is still up, migrate via DRIFT's `PathChallenge`) lands in v0.4.
+- **All endpoints in a peer's list must share a scheme.** UDP→UDP fallback works (different IPs / ports). UDP→TLS does NOT yet because the daemon's outbound interface is bound to the primary `listen` URL's scheme. Cross-scheme outbound needs per-peer Transport instances.
+- **Linux only.** macOS utun + Windows WinTun are mostly portage; v0.5.
 - **Userspace.** Kernel WireGuard is ~10× faster on raw throughput. We won't beat that. The win for drift-vpn is connectivity through hostile networks, not raw throughput.
-- **No coordination service.** Peers find each other via static config; no Tailscale-like coordinator. Per-peer config files work for ≤dozens of peers; a discovery layer would land alongside mesh peers (v0.5).
+- **No coordination service.** Peers find each other via static config; no Tailscale-like coordinator.
 - **No NAT traversal.** Both sides need a reachable endpoint. STUN/ICE-style hole-punching is a future feature.
 - **No identity rotation.** Lost-laptop story: you have to update every peer's config manually. (Same problem as WireGuard.)
-- **DNS in `endpoint` resolves once at startup.** No re-resolve if the IP changes mid-session. Static IPs work; static IPs are also what most VPN deployments use.
+- **DNS in `endpoint` resolves once at startup.** Static IPs work; most VPN deployments use them.
 
 ## Test setup details
 

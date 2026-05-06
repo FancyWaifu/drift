@@ -1083,6 +1083,36 @@ impl Transport {
         self.inner.close_peer(dst).await
     }
 
+    /// Reset a peer's session state without notifying the remote.
+    /// Differs from `close_peer` in two ways:
+    ///
+    /// 1. Works in *any* state — pre-handshake, mid-handshake,
+    ///    or established. `close_peer` requires
+    ///    `is_ready_for_data()`.
+    /// 2. Doesn't send a `Close` packet. Useful when the wire
+    ///    we'd send it on is broken (e.g., we're about to
+    ///    migrate transports) or when we want to silently
+    ///    re-handshake at the current `peer.addr` (e.g., the
+    ///    addr just changed via `update_peer_addr` and the
+    ///    in-flight HELLO is going to the wrong place).
+    ///
+    /// Preserved across the reset: `addr`, `peer_static_pub`,
+    /// `direction`, `interface_id`, `auto_registered`,
+    /// `via_mesh`. Cleared: handshake state, session keys,
+    /// sequence counters, CID maps, replay bitmap, coalesce
+    /// state, pending sends, RTT samples, resumption-in-flight
+    /// state, path-validation probes.
+    ///
+    /// After `restart_handshake`, the next `send_data` to this
+    /// peer will trigger a fresh HELLO toward the (possibly
+    /// updated) `peer.addr`.
+    ///
+    /// Returns `Err(UnknownPeer)` if the peer isn't in our
+    /// table.
+    pub async fn restart_handshake(&self, dst: &PeerId) -> Result<()> {
+        self.inner.restart_handshake(dst).await
+    }
+
     /// Rekey an established session in place. Generates a fresh
     /// 32-byte salt, derives new keys from `BLAKE2b("drift-rekey-v1"
     /// ‖ old_key ‖ salt)`, sends a `RekeyRequest` to the peer
@@ -1435,6 +1465,63 @@ impl Inner {
         self.metrics
             .bytes_sent
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn restart_handshake(&self, dst: &PeerId) -> Result<()> {
+        // Reset the peer entry to a fresh state. We preserve
+        // identity-bound + routing-bound fields (`addr`,
+        // `peer_static_pub`, `direction`, `interface_id`,
+        // `auto_registered`, `via_mesh`) and clear everything
+        // else (handshake state, session keys, sequence
+        // counters, replay bitmap, coalesce state, pending
+        // sends, RTT samples, resumption-in-flight, path
+        // probes, unauth byte counters).
+        let was_awaiting_data;
+        {
+            let mut peers = self.peers.lock_for(dst).await;
+            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            was_awaiting_data =
+                matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+
+            let preserved_addr = peer.addr;
+            let preserved_pub = peer.peer_static_pub;
+            let preserved_dir = peer.direction;
+            let preserved_iface = peer.interface_id;
+            let preserved_auto = peer.auto_registered;
+            let preserved_via_mesh = peer.via_mesh;
+
+            let mut fresh = drift_core::session::Peer::new(
+                *dst,
+                preserved_addr,
+                preserved_pub,
+                preserved_dir,
+            );
+            fresh.interface_id = preserved_iface;
+            fresh.auto_registered = preserved_auto;
+            fresh.via_mesh = preserved_via_mesh;
+            *peer = fresh;
+        }
+
+        // Drop CID-map entries. `cid_map` is the inbound-CID →
+        // peer_id index; we don't keep a per-peer reverse list
+        // so we sweep the whole map removing entries pointing
+        // at this peer. `peer_out_cid` is per-peer.
+        {
+            let mut cid_map = self.cid_map.lock().unwrap();
+            cid_map.retain(|_cid, pid| pid != dst);
+        }
+        {
+            let mut peer_out_cid = self.peer_out_cid.lock().unwrap();
+            peer_out_cid.remove(dst);
+        }
+
+        if was_awaiting_data {
+            self.metrics
+                .handshakes_inflight
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+
         Ok(())
     }
 
