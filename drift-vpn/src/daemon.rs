@@ -63,6 +63,38 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
         "TUN device up"
     );
 
+    // Disable TSO/GSO/etc. on the tun. Linux generic-
+    // segmentation-offload can hand us 64KB pseudo-segments
+    // that exceed DRIFT's MAX_PAYLOAD (1348 bytes) and get
+    // dropped. Disabling forces the kernel to emit real
+    // MTU-sized segments. Best-effort — if `ethtool` isn't
+    // available we log a warning but continue (the user may
+    // notice degraded TCP throughput).
+    let tun_name = cfg.interface.name.as_deref().unwrap_or("tun0");
+    match tokio::process::Command::new("ethtool")
+        .args(["-K", tun_name, "tso", "off", "gso", "off", "gro", "off", "lro", "off"])
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            info!(iface = tun_name, "disabled TSO/GSO/GRO/LRO via ethtool");
+        }
+        Ok(out) => {
+            warn!(
+                iface = tun_name,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "ethtool returned non-zero — TCP throughput may be degraded"
+            );
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                iface = tun_name,
+                "couldn't run ethtool (offload not disabled) — TCP throughput may be degraded"
+            );
+        }
+    }
+
     // 2. DRIFT transport. v0.2 supports multiple `listen` URLs
     //    so one daemon serves clients on whichever wire works
     //    for their network. The first URL becomes the primary
@@ -103,11 +135,17 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
         if endpoints.is_empty() {
             return Err(anyhow!("peer #{} has no endpoints", i));
         }
-        let dir = if our_pubkey.as_slice() < peer_pub.as_slice() {
-            Direction::Initiator
-        } else {
-            Direction::Responder
-        };
+        // Both sides use Direction::Initiator. DRIFT's dual-
+        // initiation tiebreaker resolves the simultaneous-HELLO
+        // case correctly (lower pubkey "wins" as Responder),
+        // and crucially: this means EITHER side can re-trigger a
+        // handshake after a restart. With deterministic
+        // direction (lower=Initiator, higher=Responder), if the
+        // Responder side dies and restarts, it never sends HELLO
+        // (only Initiator does in send_data) and the surviving
+        // Initiator side stays in Established with stale keys.
+        // Always-Initiator avoids that deadlock.
+        let dir = Direction::Initiator;
         let chosen = try_endpoints(&transport, peer_pub, &peer_pid, &endpoints, dir).await?;
         info!(
             peer = %hex::encode(peer_pid),
@@ -167,7 +205,20 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
                 }
             };
             if let Err(e) = t_send.send_data(&route.peer_id, pkt, 0, 0).await {
-                debug!(error = %e, peer = %hex::encode(route.peer_id), "send_data failed");
+                // WARN, not DEBUG — silently dropping outbound
+                // packets degrades the VPN; users want to know.
+                // Common cause: payload > DRIFT MAX_PAYLOAD
+                // (Linux GSO/TSO handing us a 64KB pseudo-
+                // segment). Workaround: disable GSO via
+                // `ethtool -K tun0 gso off tso off` until the
+                // tun crate exposes the IFF_MULTI_QUEUE +
+                // TUN_F_TSO knobs.
+                warn!(
+                    error = %e,
+                    pkt_len = pkt.len(),
+                    peer = %hex::encode(route.peer_id),
+                    "send_data dropped packet"
+                );
             }
         }
     });
