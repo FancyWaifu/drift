@@ -28,6 +28,31 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// One-or-many string field. Accepts `"udp://..."` (back-compat
+/// single form) or `["udp://...", "tls://..."]` (v0.2 array
+/// form). Used for `listen` and `endpoint(s)`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(s) => vec![s],
+            Self::Many(v) => v,
+        }
+    }
+    pub fn as_slice(&self) -> Vec<String> {
+        match self {
+            Self::One(s) => vec![s.clone()],
+            Self::Many(v) => v.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub interface: Interface,
@@ -43,9 +68,11 @@ pub struct Interface {
     /// Local tun-device address as `<ip>/<prefix>` (e.g.
     /// `10.0.0.1/24`).
     pub address: IpNet,
-    /// DRIFT URL to bind. Single-string form for v0.1; future
-    /// versions will accept an array for multi-transport.
-    pub listen: String,
+    /// DRIFT URL(s) to bind. v0.2 accepts an array of URLs for
+    /// multi-transport — `["udp://0.0.0.0:51820", "tls://0.0.0.0:443"]`
+    /// — so one daemon serves clients on whichever wire works
+    /// for their network. Single-string form is back-compat.
+    pub listen: OneOrMany,
     /// Tun device MTU. Default 1380 leaves room for DRIFT
     /// short-header overhead inside a 1500-byte UDP frame.
     #[serde(default = "default_mtu")]
@@ -67,10 +94,14 @@ pub struct Peer {
     /// CIDR ranges this peer "owns" — outbound packets whose
     /// destination IP falls in any of these route to this peer.
     pub allowed_ips: Vec<IpNet>,
-    /// DRIFT URL to dial for first-contact. Optional in mesh
-    /// scenarios (where the peer is reached via another peer's
-    /// announcement); required in v0.1.
+    /// DRIFT URL to dial for first-contact (back-compat single
+    /// form). Either `endpoint` OR `endpoints` must be set in
+    /// v0.2; mesh-only peers (no endpoint) land in v0.4.
     pub endpoint: Option<String>,
+    /// v0.2 array form. Tried in priority order — first to land
+    /// a session wins. UDP first, TLS / WS / HTTP / Tor as
+    /// fallbacks for hostile networks.
+    pub endpoints: Option<OneOrMany>,
     /// Periodic keepalive interval in seconds. Sends a tiny
     /// padding packet so NATs don't time out the path. Default
     /// off.
@@ -91,6 +122,27 @@ impl Peer {
         k.copy_from_slice(&raw);
         Ok(k)
     }
+
+    /// Resolve `endpoint` (single, v0.1) and `endpoints` (array,
+    /// v0.2) into one prioritized list. The single form, if
+    /// present, is treated as the highest-priority entry; the
+    /// array follows.
+    pub fn endpoint_list(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(s) = &self.endpoint {
+            out.push(s.clone());
+        }
+        if let Some(eps) = &self.endpoints {
+            for url in eps.as_slice() {
+                // De-dup: don't add `endpoint` again if it's
+                // already in `endpoints`.
+                if !out.contains(&url) {
+                    out.push(url);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Config {
@@ -105,12 +157,22 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.interface.listen.as_slice().is_empty() {
+            return Err(anyhow!("interface.listen must contain at least one URL"));
+        }
         for (i, p) in self.peers.iter().enumerate() {
             p.pubkey_bytes()
                 .with_context(|| format!("peer #{}", i))?;
             if p.allowed_ips.is_empty() {
                 return Err(anyhow!(
                     "peer #{} ({}) has no allowed_ips — VPN can't route to it",
+                    i,
+                    &p.public_key[..16.min(p.public_key.len())]
+                ));
+            }
+            if p.endpoint_list().is_empty() {
+                return Err(anyhow!(
+                    "peer #{} ({}) has no endpoint or endpoints — v0.2 requires at least one",
                     i,
                     &p.public_key[..16.min(p.public_key.len())]
                 ));

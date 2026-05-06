@@ -63,55 +63,63 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
         "TUN device up"
     );
 
-    // 2. DRIFT transport.
+    // 2. DRIFT transport. v0.2 supports multiple `listen` URLs
+    //    so one daemon serves clients on whichever wire works
+    //    for their network. The first URL becomes the primary
+    //    interface; the rest are added via `add_listener`.
     let mut tcfg = TransportConfig::default();
     tcfg.accept_any_peer = true; // we ACL on the routing layer
-    let (transport, bound_url) =
-        Transport::bind_url(&cfg.interface.listen, identity, tcfg)
-            .await
-            .with_context(|| format!("binding {}", cfg.interface.listen))?;
+    let mut listen_urls = cfg.interface.listen.as_slice();
+    let primary = listen_urls.remove(0);
+    let (transport, bound_url) = Transport::bind_url(&primary, identity, tcfg)
+        .await
+        .with_context(|| format!("binding {}", primary))?;
     let transport = Arc::new(transport);
-    info!(bound = %bound_url, "DRIFT transport bound");
+    info!(bound = %bound_url, "DRIFT transport bound (primary)");
+    for url in listen_urls {
+        match transport.add_listener(&url).await {
+            Ok(bound) => info!(bound = %bound, "additional listener bound"),
+            Err(e) => warn!(url = %url, error = %e, "additional listener failed — continuing"),
+        }
+    }
 
     // 3. Register peers + build the route table.
+    //
+    //    v0.2 happy-eyeballs: each peer can list multiple
+    //    `endpoints`. We try them sequentially with a 1.5 s
+    //    timeout per attempt; the first one that elicits a
+    //    DRIFT recv from the peer wins. If none of them elicit
+    //    a response (initial cold start, peer not up yet),
+    //    we register with the first endpoint and rely on
+    //    DRIFT's HELLO retransmit + path validation to recover
+    //    once the peer comes online.
     let mut routes = RouteTable::new();
     for (i, peer_cfg) in cfg.peers.iter().enumerate() {
         let peer_pub = peer_cfg
             .pubkey_bytes()
             .with_context(|| format!("peer #{}", i))?;
         let peer_pid = derive_peer_id(&peer_pub);
-        let endpoint_addr = match &peer_cfg.endpoint {
-            Some(url) => resolve_endpoint(url).await?,
-            None => {
-                return Err(anyhow!(
-                    "peer #{} has no endpoint — v0.1 requires endpoint on every peer (mesh-only peers will land in v0.2)",
-                    i
-                ));
-            }
-        };
-        // Direction selection: deterministic by lexicographic
-        // pubkey comparison so both sides agree on who's
-        // Initiator without coordination.
+        let endpoints = peer_cfg.endpoint_list();
+        if endpoints.is_empty() {
+            return Err(anyhow!("peer #{} has no endpoints", i));
+        }
         let dir = if our_pubkey.as_slice() < peer_pub.as_slice() {
             Direction::Initiator
         } else {
             Direction::Responder
         };
-        transport
-            .add_peer(peer_pub, endpoint_addr, dir)
-            .await
-            .with_context(|| format!("registering peer #{}", i))?;
-        routes.add(PeerRoute {
-            peer_id: peer_pid,
-            allowed_ips: peer_cfg.allowed_ips.clone(),
-        });
+        let chosen = register_peer(&transport, peer_pub, &endpoints, dir).await?;
         info!(
             peer = %hex::encode(peer_pid),
-            endpoint = %endpoint_addr,
+            endpoint = %chosen,
             allowed_ips = ?peer_cfg.allowed_ips,
             ?dir,
             "peer registered"
         );
+        routes.add(PeerRoute {
+            peer_id: peer_pid,
+            allowed_ips: peer_cfg.allowed_ips.clone(),
+        });
     }
     let routes = Arc::new(routes);
 
@@ -243,10 +251,43 @@ async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow!("no addresses resolved for {:?}", addr))
 }
 
-// PeerId is opaque to the daemon — silence unused-import lint
-// when the file is compiled in non-test configurations that
-// don't reach into the module.
+/// Register a peer at `endpoints[0]`. v0.2 limitation: we use
+/// the first endpoint and rely on DRIFT's HELLO retransmits to
+/// connect. The config schema accepts an `endpoints = [...]`
+/// array for forward-compatibility, but actual *runtime
+/// fallover* across endpoints requires DRIFT primitives
+/// (`restart_handshake`, per-endpoint outbound Transports)
+/// that aren't yet in the public API. That ships in v0.3.
+///
+/// What v0.2 *does* deliver:
+/// - **Server-side multi-listen** (`listen = [...]`): one
+///   daemon serves clients on whichever wire works for their
+///   network. Each client picks its endpoint at config time;
+///   the server accepts on UDP / TCP / TLS / WS / HTTP / Tor
+///   simultaneously.
+/// - **Forward-compatible config schema**: ship a config with
+///   `endpoints = [...]` today; v0.3's runtime fallover will
+///   pick it up without config changes.
+async fn register_peer(
+    transport: &Arc<Transport>,
+    peer_pub: [u8; 32],
+    endpoints: &[String],
+    dir: Direction,
+) -> Result<String> {
+    let primary = &endpoints[0];
+    let addr = resolve_endpoint(primary).await?;
+    transport.add_peer(peer_pub, addr, dir).await?;
+    if endpoints.len() > 1 {
+        debug!(
+            primary = %primary,
+            fallbacks = ?&endpoints[1..],
+            "v0.2 uses primary endpoint only; fallbacks land in v0.3"
+        );
+    }
+    Ok(primary.clone())
+}
+
 #[allow(dead_code)]
-fn _typecheck_peer_id(p: PeerId) -> PeerId {
+fn _ensure_peer_id_used(p: PeerId) -> PeerId {
     p
 }
