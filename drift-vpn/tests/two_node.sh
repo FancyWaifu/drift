@@ -55,7 +55,7 @@ cat > "$WORKDIR/a.toml" <<EOF
 identity_file = "/keys/a.key"
 address       = "10.99.0.1/24"
 listen        = "udp://0.0.0.0:51820"
-mtu           = 1380
+mtu           = 1340
 name          = "tun0"
 
 [[peer]]
@@ -69,7 +69,7 @@ cat > "$WORKDIR/b.toml" <<EOF
 identity_file = "/keys/b.key"
 address       = "10.99.0.2/24"
 listen        = "udp://0.0.0.0:51820"
-mtu           = 1380
+mtu           = 1340
 name          = "tun0"
 
 [[peer]]

@@ -7,7 +7,7 @@ description = "Identity-routed multi-transport VPN built on DRIFT"
 [dependencies]
 drift = { path = "../drift" }
 drift-core = { path = "../drift-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "fs", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "fs", "signal", "process"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

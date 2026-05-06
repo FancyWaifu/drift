@@ -73,8 +73,13 @@ pub struct Interface {
     /// — so one daemon serves clients on whichever wire works
     /// for their network. Single-string form is back-compat.
     pub listen: OneOrMany,
-    /// Tun device MTU. Default 1380 leaves room for DRIFT
-    /// short-header overhead inside a 1500-byte UDP frame.
+    /// Tun device MTU. Default 1340 — that's `drift::MAX_PAYLOAD`
+    /// (1348) minus an 8-byte safety margin, so TCP segments
+    /// emitted at full MTU still fit inside DRIFT's per-packet
+    /// payload limit. Setting a higher MTU here will silently
+    /// drop large TCP segments (`send_data` returns
+    /// PacketTooShort) — visible as TCP retransmit storms even
+    /// while UDP works fine.
     #[serde(default = "default_mtu")]
     pub mtu: u32,
     /// Optional name for the tun device (Linux only). Default
@@ -84,7 +89,10 @@ pub struct Interface {
 }
 
 fn default_mtu() -> u32 {
-    1380
+    // drift::MAX_PAYLOAD == 1348 (1400 packet - 36 header - 16
+    // tag). We give 8 bytes of margin so a full-MTU TCP
+    // segment from the kernel always fits.
+    1340
 }
 
 #[derive(Debug, Deserialize)]
