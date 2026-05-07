@@ -118,6 +118,26 @@ impl Inner {
         peer_id: &PeerId,
         candidate_addr: SocketAddr,
     ) -> Result<()> {
+        let iface = self.iface_for(peer_id).await;
+        self.probe_candidate_path_via(peer_id, candidate_addr, iface)
+            .await
+    }
+
+    /// Same as `probe_candidate_path`, but sends the challenge
+    /// out via a specific interface index instead of the peer's
+    /// currently registered one. Used by drift-vpn v0.5
+    /// cross-scheme failover: the peer is registered on iface 0
+    /// (UDP listener), UDP is blocked, the supervisor opens a
+    /// TCP connector to the peer's TCP endpoint as iface N, and
+    /// probes via iface N. If the response comes back on iface
+    /// N, `handle_path_response` swaps both `peer.addr` AND
+    /// `peer.interface_id` so subsequent outbound goes via TCP.
+    pub(crate) async fn probe_candidate_path_via(
+        &self,
+        peer_id: &PeerId,
+        candidate_addr: SocketAddr,
+        iface_idx: usize,
+    ) -> Result<()> {
         let wire = {
             let mut peers = self.peers.lock_for(peer_id).await;
             let peer = peers.get_mut(peer_id).ok_or(DriftError::UnknownPeer)?;
@@ -146,7 +166,7 @@ impl Inner {
         };
 
         self.ifaces
-            .send_for(self.iface_for(peer_id).await, &wire, candidate_addr)
+            .send_for(iface_idx, &wire, candidate_addr)
             .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
@@ -231,6 +251,7 @@ impl Inner {
         full_packet: &[u8],
         body: &[u8],
         src: SocketAddr,
+        recv_iface: usize,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
             return Err(DriftError::UnknownPeer);
@@ -272,6 +293,8 @@ impl Inner {
         debug!(
             old = ?peer.addr,
             new = ?probe_addr,
+            old_iface = peer.interface_id,
+            new_iface = recv_iface,
             "path-validated migration"
         );
         // Feed the round-trip time into the neighbor RTT
@@ -279,6 +302,14 @@ impl Inner {
         // sample of the candidate path's cost.
         peer.update_neighbor_rtt(Instant::now().duration_since(probe_started));
         peer.addr = probe_addr;
+        // Critical for v0.5 cross-scheme failover: also pin the
+        // outbound interface to the one the response arrived on.
+        // Without this, even a successful probe via iface N
+        // leaves outbound traffic going via the original (broken)
+        // iface 0. The migration is half-done and packets keep
+        // dropping. With this, the next send_data picks iface N
+        // and traffic flows.
+        peer.interface_id = recv_iface;
         peer.probing = None;
         self.metrics
             .path_probes_succeeded

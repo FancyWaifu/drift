@@ -634,24 +634,49 @@ async fn supervise_peer(
         // starting after current). On success the loop breaks;
         // on full cycle without success, fall back to a hard
         // restart at the original primary.
+        //
+        // For v0.5 cross-scheme failover: every probe goes via
+        // a fresh outbound connector for the candidate URL. That
+        // way a `tcp://...` next-endpoint opens a TCP connection
+        // (not just a UDP socket pointing at a TCP port). The
+        // connector becomes a new transport interface; the
+        // probe is sent via that interface. On success, the
+        // PathResponse arrives on the same interface and the
+        // transport's `handle_path_response` pins
+        // `peer.interface_id` to it — so subsequent send_data
+        // flows over the validated path.
         let n = endpoints.len();
         let mut switched = false;
         for offset in 1..n {
             let next_idx = (current_idx + offset) % n;
             let next_url = &endpoints[next_idx];
-            let next_addr = match resolve_endpoint(next_url).await {
-                Ok(a) => a,
+            let (next_io, next_addr) = match drift::io::make_connector(next_url).await {
+                Ok(c) => c,
                 Err(e) => {
-                    warn!(endpoint = %next_url, error = %e, "endpoint resolve failed during failover");
+                    warn!(endpoint = %next_url, error = %e, "couldn't open connector for endpoint");
                     continue;
                 }
             };
-            if let Err(e) = transport.probe_candidate_path(&peer_pid, next_addr).await {
-                warn!(endpoint = %next_url, error = ?e, "probe_candidate_path failed");
+            let next_iface = transport.add_interface(
+                format!("failover-{}", current_idx + offset),
+                next_io,
+            );
+            debug!(
+                peer = %hex::encode(peer_pid),
+                endpoint = %next_url,
+                iface = next_iface,
+                "attached fresh outbound connector for failover probe"
+            );
+            if let Err(e) = transport
+                .probe_candidate_path_via(&peer_pid, next_addr, next_iface)
+                .await
+            {
+                warn!(endpoint = %next_url, error = ?e, "probe_candidate_path_via failed");
                 continue;
             }
-            // Wait for the addr swap (transport commits on
-            // matching PathResponse).
+            // Wait for the addr swap. The transport commits on
+            // matching PathResponse, which also pins
+            // peer.interface_id to the connector iface.
             let deadline = Instant::now() + PROBE_COMMIT_TIMEOUT;
             let mut committed = false;
             while Instant::now() < deadline {
@@ -666,6 +691,7 @@ async fn supervise_peer(
                     peer = %hex::encode(peer_pid),
                     from = %endpoints[current_idx],
                     to = %next_url,
+                    iface = next_iface,
                     "failover committed via path probe"
                 );
                 current_idx = next_idx;
