@@ -29,6 +29,7 @@ TESTS=(
     "failover_basic.sh"
     "failover_flap.sh"
     "failover_cross_scheme.sh"
+    "status.sh"
 )
 
 # Force a single image build at the start so the per-test

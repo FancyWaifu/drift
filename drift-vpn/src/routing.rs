@@ -92,13 +92,130 @@ impl RouteTable {
     /// the one we received from, which is the same number of
     /// comparisons but with worse locality.
     pub fn src_is_valid(&self, peer: &PeerId, src: IpAddr) -> bool {
+        matches!(self.src_status(peer, src), SrcStatus::Allowed)
+    }
+
+    /// Detailed reverse-path validation: distinguishes between
+    /// "peer not in route table at all" and "peer known but
+    /// claimed src isn't in their allowed_ips."
+    ///
+    /// The two cases are very different operationally:
+    ///   - **UnknownPeer**: usually mesh-forwarded traffic from
+    ///     a peer-of-peer we don't directly know, or a startup
+    ///     race. Mostly noise. Log at DEBUG.
+    ///   - **ConfigMismatch**: peer is one of ours, but they're
+    ///     using a source IP outside what we listed for them.
+    ///     Either a config drift (their tun IP differs from our
+    ///     allowed_ips entry) or a real spoofing attempt. Log
+    ///     at WARN.
+    pub fn src_status(&self, peer: &PeerId, src: IpAddr) -> SrcStatus {
         match self.by_peer_id.get(peer) {
-            Some(&idx) => self.routes[idx]
-                .allowed_ips
-                .iter()
-                .any(|n| n.contains(&src)),
-            None => false,
+            None => SrcStatus::UnknownPeer,
+            Some(&idx) => {
+                if self.routes[idx]
+                    .allowed_ips
+                    .iter()
+                    .any(|n| n.contains(&src))
+                {
+                    SrcStatus::Allowed
+                } else {
+                    SrcStatus::ConfigMismatch
+                }
+            }
         }
+    }
+}
+
+/// Outcome of `RouteTable::src_status`. See `src_status` doc
+/// for the operational meaning of each variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SrcStatus {
+    Allowed,
+    UnknownPeer,
+    ConfigMismatch,
+}
+
+/// Classify a tunneled L3 packet for DRIFT's deadline-aware
+/// delivery and semantic coalescing. Returns
+/// `(deadline_ms, coalesce_group)` for `Transport::send_data`.
+///
+/// DRIFT's deadline says "drop this packet rather than deliver
+/// it after `now + deadline_ms`." `coalesce_group` is a 32-bit
+/// id; packets with the same group are eligible for semantic
+/// coalescing in the send queue (e.g. only-keep-newest).
+///
+/// Heuristic by L4:
+///   - **TCP**: `(0, 0)` — no deadline, no coalescing. TCP
+///     does its own reliability; we want every byte delivered.
+///   - **UDP DNS / TFTP / NTP** (port < 1024 mostly): treat as
+///     latency-sensitive control. 100ms deadline.
+///   - **UDP RTP-shaped** (high port, payload >= 200 bytes):
+///     a media frame. 50ms deadline + coalesce-group keyed on
+///     `(src_port, dst_port)` so successive frames in the same
+///     flow replace each other. Cheap, effective for video
+///     over a saturated link.
+///   - **Other UDP**: 200ms deadline, no coalescing. Most app
+///     traffic; gives DRIFT permission to drop a stale packet
+///     under congestion but doesn't reorder relative to itself.
+///   - **ICMP / IGMP / GRE / etc**: `(0, 0)` — small, infrequent,
+///     not worth a deadline.
+///
+/// All numbers are loose. The point is to give DRIFT *any*
+/// signal it can act on instead of the all-zeros that v0.5
+/// shipped with.
+pub fn classify_for_qos(pkt: &[u8]) -> (u16, u32) {
+    if pkt.len() < 20 {
+        return (0, 0);
+    }
+    let (proto, header_len) = match pkt[0] >> 4 {
+        4 => {
+            let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+            if ihl < 20 || pkt.len() < ihl {
+                return (0, 0);
+            }
+            (pkt[9], ihl)
+        }
+        6 => {
+            // IPv6 fixed header is 40B; skip past extension
+            // headers in a future revision. For now treat
+            // anything-with-extensions as opaque.
+            if pkt.len() < 40 {
+                return (0, 0);
+            }
+            (pkt[6], 40)
+        }
+        _ => return (0, 0),
+    };
+
+    const TCP: u8 = 6;
+    const UDP: u8 = 17;
+    match proto {
+        TCP => (0, 0),
+        UDP => {
+            // UDP header is 8 bytes: src_port(2) dst_port(2)
+            // length(2) checksum(2). Need at least header_len + 8.
+            if pkt.len() < header_len + 8 {
+                return (0, 0);
+            }
+            let sport = u16::from_be_bytes([pkt[header_len], pkt[header_len + 1]]);
+            let dport =
+                u16::from_be_bytes([pkt[header_len + 2], pkt[header_len + 3]]);
+            let payload_len = pkt.len() - header_len - 8;
+            // Latency-sensitive control? DNS, NTP, mDNS, …
+            if dport < 1024 || sport < 1024 {
+                return (100, 0); // 100ms
+            }
+            // Media-frame-shaped? High ports and a chunky body.
+            // We don't insist on RTP — large UDP datagrams on
+            // high ports are usually media-ish.
+            if payload_len >= 200 {
+                let key = ((sport as u32) << 16) | (dport as u32);
+                return (50, key); // 50ms + coalesce
+            }
+            // Generic UDP: cap staleness, no coalescing.
+            (200, 0)
+        }
+        _ => (0, 0),
     }
 }
 
