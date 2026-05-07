@@ -19,7 +19,10 @@
 #![cfg(target_os = "linux")]
 
 use crate::config::Config;
+use crate::metrics::DaemonMetrics;
 use crate::routing::{parse_endpoints, PeerRoute, RouteTable};
+use crate::status::{KnownPeer, StatusContext};
+use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use drift::identity::Identity;
 use drift::{Direction, Transport, TransportConfig};
@@ -29,7 +32,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
+pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Result<()> {
     let our_pubkey = identity.public_bytes();
     let our_pid = identity.peer_id();
     info!(
@@ -37,6 +40,10 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
         peer_id = %hex::encode(our_pid),
         "drift-vpn starting"
     );
+
+    let metrics = Arc::new(DaemonMetrics::new());
+    let started_at = std::time::Instant::now();
+    let mut known_peers: Vec<KnownPeer> = Vec::new();
 
     // 1. TUN device.
     let mut tun_cfg = tun::Configuration::default();
@@ -56,10 +63,24 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
         tun_cfg.name(name);
     }
     let dev = tun::create_as_async(&tun_cfg).context("creating TUN device")?;
+    // Read the kernel-assigned name back from the device. Doing
+    // this AFTER creation matters: if `cfg.interface.name` is
+    // None, the kernel picks the first free `tunN` — which on a
+    // multi-tun host might be `tun3`, not `tun0`. The previous
+    // hardcoded "tun0" fallback would silently disable offloads
+    // on the wrong interface and ours kept TSO on, leading to
+    // exactly the silent-drop class of bug v0.3 was supposed to
+    // make impossible.
+    use tun::Device;
+    let tun_name = dev
+        .get_ref()
+        .name()
+        .context("reading tun device name from kernel")?;
     info!(
         addr = %addr,
         prefix = cfg.interface.address.prefix_len(),
         mtu = cfg.interface.mtu,
+        iface = %tun_name,
         "TUN device up"
     );
 
@@ -70,8 +91,7 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
     // MTU-sized segments. Best-effort — if `ethtool` isn't
     // available we log a warning but continue (the user may
     // notice degraded TCP throughput).
-    let tun_name = cfg.interface.name.as_deref().unwrap_or("tun0");
-    disable_offloads_and_verify(tun_name).await;
+    disable_offloads_and_verify(&tun_name).await;
 
     // 2. DRIFT transport. v0.2 supports multiple `listen` URLs
     //    so one daemon serves clients on whichever wire works
@@ -79,15 +99,28 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
     //    interface; the rest are added via `add_listener`.
     let mut tcfg = TransportConfig::default();
     tcfg.accept_any_peer = true; // we ACL on the routing layer
-    let mut listen_urls = cfg.interface.listen.as_slice();
-    let primary = listen_urls.remove(0);
-    let (transport, bound_url) = Transport::bind_url(&primary, identity, tcfg)
+    // Tie the DRIFT keepalive to the failover supervisor's
+    // staleness threshold: we want at least two Ping rounds
+    // inside a stale_secs window so that a healthy tunnel
+    // doesn't get flagged as stale just because it's quiet
+    // between user packets. Default is `stale_secs * 1000 / 3`
+    // ms, capped at 2s for fast detection on low staleness.
+    let probe_ms = std::cmp::min(
+        2_000_u64,
+        (cfg.failover.stale_secs.saturating_mul(1000)) / 3,
+    );
+    tcfg.rtt_probe_interval_ms = std::cmp::max(500, probe_ms);
+    // Caller already validated that `listen` is non-empty.
+    let listen_urls: &[String] = &cfg.interface.listen;
+    let primary = &listen_urls[0];
+    let extras = &listen_urls[1..];
+    let (transport, bound_url) = Transport::bind_url(primary, identity, tcfg)
         .await
         .with_context(|| format!("binding {}", primary))?;
     let transport = Arc::new(transport);
     info!(bound = %bound_url, "DRIFT transport bound (primary)");
-    for url in listen_urls {
-        match transport.add_listener(&url).await {
+    for url in extras {
+        match transport.add_listener(url).await {
             Ok(bound) => info!(bound = %bound, "additional listener bound"),
             Err(e) => warn!(url = %url, error = %e, "additional listener failed — continuing"),
         }
@@ -104,6 +137,7 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
     //    DRIFT's HELLO retransmit + path validation to recover
     //    once the peer comes online.
     let mut routes = RouteTable::new();
+    let mut supervisor_states: Vec<SupervisorState> = Vec::new();
     for (i, peer_cfg) in cfg.peers.iter().enumerate() {
         let peer_pub = peer_cfg
             .pubkey_bytes()
@@ -136,32 +170,59 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
             peer_id: peer_pid,
             allowed_ips: peer_cfg.allowed_ips.clone(),
         });
+        known_peers.push(KnownPeer {
+            peer_id: peer_pid,
+            pubkey: peer_pub,
+            allowed_ips: peer_cfg
+                .allowed_ips
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
+        });
 
-        // v0.4: spawn a per-peer supervisor that watches link
-        // health and fails over to the next endpoint when the
-        // current one degrades. Single-endpoint peers and the
-        // globally-disabled case skip this.
+        // v0.6: collect supervisor state per multi-endpoint
+        // peer; we'll start ONE supervisor task that walks the
+        // whole list each tick (rather than N tasks all firing
+        // simultaneously). This lets us share a global probe-
+        // rate limiter and avoid the thundering herd when many
+        // peers see the same outage at once.
         if cfg.failover.enabled && endpoints.len() > 1 {
             let initial_idx = endpoints.iter().position(|e| e == &chosen).unwrap_or(0);
-            let sup_transport = transport.clone();
-            let sup_peer_pub = peer_pub;
-            let sup_peer_pid = peer_pid;
-            let sup_endpoints = endpoints.clone();
-            let sup_cfg = cfg.failover.clone();
-            tokio::spawn(async move {
-                supervise_peer(
-                    sup_transport,
-                    sup_peer_pub,
-                    sup_peer_pid,
-                    sup_endpoints,
-                    initial_idx,
-                    sup_cfg,
-                )
-                .await;
-            });
+            supervisor_states.push(SupervisorState::new(
+                peer_pid, endpoints, initial_idx,
+            ));
         }
     }
     let routes = Arc::new(routes);
+
+    // Spawn the single supervisor task if any peer needs it.
+    if !supervisor_states.is_empty() {
+        let sup_transport = transport.clone();
+        let sup_metrics = metrics.clone();
+        let sup_cfg = cfg.failover.clone();
+        tokio::spawn(async move {
+            supervise_all(sup_transport, sup_metrics, supervisor_states, sup_cfg).await;
+        });
+    }
+
+    // 4a. Spawn the status server. Best-effort — if the socket
+    //     dir isn't writable we log and continue without status.
+    {
+        let status_ctx = Arc::new(StatusContext {
+            local_pubkey: our_pubkey,
+            local_peer_id: our_pid,
+            iface_name: tun_name.clone(),
+            local_addr: format!("{}/{}", addr, cfg.interface.address.prefix_len()),
+            started_at,
+            transport: transport.clone(),
+            metrics: metrics.clone(),
+            peers: known_peers,
+        });
+        let path = status_socket.clone();
+        tokio::spawn(async move {
+            crate::status::run_server(path, status_ctx).await;
+        });
+    }
 
     // 4. Split the TUN device into reader + writer.
     let (mut tun_r, mut tun_w) = tokio::io::split(dev);
@@ -177,6 +238,7 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
     // 6. tun → drift loop.
     let t_send = transport.clone();
     let routes_send = routes.clone();
+    let metrics_send = metrics.clone();
     let t2d = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
@@ -202,31 +264,50 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
             let route = match routes_send.route_for_dst(dst) {
                 Some(r) => r,
                 None => {
+                    metrics_send
+                        .no_route_drops
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     debug!(?dst, "no peer owns this dst — drop");
                     continue;
                 }
             };
-            if let Err(e) = t_send.send_data(&route.peer_id, pkt, 0, 0).await {
-                // WARN, not DEBUG — silently dropping outbound
-                // packets degrades the VPN; users want to know.
-                // The most common cause for repeated drops in
-                // steady state is `payload > MAX_PAYLOAD` from
-                // Linux GSO/TSO (kernel hands us 64KB pseudo-
-                // segments). The startup `disable_offloads_and_verify`
-                // catches most cases; a stuck driver is the
-                // remaining one.
-                let hint = if pkt.len() > drift::transport::MAX_PAYLOAD {
-                    " (oversized — check `ethtool -k <iface>`, offloads may be stuck on)"
-                } else {
-                    ""
-                };
-                warn!(
-                    error = %e,
-                    pkt_len = pkt.len(),
-                    peer = %hex::encode(route.peer_id),
-                    "send_data dropped packet{}",
-                    hint
-                );
+            // Classify L4 to pick deadline + coalesce group for QoS.
+            let (deadline_ms, coalesce_group) =
+                crate::routing::classify_for_qos(pkt);
+            match t_send
+                .send_data(&route.peer_id, pkt, deadline_ms, coalesce_group)
+                .await
+            {
+                Ok(_) => {
+                    metrics_send
+                        .send_data_ok
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e) => {
+                    metrics_send
+                        .send_data_errs
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // WARN, not DEBUG — silently dropping outbound
+                    // packets degrades the VPN; users want to know.
+                    // The most common cause for repeated drops in
+                    // steady state is `payload > MAX_PAYLOAD` from
+                    // Linux GSO/TSO (kernel hands us 64KB pseudo-
+                    // segments). The startup `disable_offloads_and_verify`
+                    // catches most cases; a stuck driver is the
+                    // remaining one.
+                    let hint = if pkt.len() > drift::transport::MAX_PAYLOAD {
+                        " (oversized — check `ethtool -k <iface>`, offloads may be stuck on)"
+                    } else {
+                        ""
+                    };
+                    warn!(
+                        error = %e,
+                        pkt_len = pkt.len(),
+                        peer = %hex::encode(route.peer_id),
+                        "send_data dropped packet{}",
+                        hint
+                    );
+                }
             }
         }
     });
@@ -234,7 +315,9 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
     // 7. drift → tun loop.
     let t_recv = transport.clone();
     let routes_recv = routes.clone();
+    let metrics_recv = metrics.clone();
     let d2t = tokio::spawn(async move {
+        use std::sync::atomic::Ordering::Relaxed;
         loop {
             let recv = match t_recv.recv().await {
                 Some(r) => r,
@@ -250,23 +333,56 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
             let (src, _) = match parse_endpoints(&recv.payload) {
                 Ok(p) => p,
                 Err(e) => {
+                    metrics_recv.rpfilter.parse_failed.fetch_add(1, Relaxed);
                     debug!(error = %e, "couldn't parse inbound packet");
                     continue;
                 }
             };
-            // Reverse-path filter: src IP MUST be in this
-            // peer's allowed_ips. Otherwise the peer is
-            // spoofing — drop.
-            if !routes_recv.src_is_valid(&recv.peer_id, src) {
-                warn!(
-                    peer = %hex::encode(recv.peer_id),
-                    ?src,
-                    "reverse-path filter rejected packet — possible spoof"
-                );
-                continue;
+            // Reverse-path filter with cause distinction.
+            // Three buckets:
+            //   - peer not in our route table (mesh-forwarded
+            //     traffic from a peer-of-peer we don't directly
+            //     know, or pre-startup race)
+            //   - peer known but src not in their allowed_ips
+            //     (almost always config mismatch, occasionally
+            //     a legitimate per-app misconfig)
+            //   - parse failed (already handled above)
+            // Real attacks are rare and look like the second
+            // bucket; the first bucket is mostly harmless noise.
+            // Splitting them lets operators tell the difference.
+            match routes_recv.src_status(&recv.peer_id, src) {
+                crate::routing::SrcStatus::Allowed => {}
+                crate::routing::SrcStatus::UnknownPeer => {
+                    metrics_recv.rpfilter.unknown_peer.fetch_add(1, Relaxed);
+                    debug!(
+                        peer = %hex::encode(recv.peer_id),
+                        ?src,
+                        "rpfilter dropped: peer not in route table (mesh forward?)"
+                    );
+                    continue;
+                }
+                crate::routing::SrcStatus::ConfigMismatch => {
+                    metrics_recv.rpfilter.config_mismatch.fetch_add(1, Relaxed);
+                    warn!(
+                        peer = %hex::encode(recv.peer_id),
+                        ?src,
+                        "rpfilter dropped: src not in peer's allowed_ips \
+                         (check config — peer's tun IP may differ from configured)"
+                    );
+                    continue;
+                }
             }
-            if let Err(e) = tun_w.write_all(&recv.payload).await {
-                warn!(error = %e, "TUN write failed");
+            match tun_w.write_all(&recv.payload).await {
+                Ok(_) => {
+                    metrics_recv.tun_writes.fetch_add(1, Relaxed);
+                    metrics_recv
+                        .tun_bytes_written
+                        .fetch_add(recv.payload.len() as u64, Relaxed);
+                }
+                Err(e) => {
+                    metrics_recv.tun_write_errs.fetch_add(1, Relaxed);
+                    warn!(error = %e, len = recv.payload.len(), "TUN write failed");
+                }
             }
         }
     });
@@ -498,9 +614,54 @@ async fn try_endpoints(
     Ok(endpoints[0].clone())
 }
 
-/// Per-peer health supervisor (v0.4 runtime auto-failover).
+/// Per-peer state held by the (single) failover supervisor task.
+struct SupervisorState {
+    peer_pid: PeerId,
+    endpoints: Vec<String>,
+    /// Index into `endpoints` of the currently-active path.
+    current_idx: usize,
+    /// When the last successful failover landed. Drives the
+    /// `hold_secs` hysteresis.
+    last_switch: std::time::Instant,
+    /// Baseline SRTT for the rtt-degradation signal — captured
+    /// the first time we observed an SRTT after landing on the
+    /// current endpoint.
+    baseline_rtt: Option<std::time::Duration>,
+    /// Consecutive ticks where SRTT exceeded the baseline limit.
+    /// Reset to zero on any sample within bounds.
+    high_rtt_strikes: u32,
+}
+
+impl SupervisorState {
+    fn new(peer_pid: PeerId, endpoints: Vec<String>, initial_idx: usize) -> Self {
+        Self {
+            peer_pid,
+            endpoints,
+            current_idx: initial_idx,
+            last_switch: std::time::Instant::now(),
+            baseline_rtt: None,
+            high_rtt_strikes: 0,
+        }
+    }
+}
+
+/// v0.6 single-task health supervisor. Replaces the per-peer
+/// `tokio::spawn` model with one task that walks every
+/// supervised peer per tick. Three benefits:
 ///
-/// Wakes every `check_interval`, asks the transport for the
+///   * **No thundering herd**: when one upstream link dies, all
+///     peers go stale at once. With per-peer tasks each fires
+///     a probe simultaneously, hammering the alternate link
+///     before any of them have committed. The single-task
+///     model picks at most `MAX_PROBES_PER_TICK` peers per tick.
+///
+///   * **Coordinated rate-limiting**: a global cap on probes-
+///     per-second is straightforward (we just count what we did
+///     this tick) instead of needing cross-task state.
+///
+///   * **Cheap at scale**: 100 peers stays one task, not 100.
+///
+/// Wakes every `check_interval`, asks the transport for each
 /// peer's link metrics, and decides whether to fail over.
 /// Three failure signals (any one is enough):
 ///
@@ -527,208 +688,176 @@ async fn try_endpoints(
 /// back to the original primary and it still doesn't work, do
 /// a `restart_handshake` as last resort — that wipes session
 /// state and forces a fresh handshake.
-async fn supervise_peer(
+async fn supervise_all(
     transport: Arc<Transport>,
-    peer_pub: [u8; 32],
-    peer_pid: PeerId,
-    endpoints: Vec<String>,
-    initial_idx: usize,
+    metrics: Arc<DaemonMetrics>,
+    mut peers: Vec<SupervisorState>,
     cfg: crate::config::Failover,
 ) {
+    use std::sync::atomic::Ordering::Relaxed;
     use std::time::{Duration, Instant};
-    let _ = peer_pub; // currently unused; kept for future "re-add on disappear"
 
     let check_interval = Duration::from_millis(cfg.check_interval_ms);
     let stale_threshold = Duration::from_secs(cfg.stale_secs);
     let hold_time = Duration::from_secs(cfg.hold_secs);
-    // Probe-then-commit timeout. Slightly longer than DRIFT's
-    // internal PATH_PROBE_TIMEOUT (3s) to give the response
-    // time to arrive.
     const PROBE_COMMIT_TIMEOUT: Duration = Duration::from_millis(3500);
-
-    let mut current_idx = initial_idx;
-    let mut last_switch = Instant::now();
-    // Track baseline RTT for the rtt-degradation signal — the
-    // SRTT we saw the first time we measured at this endpoint.
-    let mut baseline_rtt: Option<Duration> = None;
-    let mut high_rtt_strikes: u32 = 0;
     const RTT_STRIKES_TO_FAILOVER: u32 = 3;
+    /// Cap on probe attempts launched per tick across ALL
+    /// peers. Keeps a simultaneous-outage scenario from
+    /// hammering an already-degraded alternate link with N
+    /// probes at once. Subsequent ticks pick up the rest.
+    const MAX_PROBES_PER_TICK: usize = 4;
 
     info!(
-        peer = %hex::encode(peer_pid),
-        endpoint = %endpoints[current_idx],
+        peers = peers.len(),
         check_interval_ms = cfg.check_interval_ms,
         stale_secs = cfg.stale_secs,
         hold_secs = cfg.hold_secs,
         rtt_multiplier = cfg.rtt_multiplier,
-        "failover supervisor started"
+        max_probes_per_tick = MAX_PROBES_PER_TICK,
+        "failover supervisor started (single-task v0.6)"
     );
 
     loop {
         tokio::time::sleep(check_interval).await;
 
-        let m = match transport.peer_metrics(&peer_pid).await {
-            Some(m) => m,
-            None => {
-                // Peer evicted from the table — best effort
-                // restart at the current endpoint.
-                warn!(
-                    peer = %hex::encode(peer_pid),
-                    "peer disappeared from transport — attempting restart"
-                );
-                let _ = transport.restart_handshake(&peer_pid).await;
-                continue;
+        let mut probes_this_tick: usize = 0;
+        for state in peers.iter_mut() {
+            // Honor the global per-tick probe cap. Peers we
+            // skip get re-evaluated on the next tick — staleness
+            // grows monotonically, so they don't get forgotten.
+            if probes_this_tick >= MAX_PROBES_PER_TICK {
+                break;
             }
-        };
 
-        let stale = Instant::now().duration_since(m.last_seen) > stale_threshold;
-
-        // RTT degradation: capture baseline on first sample,
-        // count strikes against it.
-        let rtt_bad = if cfg.rtt_multiplier > 0.0 {
-            match (m.srtt, baseline_rtt) {
-                (Some(srtt), None) => {
-                    baseline_rtt = Some(srtt);
-                    false
-                }
-                (Some(srtt), Some(base)) => {
-                    let limit = base.mul_f32(cfg.rtt_multiplier);
-                    if srtt > limit {
-                        high_rtt_strikes += 1;
-                    } else {
-                        high_rtt_strikes = 0;
-                    }
-                    high_rtt_strikes >= RTT_STRIKES_TO_FAILOVER
-                }
-                _ => false,
-            }
-        } else {
-            false
-        };
-
-        let unhealthy = stale || rtt_bad;
-        if !unhealthy {
-            continue;
-        }
-
-        // Hold window: don't switch again right after we just
-        // switched. Avoids ping-pong on flaky links.
-        if last_switch.elapsed() < hold_time {
-            debug!(
-                peer = %hex::encode(peer_pid),
-                in_hold_for_secs = (hold_time - last_switch.elapsed()).as_secs(),
-                "unhealthy but in hold window — skipping failover"
-            );
-            continue;
-        }
-
-        warn!(
-            peer = %hex::encode(peer_pid),
-            current = %endpoints[current_idx],
-            stale_for_ms = Instant::now().duration_since(m.last_seen).as_millis() as u64,
-            srtt_us = m.srtt.map(|d| d.as_micros() as u64).unwrap_or(0),
-            "peer unhealthy — looking for next endpoint"
-        );
-
-        // Try every other endpoint exactly once (round-robin
-        // starting after current). On success the loop breaks;
-        // on full cycle without success, fall back to a hard
-        // restart at the original primary.
-        //
-        // For v0.5 cross-scheme failover: every probe goes via
-        // a fresh outbound connector for the candidate URL. That
-        // way a `tcp://...` next-endpoint opens a TCP connection
-        // (not just a UDP socket pointing at a TCP port). The
-        // connector becomes a new transport interface; the
-        // probe is sent via that interface. On success, the
-        // PathResponse arrives on the same interface and the
-        // transport's `handle_path_response` pins
-        // `peer.interface_id` to it — so subsequent send_data
-        // flows over the validated path.
-        let n = endpoints.len();
-        let mut switched = false;
-        for offset in 1..n {
-            let next_idx = (current_idx + offset) % n;
-            let next_url = &endpoints[next_idx];
-            let (next_io, next_addr) = match drift::io::make_connector(next_url).await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(endpoint = %next_url, error = %e, "couldn't open connector for endpoint");
+            let m = match transport.peer_metrics(&state.peer_pid).await {
+                Some(m) => m,
+                None => {
+                    // Peer evicted from the table — best effort
+                    // restart at the current endpoint.
+                    warn!(
+                        peer = %hex::encode(state.peer_pid),
+                        "peer disappeared from transport — attempting restart"
+                    );
+                    metrics.failover_restarts.fetch_add(1, Relaxed);
+                    let _ = transport.restart_handshake(&state.peer_pid).await;
                     continue;
                 }
             };
-            let next_iface = transport.add_interface(
-                format!("failover-{}", current_idx + offset),
-                next_io,
-            );
-            debug!(
-                peer = %hex::encode(peer_pid),
-                endpoint = %next_url,
-                iface = next_iface,
-                "attached fresh outbound connector for failover probe"
-            );
-            if let Err(e) = transport
-                .probe_candidate_path_via(&peer_pid, next_addr, next_iface)
-                .await
-            {
-                warn!(endpoint = %next_url, error = ?e, "probe_candidate_path_via failed");
+
+            let stale = Instant::now().duration_since(m.last_seen) > stale_threshold;
+            let rtt_bad = if cfg.rtt_multiplier > 0.0 {
+                match (m.srtt, state.baseline_rtt) {
+                    (Some(srtt), None) => {
+                        state.baseline_rtt = Some(srtt);
+                        false
+                    }
+                    (Some(srtt), Some(base)) => {
+                        let limit = base.mul_f32(cfg.rtt_multiplier);
+                        if srtt > limit {
+                            state.high_rtt_strikes += 1;
+                        } else {
+                            state.high_rtt_strikes = 0;
+                        }
+                        state.high_rtt_strikes >= RTT_STRIKES_TO_FAILOVER
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            if !(stale || rtt_bad) {
                 continue;
             }
-            // Wait for the addr swap. The transport commits on
-            // matching PathResponse, which also pins
-            // peer.interface_id to the connector iface.
-            let deadline = Instant::now() + PROBE_COMMIT_TIMEOUT;
-            let mut committed = false;
-            while Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if transport.peer_addr(&peer_pid).await == Some(next_addr) {
-                    committed = true;
+
+            if state.last_switch.elapsed() < hold_time {
+                metrics.failover_hold_skipped.fetch_add(1, Relaxed);
+                debug!(
+                    peer = %hex::encode(state.peer_pid),
+                    in_hold_for_secs = (hold_time - state.last_switch.elapsed()).as_secs(),
+                    "unhealthy but in hold window — skipping failover"
+                );
+                continue;
+            }
+
+            probes_this_tick += 1;
+            warn!(
+                peer = %hex::encode(state.peer_pid),
+                current = %state.endpoints[state.current_idx],
+                stale_for_ms = Instant::now().duration_since(m.last_seen).as_millis() as u64,
+                srtt_us = m.srtt.map(|d| d.as_micros() as u64).unwrap_or(0),
+                "peer unhealthy — looking for next endpoint"
+            );
+
+            let n = state.endpoints.len();
+            let mut switched = false;
+            for offset in 1..n {
+                let next_idx = (state.current_idx + offset) % n;
+                let next_url = state.endpoints[next_idx].clone();
+                let (next_io, next_addr) = match drift::io::make_connector(&next_url).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(endpoint = %next_url, error = %e, "couldn't open connector");
+                        continue;
+                    }
+                };
+                let next_iface = transport
+                    .add_interface(format!("failover-{}", state.current_idx + offset), next_io);
+                if let Err(e) = transport
+                    .probe_candidate_path_via(&state.peer_pid, next_addr, next_iface)
+                    .await
+                {
+                    warn!(endpoint = %next_url, error = ?e, "probe_candidate_path_via failed");
+                    continue;
+                }
+                // Wait for the addr swap.
+                let deadline = Instant::now() + PROBE_COMMIT_TIMEOUT;
+                let mut committed = false;
+                while Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if transport.peer_addr(&state.peer_pid).await == Some(next_addr) {
+                        committed = true;
+                        break;
+                    }
+                }
+                if committed {
+                    info!(
+                        peer = %hex::encode(state.peer_pid),
+                        from = %state.endpoints[state.current_idx],
+                        to = %next_url,
+                        iface = next_iface,
+                        "failover committed via path probe"
+                    );
+                    metrics.note_failover_to(&next_url);
+                    state.current_idx = next_idx;
+                    state.last_switch = Instant::now();
+                    state.baseline_rtt = None;
+                    state.high_rtt_strikes = 0;
+                    switched = true;
                     break;
                 }
+                warn!(endpoint = %next_url, "no path probe response — trying next");
             }
-            if committed {
-                info!(
-                    peer = %hex::encode(peer_pid),
-                    from = %endpoints[current_idx],
-                    to = %next_url,
-                    iface = next_iface,
-                    "failover committed via path probe"
-                );
-                current_idx = next_idx;
-                last_switch = Instant::now();
-                baseline_rtt = None;
-                high_rtt_strikes = 0;
-                switched = true;
-                break;
-            }
-            warn!(endpoint = %next_url, "no path probe response — trying next");
-        }
 
-        if !switched {
-            // No endpoint responded to probes. Last resort:
-            // wipe the session and fresh-handshake at endpoint
-            // 0. If THAT fails too, the next iteration of this
-            // loop will try again.
-            warn!(
-                peer = %hex::encode(peer_pid),
-                "no endpoint responded — restarting handshake at primary"
-            );
-            let primary = &endpoints[0];
-            if let Ok(addr) = resolve_endpoint(primary).await {
-                transport.update_peer_addr(&peer_pid, addr).await;
+            if !switched {
+                warn!(
+                    peer = %hex::encode(state.peer_pid),
+                    "no endpoint responded — restarting handshake at primary"
+                );
+                metrics.failover_restarts.fetch_add(1, Relaxed);
+                let primary = state.endpoints[0].clone();
+                if let Ok(addr) = resolve_endpoint(&primary).await {
+                    transport.update_peer_addr(&state.peer_pid, addr).await;
+                }
+                let _ = transport.restart_handshake(&state.peer_pid).await;
+                let _ = transport.send_data(&state.peer_pid, b"\x00", 0, 0).await;
+                state.current_idx = 0;
+                state.last_switch = Instant::now();
+                state.baseline_rtt = None;
+                state.high_rtt_strikes = 0;
             }
-            let _ = transport.restart_handshake(&peer_pid).await;
-            // Nudge the handshake along with a 1-byte send.
-            let _ = transport.send_data(&peer_pid, b"\x00", 0, 0).await;
-            current_idx = 0;
-            last_switch = Instant::now();
-            baseline_rtt = None;
-            high_rtt_strikes = 0;
         }
     }
 }
 
-#[allow(dead_code)]
-fn _ensure_peer_id_used(p: PeerId) -> PeerId {
-    p
-}

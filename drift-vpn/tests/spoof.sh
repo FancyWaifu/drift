@@ -150,7 +150,7 @@ fi
 echo "PASS: attacker's spoofed ping was rejected (no ICMP reply received)"
 
 # Verify B's daemon actually logged the rejection.
-if docker logs "$NODE_B" 2>&1 | grep -q "reverse-path filter rejected"; then
+if docker logs "$NODE_B" 2>&1 | grep -qE "rpfilter dropped: src not in"; then
     echo "PASS: B's daemon logged the spoof rejection"
 else
     echo "FAIL: B's daemon didn't log a reverse-path rejection"

@@ -28,29 +28,31 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// One-or-many string field. Accepts `"udp://..."` (back-compat
-/// single form) or `["udp://...", "tls://..."]` (v0.2 array
-/// form). Used for `listen` and `endpoint(s)`.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
+/// Deserializer for fields that accept either `"udp://..."`
+/// (back-compat single form) or `["udp://...", "tls://..."]`
+/// (v0.2 array form). After parsing, the field is always a
+/// `Vec<String>` — callers don't need to handle two shapes.
+fn one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Helper {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Helper::deserialize(deserializer)? {
+        Helper::One(s) => vec![s],
+        Helper::Many(v) => v,
+    })
 }
 
-impl OneOrMany {
-    pub fn into_vec(self) -> Vec<String> {
-        match self {
-            Self::One(s) => vec![s],
-            Self::Many(v) => v,
-        }
-    }
-    pub fn as_slice(&self) -> Vec<String> {
-        match self {
-            Self::One(s) => vec![s.clone()],
-            Self::Many(v) => v.clone(),
-        }
-    }
+fn one_or_many_opt<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    one_or_many(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,7 +133,8 @@ pub struct Interface {
     /// multi-transport — `["udp://0.0.0.0:51820", "tls://0.0.0.0:443"]`
     /// — so one daemon serves clients on whichever wire works
     /// for their network. Single-string form is back-compat.
-    pub listen: OneOrMany,
+    #[serde(deserialize_with = "one_or_many")]
+    pub listen: Vec<String>,
     /// Tun device MTU. Default 1340 — that's `drift::MAX_PAYLOAD`
     /// (1348) minus an 8-byte safety margin, so TCP segments
     /// emitted at full MTU still fit inside DRIFT's per-packet
@@ -168,7 +171,8 @@ pub struct Peer {
     /// v0.2 array form. Tried in priority order — first to land
     /// a session wins. UDP first, TLS / WS / HTTP / Tor as
     /// fallbacks for hostile networks.
-    pub endpoints: Option<OneOrMany>,
+    #[serde(default, deserialize_with = "one_or_many_opt")]
+    pub endpoints: Option<Vec<String>>,
     /// Periodic keepalive interval in seconds. Sends a tiny
     /// padding packet so NATs don't time out the path. Default
     /// off.
@@ -200,11 +204,11 @@ impl Peer {
             out.push(s.clone());
         }
         if let Some(eps) = &self.endpoints {
-            for url in eps.as_slice() {
+            for url in eps {
                 // De-dup: don't add `endpoint` again if it's
                 // already in `endpoints`.
-                if !out.contains(&url) {
-                    out.push(url);
+                if !out.contains(url) {
+                    out.push(url.clone());
                 }
             }
         }
@@ -224,7 +228,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.interface.listen.as_slice().is_empty() {
+        if self.interface.listen.is_empty() {
             return Err(anyhow!("interface.listen must contain at least one URL"));
         }
         for (i, p) in self.peers.iter().enumerate() {
