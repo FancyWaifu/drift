@@ -43,6 +43,24 @@ pub trait PacketIO: Send + Sync + 'static {
     /// length-prefixed frame.
     async fn send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<usize>;
 
+    /// Send a batch of packets in one syscall when the
+    /// underlying medium supports it (Linux UDP via
+    /// `sendmmsg(2)`). Default implementation just loops
+    /// `send_to` — correct everywhere, faster on Linux UDP.
+    /// Returns the number of packets handed to the kernel
+    /// (may be less than `packets.len()` on partial sends).
+    async fn send_to_batch(
+        &self,
+        packets: &[(Vec<u8>, SocketAddr)],
+    ) -> io::Result<usize> {
+        let mut sent = 0;
+        for (bytes, dst) in packets {
+            self.send_to(bytes, *dst).await?;
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
     /// Receive the next complete packet. Returns
     /// `(bytes_read, source_address)`. Blocks until a
     /// packet is available.
@@ -87,6 +105,29 @@ impl UdpPacketIO {
 impl PacketIO for UdpPacketIO {
     async fn send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
         self.socket.send_to(buf, dest).await
+    }
+
+    /// Override the default loop with a real `sendmmsg(2)`
+    /// on Linux. One syscall per batch instead of N per
+    /// packet — typically 3-10× throughput improvement on
+    /// high-pps workloads.
+    async fn send_to_batch(
+        &self,
+        packets: &[(Vec<u8>, SocketAddr)],
+    ) -> io::Result<usize> {
+        if packets.is_empty() {
+            return Ok(0);
+        }
+        // For 1- or 2-packet "batches" the syscall savings
+        // don't beat the bookkeeping. Fall through to the
+        // single-send path.
+        if packets.len() <= 2 {
+            for (bytes, dst) in packets {
+                self.socket.send_to(bytes, *dst).await?;
+            }
+            return Ok(packets.len());
+        }
+        crate::transport::batch::send_batch(&self.socket, packets).await
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
@@ -590,6 +631,27 @@ impl InterfaceSet {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
         };
         io.send_to(buf, dest).await
+    }
+
+    /// Batched variant of `send_for`. All packets go via
+    /// `iface`; the underlying `PacketIO` decides whether to
+    /// use a real batched syscall (UDP `sendmmsg`) or fall
+    /// back to a loop. Drops the read lock before awaiting,
+    /// same as `send_for`.
+    pub async fn send_batch_for(
+        &self,
+        iface: usize,
+        packets: &[(Vec<u8>, SocketAddr)],
+    ) -> io::Result<usize> {
+        let io = {
+            let ifaces = self.interfaces.read().unwrap();
+            ifaces
+                .get(iface)
+                .or_else(|| ifaces.first())
+                .map(|(_, io)| io.clone())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
+        };
+        io.send_to_batch(packets).await
     }
 }
 

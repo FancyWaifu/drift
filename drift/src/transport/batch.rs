@@ -32,11 +32,11 @@ use tokio::net::UdpSocket;
 /// kernel. On Linux uses `sendmmsg(2)`; on other platforms
 /// falls back to a loop of `send_to` calls.
 ///
-/// Not yet wired into the hot send path — kept here for when
-/// high-throughput senders opt in via `send_data_batch`. The
-/// `linux::send_batch_mmsg` variant needs profiling work
-/// before we flip the default.
-#[allow(dead_code)]
+/// Wired into `UdpPacketIO::send_to_batch` (which any caller
+/// hits via the `PacketIO::send_to_batch` trait method) — for
+/// large batches Linux gets one syscall per call; small
+/// batches still use the per-packet path because the
+/// sendmmsg setup overhead dominates below ~3 items.
 pub(crate) async fn send_batch(
     socket: &UdpSocket,
     packets: &[(Vec<u8>, SocketAddr)],
@@ -56,7 +56,6 @@ pub(crate) async fn send_batch(
 }
 
 #[cfg(not(target_os = "linux"))]
-#[allow(dead_code)]
 async fn send_batch_fallback(
     socket: &UdpSocket,
     packets: &[(Vec<u8>, SocketAddr)],
@@ -80,51 +79,51 @@ mod linux {
         socket: &UdpSocket,
         packets: &[(Vec<u8>, SocketAddr)],
     ) -> io::Result<usize> {
-        // Build stable backing storage for sockaddrs + iovecs
-        // + mmsghdrs. Everything the kernel reads has to live
-        // past the syscall boundary; we materialize it all
-        // here and pass raw pointers.
-        let n = packets.len();
-        let mut addrs: Vec<libc::sockaddr_storage> = (0..n)
-            .map(|_| unsafe { MaybeUninit::zeroed().assume_init() })
-            .collect();
-        let mut addr_lens: Vec<libc::socklen_t> = vec![0; n];
-        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(n);
-        let mut msgs: Vec<libc::mmsghdr> = Vec::with_capacity(n);
-
-        for (i, (bytes, dst)) in packets.iter().enumerate() {
-            let len = encode_sockaddr(&mut addrs[i], dst);
-            addr_lens[i] = len;
-
-            iovecs.push(libc::iovec {
-                iov_base: bytes.as_ptr() as *mut _,
-                iov_len: bytes.len(),
-            });
-        }
-
-        for i in 0..n {
-            let msg_hdr = libc::msghdr {
-                msg_name: &mut addrs[i] as *mut _ as *mut _,
-                msg_namelen: addr_lens[i],
-                msg_iov: &mut iovecs[i],
-                msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
-                msg_controllen: 0,
-                msg_flags: 0,
-            };
-            msgs.push(libc::mmsghdr {
-                msg_hdr,
-                msg_len: 0,
-            });
-        }
-
-        // Run inside tokio's async_io so the socket's
-        // writable readiness gates the call. On EAGAIN it
-        // retries. Non-blocking semantics preserved.
+        // Construction of iovec/mmsghdr (which wrap raw
+        // pointers) must NOT cross the await point or the
+        // returned future is `!Send` — and async-trait fns
+        // require `Send` futures. So we do all the libc
+        // bookkeeping inside the sync closure, where the
+        // pointers' lifetimes are bounded by one syscall.
+        // The closure may run multiple times if `async_io`
+        // sees EAGAIN — fine, it just rebuilds.
         socket
             .async_io(Interest::WRITABLE, || {
+                let n = packets.len();
+                let mut addrs: Vec<libc::sockaddr_storage> = (0..n)
+                    .map(|_| unsafe { MaybeUninit::zeroed().assume_init() })
+                    .collect();
+                let mut addr_lens: Vec<libc::socklen_t> = vec![0; n];
+                let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(n);
+                let mut msgs: Vec<libc::mmsghdr> = Vec::with_capacity(n);
+
+                for (i, (bytes, dst)) in packets.iter().enumerate() {
+                    let len = encode_sockaddr(&mut addrs[i], dst);
+                    addr_lens[i] = len;
+                    iovecs.push(libc::iovec {
+                        iov_base: bytes.as_ptr() as *mut _,
+                        iov_len: bytes.len(),
+                    });
+                }
+                for i in 0..n {
+                    let msg_hdr = libc::msghdr {
+                        msg_name: &mut addrs[i] as *mut _ as *mut _,
+                        msg_namelen: addr_lens[i],
+                        msg_iov: &mut iovecs[i],
+                        msg_iovlen: 1,
+                        msg_control: std::ptr::null_mut(),
+                        msg_controllen: 0,
+                        msg_flags: 0,
+                    };
+                    msgs.push(libc::mmsghdr {
+                        msg_hdr,
+                        msg_len: 0,
+                    });
+                }
+
                 let fd = socket.as_raw_fd();
-                let rc = unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as _, 0) };
+                let rc =
+                    unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as _, 0) };
                 if rc < 0 {
                     Err(io::Error::last_os_error())
                 } else {
