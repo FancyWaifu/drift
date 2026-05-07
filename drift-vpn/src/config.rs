@@ -241,13 +241,11 @@ impl Config {
                     &p.public_key[..16.min(p.public_key.len())]
                 ));
             }
-            if p.endpoint_list().is_empty() {
-                return Err(anyhow!(
-                    "peer #{} ({}) has no endpoint or endpoints — v0.2 requires at least one",
-                    i,
-                    &p.public_key[..16.min(p.public_key.len())]
-                ));
-            }
+            // v0.8: a peer with no endpoint/endpoints is a
+            // mesh-only peer — reachable only via forwarding
+            // through another peer that DOES have a direct
+            // path. We register them with the transport but
+            // don't try to handshake at startup.
         }
         Ok(())
     }
