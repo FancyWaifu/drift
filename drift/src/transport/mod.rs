@@ -1043,6 +1043,28 @@ impl Transport {
             .await
     }
 
+    /// Cross-interface variant of `probe_candidate_path`. Sends
+    /// the PathChallenge via `iface_idx` instead of the peer's
+    /// currently registered interface. On a matching
+    /// PathResponse arriving on the same iface, the peer
+    /// migrates to BOTH the new addr AND the new outbound iface
+    /// — so subsequent send_data flows over the validated path.
+    ///
+    /// drift-vpn uses this for cross-scheme failover: when UDP
+    /// is blocked, the supervisor opens a TCP connector to the
+    /// peer's TCP endpoint, attaches it as a new interface via
+    /// `add_interface`, and probes through it.
+    pub async fn probe_candidate_path_via(
+        &self,
+        peer_id: &PeerId,
+        candidate_addr: SocketAddr,
+        iface_idx: usize,
+    ) -> Result<()> {
+        self.inner
+            .probe_candidate_path_via(peer_id, candidate_addr, iface_idx)
+            .await
+    }
+
     /// Register a peer by its static X25519 public key.
     ///
     /// Semantics:
@@ -2152,7 +2174,8 @@ impl Inner {
                 Ok(None)
             }
             PacketType::PathResponse => {
-                self.handle_path_response(&header, data, body, src).await?;
+                self.handle_path_response(&header, data, body, src, iface_idx)
+                    .await?;
                 Ok(None)
             }
             PacketType::Close => {
