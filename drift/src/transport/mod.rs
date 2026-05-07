@@ -311,6 +311,18 @@ pub struct Metrics {
     pub unknown_peer_drops: u64,
 }
 
+/// One outbound packet for `Transport::send_data_batch_qos`.
+/// Carries the same per-packet metadata as `send_data` so
+/// callers can batch without losing the deadline / coalesce
+/// hints that the per-packet API exposes.
+#[derive(Debug, Clone)]
+pub struct BatchItem {
+    pub peer: PeerId,
+    pub payload: Vec<u8>,
+    pub deadline_ms: u16,
+    pub coalesce_group: u32,
+}
+
 /// Per-peer link-quality snapshot. Returned by
 /// `Transport::peer_metrics(&PeerId)` for callers (drift-vpn,
 /// applications, observability) that want to make routing or
@@ -1147,6 +1159,16 @@ impl Transport {
         self.inner.send_data_batch(items).await
     }
 
+    /// Batched variant with per-item QoS hints. Same syscall
+    /// economics as `send_data_batch` but each item carries
+    /// its own `deadline_ms` and `coalesce_group` so callers
+    /// (drift-vpn's classifier) don't lose feature parity with
+    /// the per-packet `send_data` API when they switch to
+    /// batching.
+    pub async fn send_data_batch_qos(&self, items: &[BatchItem]) -> Result<usize> {
+        self.inner.send_data_batch_qos(items).await
+    }
+
     /// Gracefully close the session with `dst`. Sends an
     /// AEAD-authenticated `Close` packet to the peer, then drops
     /// the peer locally (auto-registered) or resets its handshake
@@ -1813,17 +1835,34 @@ impl Inner {
     /// fast-path API for bulk senders, not a general-purpose
     /// send.
     async fn send_data_batch(&self, items: &[(PeerId, Vec<u8>)]) -> Result<usize> {
+        // Adapter for the QoS-less form: zero out the QoS
+        // fields and delegate. We avoid an allocation per item
+        // by building BatchItem in-place rather than cloning
+        // the payload — the caller owns the Vec, we move it.
+        let qos: Vec<BatchItem> = items
+            .iter()
+            .map(|(peer, payload)| BatchItem {
+                peer: *peer,
+                payload: payload.clone(),
+                deadline_ms: 0,
+                coalesce_group: 0,
+            })
+            .collect();
+        self.send_data_batch_qos(&qos).await
+    }
+
+    async fn send_data_batch_qos(&self, items: &[BatchItem]) -> Result<usize> {
         if items.is_empty() {
             return Ok(0);
         }
         // Build all the wires under per-shard locks.
         let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(items.len());
-        for (dst, payload) in items {
-            if payload.len() > MAX_PAYLOAD {
+        for it in items {
+            if it.payload.len() > MAX_PAYLOAD {
                 continue;
             }
-            let mut peers = self.peers.lock_for(dst).await;
-            let Some(peer) = peers.get_mut(dst) else {
+            let mut peers = self.peers.lock_for(&it.peer).await;
+            let Some(peer) = peers.get_mut(&it.peer) else {
                 continue;
             };
             if !matches!(peer.handshake, HandshakeState::Established { .. }) {
@@ -1832,9 +1871,14 @@ impl Inner {
                 // queueing.
                 continue;
             }
-            if let Ok(SendAction::Data(bytes, target, iface)) =
-                build_data_packet(self.local_peer_id, peer, payload, 0, 0, None)
-            {
+            if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
+                self.local_peer_id,
+                peer,
+                &it.payload,
+                it.deadline_ms,
+                it.coalesce_group,
+                None,
+            ) {
                 batch.push((bytes, target, iface));
             }
         }
