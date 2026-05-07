@@ -22,7 +22,7 @@ const HELLO_PAYLOAD_LEN: usize = STATIC_KEY_LEN + STATIC_KEY_LEN + NONCE_LEN;
 // HELLO_ACK payload: server_ephemeral_pub(32) + server_nonce(16) + auth_tag(16) = 64
 const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 #[cfg(unix)]
-mod batch;
+pub(crate) mod batch;
 mod cookies;
 #[cfg(unix)]
 mod ecn;
@@ -382,6 +382,18 @@ pub(crate) struct Inner {
     /// resumption ticket the server gave us. Populated by
     /// `handle_resumption_ticket`; consumed by `send_resume_hello`.
     pub(crate) client_tickets: Arc<Mutex<StdHashMap<PeerId, ClientTicket>>>,
+    /// Hint flag for the per-packet `try_resume` check: only
+    /// flipped to `true` when at least one ticket has been
+    /// stored. While `false`, `send_data` skips the entire
+    /// resumption block — saves one async mutex acquire and one
+    /// peer-table lookup per packet on the hot path.
+    ///
+    /// Allowed to be a stale `true` (e.g., after the last
+    /// ticket is removed): the worst case is we pay the
+    /// original check cost, which is what we'd do anyway. We
+    /// never need it to be conservatively `false`, so the
+    /// monotonic-set semantics are correct.
+    pub(crate) has_any_ticket: std::sync::atomic::AtomicBool,
     /// Optional qlog-style event writer. `None` unless the
     /// user set `TransportConfig::qlog_path`.
     pub(crate) qlog: Option<qlog::QlogWriter>,
@@ -543,6 +555,7 @@ impl Transport {
             cookies: Arc::new(Mutex::new(CookieSecrets::new())),
             resumption_store: Arc::new(Mutex::new(ResumptionStore::default())),
             client_tickets: Arc::new(Mutex::new(StdHashMap::new())),
+            has_any_ticket: std::sync::atomic::AtomicBool::new(false),
             qlog: qlog_writer,
             cid_map: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_out_cid: Arc::new(StdMutex::new(StdHashMap::new())),
@@ -1280,6 +1293,9 @@ impl Transport {
             }
         }
         self.inner.client_tickets.lock().await.insert(*peer, ticket);
+        self.inner
+            .has_any_ticket
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -1672,7 +1688,17 @@ impl Inner {
         // We only enter this branch from the Initiator side of a
         // brand-new connection — once AwaitingAck or Established,
         // the normal flow takes over.
-        let try_resume = {
+        // Hot-path short-circuit: most apps never use resumption,
+        // so `has_any_ticket` stays false forever and we skip the
+        // mutex+peer-lookup pair entirely. The flag is a strict
+        // hint — a stale `true` just falls through to the original
+        // check, which is correct.
+        let try_resume = if !self
+            .has_any_ticket
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            false
+        } else {
             let have_ticket = {
                 let tickets = self.client_tickets.lock().await;
                 tickets
@@ -1790,10 +1816,7 @@ impl Inner {
         if items.is_empty() {
             return Ok(0);
         }
-        // Build all the wires under single-shard locks.
-        // We group items by shard to amortize lock
-        // acquisition, but for simplicity fall back to
-        // per-item lock_for — good enough for v1.
+        // Build all the wires under per-shard locks.
         let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(items.len());
         for (dst, payload) in items {
             if payload.len() > MAX_PAYLOAD {
@@ -1820,23 +1843,33 @@ impl Inner {
             return Ok(0);
         }
 
-        // Hand the built batch to the platform-specific
-        // sender. On Linux this is one `sendmmsg`; elsewhere
-        // it's a loop of `send_to`.
-        let sent = {
-            let mut n = 0usize;
-            for (bytes, addr, iface) in &batch {
-                self.ifaces.send_for(*iface, bytes, *addr).await?;
-                self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
-                self.metrics
-                    .bytes_sent
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                n += 1;
-            }
-            self.metrics.batched_sends.fetch_add(1, Ordering::Relaxed);
-            n
-        };
-        Ok(sent)
+        // Group by interface so all packets going to the
+        // same listener get one syscall. The common case has
+        // a single interface (the primary UDP listener), so
+        // this typically yields one sendmmsg for the entire
+        // batch. Multi-interface deployments (post-failover,
+        // mixed-scheme) get one sendmmsg per active interface.
+        let mut by_iface: StdHashMap<usize, Vec<(Vec<u8>, SocketAddr)>> = StdHashMap::new();
+        for (bytes, addr, iface) in batch {
+            by_iface.entry(iface).or_default().push((bytes, addr));
+        }
+
+        let mut sent_total = 0usize;
+        let mut bytes_total: u64 = 0;
+        for (iface, group) in by_iface {
+            let bytes_in_group: u64 = group.iter().map(|(b, _)| b.len() as u64).sum();
+            let n = self.ifaces.send_batch_for(iface, &group).await?;
+            sent_total += n;
+            bytes_total += bytes_in_group;
+        }
+        self.metrics
+            .packets_sent
+            .fetch_add(sent_total as u64, Ordering::Relaxed);
+        self.metrics
+            .bytes_sent
+            .fetch_add(bytes_total, Ordering::Relaxed);
+        self.metrics.batched_sends.fetch_add(1, Ordering::Relaxed);
+        Ok(sent_total)
     }
 
     /// Populate the CID lookup maps for an established

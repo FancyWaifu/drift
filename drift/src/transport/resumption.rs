@@ -433,6 +433,8 @@ impl Inner {
             server_static_pub,
         };
         self.client_tickets.lock().await.insert(server_id, ticket);
+        self.has_any_ticket
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.metrics
             .resumption_tickets_received
             .fetch_add(1, Ordering::Relaxed);
