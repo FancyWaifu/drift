@@ -2147,7 +2147,8 @@ impl Inner {
                 Ok(None)
             }
             PacketType::PathChallenge => {
-                self.handle_path_challenge(&header, data, body, src).await?;
+                self.handle_path_challenge(&header, data, body, src, iface_idx)
+                    .await?;
                 Ok(None)
             }
             PacketType::PathResponse => {

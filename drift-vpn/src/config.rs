@@ -58,7 +58,66 @@ pub struct Config {
     pub interface: Interface,
     #[serde(default, rename = "peer")]
     pub peers: Vec<Peer>,
+    /// Runtime auto-failover (v0.4) tuning. Optional — defaults
+    /// give every multi-endpoint peer health-driven failover
+    /// without thrashing on noisy WAN.
+    #[serde(default)]
+    pub failover: Failover,
 }
+
+/// Per-daemon failover policy. Applied to every peer with two
+/// or more endpoints. Single-endpoint peers ignore the policy
+/// entirely (nowhere to fail over to).
+///
+/// Defaults are tuned for "WAN that mostly works" — slow enough
+/// not to react to transient blips, fast enough to recover from
+/// a real outage in tens of seconds.
+#[derive(Debug, Deserialize, Clone)]
+pub struct Failover {
+    /// How often the supervisor wakes up to check peer health.
+    /// Lower = faster reaction; higher = less wakeup overhead.
+    /// Default 2s.
+    #[serde(default = "default_check_interval_ms")]
+    pub check_interval_ms: u64,
+    /// A peer is considered unhealthy if no AEAD-valid traffic
+    /// has arrived from it in this many seconds. With the
+    /// default 5s ping interval that's two missed pings worth
+    /// of silence. Default 10s.
+    #[serde(default = "default_stale_secs")]
+    pub stale_secs: u64,
+    /// After a failover, hold on the new endpoint for this many
+    /// seconds before considering another switch. Prevents
+    /// ping-pong when the primary briefly recovers. Default 30s.
+    #[serde(default = "default_hold_secs")]
+    pub hold_secs: u64,
+    /// If non-zero: switch endpoints when SRTT exceeds
+    /// `rtt_multiplier × baseline` for several consecutive
+    /// samples. Default 0 (disabled). Opt-in because RTT
+    /// thrashing on real WAN is easy to misconfigure.
+    #[serde(default)]
+    pub rtt_multiplier: f32,
+    /// Hard kill switch. Set to false in the [failover] section
+    /// to disable the supervisor for all peers. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for Failover {
+    fn default() -> Self {
+        Self {
+            check_interval_ms: default_check_interval_ms(),
+            stale_secs: default_stale_secs(),
+            hold_secs: default_hold_secs(),
+            rtt_multiplier: 0.0,
+            enabled: true,
+        }
+    }
+}
+
+fn default_check_interval_ms() -> u64 { 2_000 }
+fn default_stale_secs() -> u64 { 10 }
+fn default_hold_secs() -> u64 { 30 }
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 pub struct Interface {

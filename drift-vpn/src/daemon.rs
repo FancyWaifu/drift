@@ -136,6 +136,30 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
             peer_id: peer_pid,
             allowed_ips: peer_cfg.allowed_ips.clone(),
         });
+
+        // v0.4: spawn a per-peer supervisor that watches link
+        // health and fails over to the next endpoint when the
+        // current one degrades. Single-endpoint peers and the
+        // globally-disabled case skip this.
+        if cfg.failover.enabled && endpoints.len() > 1 {
+            let initial_idx = endpoints.iter().position(|e| e == &chosen).unwrap_or(0);
+            let sup_transport = transport.clone();
+            let sup_peer_pub = peer_pub;
+            let sup_peer_pid = peer_pid;
+            let sup_endpoints = endpoints.clone();
+            let sup_cfg = cfg.failover.clone();
+            tokio::spawn(async move {
+                supervise_peer(
+                    sup_transport,
+                    sup_peer_pub,
+                    sup_peer_pid,
+                    sup_endpoints,
+                    initial_idx,
+                    sup_cfg,
+                )
+                .await;
+            });
+        }
     }
     let routes = Arc::new(routes);
 
@@ -472,6 +496,210 @@ async fn try_endpoints(
          tunnel may be one-sided until peer connects"
     );
     Ok(endpoints[0].clone())
+}
+
+/// Per-peer health supervisor (v0.4 runtime auto-failover).
+///
+/// Wakes every `check_interval`, asks the transport for the
+/// peer's link metrics, and decides whether to fail over.
+/// Three failure signals (any one is enough):
+///
+///   * **Hard absence**: `peer_metrics()` returned `None`. The
+///     peer was somehow dropped from the table (rare —
+///     `close_peer` or shard reaper). Restart the handshake
+///     against the current endpoint and let it recover.
+///
+///   * **Staleness**: no AEAD-valid traffic in `stale_secs`.
+///     The default 5s rtt-probe interval makes this two
+///     missed pings worth of silence — enough to call the link
+///     dead without overreacting to one lost packet.
+///
+///   * **RTT degradation** (opt-in via `rtt_multiplier > 0`):
+///     SRTT exceeds `rtt_multiplier × baseline` for several
+///     consecutive samples. Default off; too easy to misconfigure
+///     and ping-pong on noisy WAN.
+///
+/// On failure: probe the next endpoint via `Transport::probe_candidate_path`,
+/// wait up to ~3s for the peer.addr swap to commit. On success
+/// we're done — keep watching at the new endpoint with a hold
+/// window before the next switch is allowed. On failure: try
+/// the endpoint after that, and so on. If we cycle all the way
+/// back to the original primary and it still doesn't work, do
+/// a `restart_handshake` as last resort — that wipes session
+/// state and forces a fresh handshake.
+async fn supervise_peer(
+    transport: Arc<Transport>,
+    peer_pub: [u8; 32],
+    peer_pid: PeerId,
+    endpoints: Vec<String>,
+    initial_idx: usize,
+    cfg: crate::config::Failover,
+) {
+    use std::time::{Duration, Instant};
+    let _ = peer_pub; // currently unused; kept for future "re-add on disappear"
+
+    let check_interval = Duration::from_millis(cfg.check_interval_ms);
+    let stale_threshold = Duration::from_secs(cfg.stale_secs);
+    let hold_time = Duration::from_secs(cfg.hold_secs);
+    // Probe-then-commit timeout. Slightly longer than DRIFT's
+    // internal PATH_PROBE_TIMEOUT (3s) to give the response
+    // time to arrive.
+    const PROBE_COMMIT_TIMEOUT: Duration = Duration::from_millis(3500);
+
+    let mut current_idx = initial_idx;
+    let mut last_switch = Instant::now();
+    // Track baseline RTT for the rtt-degradation signal — the
+    // SRTT we saw the first time we measured at this endpoint.
+    let mut baseline_rtt: Option<Duration> = None;
+    let mut high_rtt_strikes: u32 = 0;
+    const RTT_STRIKES_TO_FAILOVER: u32 = 3;
+
+    info!(
+        peer = %hex::encode(peer_pid),
+        endpoint = %endpoints[current_idx],
+        check_interval_ms = cfg.check_interval_ms,
+        stale_secs = cfg.stale_secs,
+        hold_secs = cfg.hold_secs,
+        rtt_multiplier = cfg.rtt_multiplier,
+        "failover supervisor started"
+    );
+
+    loop {
+        tokio::time::sleep(check_interval).await;
+
+        let m = match transport.peer_metrics(&peer_pid).await {
+            Some(m) => m,
+            None => {
+                // Peer evicted from the table — best effort
+                // restart at the current endpoint.
+                warn!(
+                    peer = %hex::encode(peer_pid),
+                    "peer disappeared from transport — attempting restart"
+                );
+                let _ = transport.restart_handshake(&peer_pid).await;
+                continue;
+            }
+        };
+
+        let stale = Instant::now().duration_since(m.last_seen) > stale_threshold;
+
+        // RTT degradation: capture baseline on first sample,
+        // count strikes against it.
+        let rtt_bad = if cfg.rtt_multiplier > 0.0 {
+            match (m.srtt, baseline_rtt) {
+                (Some(srtt), None) => {
+                    baseline_rtt = Some(srtt);
+                    false
+                }
+                (Some(srtt), Some(base)) => {
+                    let limit = base.mul_f32(cfg.rtt_multiplier);
+                    if srtt > limit {
+                        high_rtt_strikes += 1;
+                    } else {
+                        high_rtt_strikes = 0;
+                    }
+                    high_rtt_strikes >= RTT_STRIKES_TO_FAILOVER
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+
+        let unhealthy = stale || rtt_bad;
+        if !unhealthy {
+            continue;
+        }
+
+        // Hold window: don't switch again right after we just
+        // switched. Avoids ping-pong on flaky links.
+        if last_switch.elapsed() < hold_time {
+            debug!(
+                peer = %hex::encode(peer_pid),
+                in_hold_for_secs = (hold_time - last_switch.elapsed()).as_secs(),
+                "unhealthy but in hold window — skipping failover"
+            );
+            continue;
+        }
+
+        warn!(
+            peer = %hex::encode(peer_pid),
+            current = %endpoints[current_idx],
+            stale_for_ms = Instant::now().duration_since(m.last_seen).as_millis() as u64,
+            srtt_us = m.srtt.map(|d| d.as_micros() as u64).unwrap_or(0),
+            "peer unhealthy — looking for next endpoint"
+        );
+
+        // Try every other endpoint exactly once (round-robin
+        // starting after current). On success the loop breaks;
+        // on full cycle without success, fall back to a hard
+        // restart at the original primary.
+        let n = endpoints.len();
+        let mut switched = false;
+        for offset in 1..n {
+            let next_idx = (current_idx + offset) % n;
+            let next_url = &endpoints[next_idx];
+            let next_addr = match resolve_endpoint(next_url).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(endpoint = %next_url, error = %e, "endpoint resolve failed during failover");
+                    continue;
+                }
+            };
+            if let Err(e) = transport.probe_candidate_path(&peer_pid, next_addr).await {
+                warn!(endpoint = %next_url, error = ?e, "probe_candidate_path failed");
+                continue;
+            }
+            // Wait for the addr swap (transport commits on
+            // matching PathResponse).
+            let deadline = Instant::now() + PROBE_COMMIT_TIMEOUT;
+            let mut committed = false;
+            while Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if transport.peer_addr(&peer_pid).await == Some(next_addr) {
+                    committed = true;
+                    break;
+                }
+            }
+            if committed {
+                info!(
+                    peer = %hex::encode(peer_pid),
+                    from = %endpoints[current_idx],
+                    to = %next_url,
+                    "failover committed via path probe"
+                );
+                current_idx = next_idx;
+                last_switch = Instant::now();
+                baseline_rtt = None;
+                high_rtt_strikes = 0;
+                switched = true;
+                break;
+            }
+            warn!(endpoint = %next_url, "no path probe response — trying next");
+        }
+
+        if !switched {
+            // No endpoint responded to probes. Last resort:
+            // wipe the session and fresh-handshake at endpoint
+            // 0. If THAT fails too, the next iteration of this
+            // loop will try again.
+            warn!(
+                peer = %hex::encode(peer_pid),
+                "no endpoint responded — restarting handshake at primary"
+            );
+            let primary = &endpoints[0];
+            if let Ok(addr) = resolve_endpoint(primary).await {
+                transport.update_peer_addr(&peer_pid, addr).await;
+            }
+            let _ = transport.restart_handshake(&peer_pid).await;
+            // Nudge the handshake along with a 1-byte send.
+            let _ = transport.send_data(&peer_pid, b"\x00", 0, 0).await;
+            current_idx = 0;
+            last_switch = Instant::now();
+            baseline_rtt = None;
+            high_rtt_strikes = 0;
+        }
+    }
 }
 
 #[allow(dead_code)]

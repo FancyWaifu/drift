@@ -163,16 +163,27 @@ impl Inner {
     }
 
     /// Received a `PathChallenge` from a peer. Decrypt the 16-byte
-    /// challenge and bounce it back in a `PathResponse` from our
-    /// current address. No state changes — the response is purely
-    /// reactive and authenticates "yes, I'm reachable at this src
-    /// with the live session key."
+    /// challenge and bounce it back in a `PathResponse` from the
+    /// SAME interface the challenge arrived on. No state changes —
+    /// the response is purely reactive and authenticates "yes, I'm
+    /// reachable at this src with the live session key."
+    ///
+    /// Replying via `recv_iface` (not `iface_for(peer)`) is essential
+    /// for v0.4 runtime failover: the peer is probing a *different*
+    /// remote endpoint than the one it's currently registered on, so
+    /// the challenge lands at our SECONDARY listener. Responding via
+    /// the registered (primary) listener would make the response's
+    /// source addr disagree with the candidate addr the peer probed,
+    /// and `handle_path_response`'s strict `src != probe_addr` check
+    /// would drop it. The challenge tells us which interface is
+    /// reachable; the response must go back the same way.
     pub(crate) async fn handle_path_challenge(
         &self,
         header: &Header,
         full_packet: &[u8],
         body: &[u8],
         src: SocketAddr,
+        recv_iface: usize,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
             return Err(DriftError::UnknownPeer);
@@ -201,7 +212,7 @@ impl Inner {
         };
 
         self.ifaces
-            .send_for(self.iface_for(&peer_id).await, &response_bytes, src)
+            .send_for(recv_iface, &response_bytes, src)
             .await?;
         self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.metrics
