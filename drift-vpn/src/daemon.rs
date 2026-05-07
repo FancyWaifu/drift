@@ -295,9 +295,30 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
             peers: known_peers,
         });
         let path = status_socket.clone();
+        let ctx_for_status = status_ctx.clone();
         tokio::spawn(async move {
-            crate::status::run_server(path, status_ctx).await;
+            crate::status::run_server(path, ctx_for_status).await;
         });
+        // 4b. v0.9: optional Prometheus /metrics endpoint.
+        // Operators opt in by setting `prom_listen`. Disabled
+        // by default since not every deployment runs Prometheus.
+        if let Some(prom_addr_str) = cfg.interface.prom_listen.as_deref() {
+            match prom_addr_str.parse::<std::net::SocketAddr>() {
+                Ok(prom_addr) => {
+                    let ctx_for_prom = status_ctx.clone();
+                    tokio::spawn(async move {
+                        crate::status::run_prom_server(prom_addr, ctx_for_prom).await;
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        addr = %prom_addr_str,
+                        error = %e,
+                        "interface.prom_listen isn't a valid host:port — Prometheus endpoint disabled"
+                    );
+                }
+            }
+        }
     }
 
     // 4. Split the TUN device into reader + writer.

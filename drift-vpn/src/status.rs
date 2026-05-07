@@ -277,3 +277,223 @@ pub fn render_human(report: &StatusReport) -> String {
     );
     out
 }
+
+/// Render a `StatusReport` in Prometheus text exposition format.
+///
+/// Conventions:
+///   - Counters end in `_total`.
+///   - Gauges are descriptive (`_seconds`, `_bytes`, …).
+///   - Per-peer metrics use a `peer` label (the 8-byte peer-id
+///     hex), so a single Prometheus query can graph all peers
+///     and a `topk` / `groupby` works naturally.
+///   - All metric names are prefixed `drift_vpn_` so they
+///     don't collide with anything else a node is exposing.
+///
+/// Format ref: <https://prometheus.io/docs/instrumenting/exposition_formats/>
+pub fn render_prometheus(report: &StatusReport) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
+    // --- Daemon-wide counters ---
+    let m = &report.metrics;
+
+    let _ = writeln!(out, "# HELP drift_vpn_uptime_seconds Daemon uptime since startup");
+    let _ = writeln!(out, "# TYPE drift_vpn_uptime_seconds gauge");
+    let _ = writeln!(out, "drift_vpn_uptime_seconds {}", report.local.uptime_secs);
+
+    let _ = writeln!(out, "# HELP drift_vpn_tun_writes_total Packets successfully written to the TUN device");
+    let _ = writeln!(out, "# TYPE drift_vpn_tun_writes_total counter");
+    let _ = writeln!(out, "drift_vpn_tun_writes_total {}", m.tun_writes);
+
+    let _ = writeln!(out, "# HELP drift_vpn_tun_bytes_total Bytes successfully written to the TUN device");
+    let _ = writeln!(out, "# TYPE drift_vpn_tun_bytes_total counter");
+    let _ = writeln!(out, "drift_vpn_tun_bytes_total {}", m.tun_bytes_written);
+
+    let _ = writeln!(out, "# HELP drift_vpn_tun_write_errors_total TUN write errors (kernel queue full, driver issue, …)");
+    let _ = writeln!(out, "# TYPE drift_vpn_tun_write_errors_total counter");
+    let _ = writeln!(out, "drift_vpn_tun_write_errors_total {}", m.tun_write_errs);
+
+    let _ = writeln!(out, "# HELP drift_vpn_egress_packets_total Packets handed to the transport from the TUN");
+    let _ = writeln!(out, "# TYPE drift_vpn_egress_packets_total counter");
+    let _ = writeln!(out, "drift_vpn_egress_packets_total{{outcome=\"ok\"}} {}", m.send_data_ok);
+    let _ = writeln!(out, "drift_vpn_egress_packets_total{{outcome=\"error\"}} {}", m.send_data_errs);
+    let _ = writeln!(out, "drift_vpn_egress_packets_total{{outcome=\"no_route\"}} {}", m.no_route_drops);
+
+    let _ = writeln!(out, "# HELP drift_vpn_rpfilter_drops_total Inbound packets dropped by the reverse-path filter, by cause");
+    let _ = writeln!(out, "# TYPE drift_vpn_rpfilter_drops_total counter");
+    let _ = writeln!(out, "drift_vpn_rpfilter_drops_total{{cause=\"config_mismatch\"}} {}", m.rpfilter_config_mismatch);
+    let _ = writeln!(out, "drift_vpn_rpfilter_drops_total{{cause=\"unknown_peer\"}} {}", m.rpfilter_unknown_peer);
+    let _ = writeln!(out, "drift_vpn_rpfilter_drops_total{{cause=\"parse_failed\"}} {}", m.rpfilter_parse_failed);
+
+    let _ = writeln!(out, "# HELP drift_vpn_failover_commits_total Committed failovers, by destination scheme");
+    let _ = writeln!(out, "# TYPE drift_vpn_failover_commits_total counter");
+    let _ = writeln!(out, "drift_vpn_failover_commits_total{{scheme=\"udp\"}} {}", m.failover_to_udp);
+    let _ = writeln!(out, "drift_vpn_failover_commits_total{{scheme=\"tcp\"}} {}", m.failover_to_tcp);
+    let _ = writeln!(out, "drift_vpn_failover_commits_total{{scheme=\"other\"}} {}", m.failover_to_other);
+
+    let _ = writeln!(out, "# HELP drift_vpn_failover_restarts_total Failovers that fell through to a fresh handshake");
+    let _ = writeln!(out, "# TYPE drift_vpn_failover_restarts_total counter");
+    let _ = writeln!(out, "drift_vpn_failover_restarts_total {}", m.failover_restarts);
+
+    let _ = writeln!(out, "# HELP drift_vpn_failover_hold_skipped_total Failover attempts suppressed by hysteresis");
+    let _ = writeln!(out, "# TYPE drift_vpn_failover_hold_skipped_total counter");
+    let _ = writeln!(out, "drift_vpn_failover_hold_skipped_total {}", m.failover_hold_skipped);
+
+    // --- Per-peer metrics ---
+    let _ = writeln!(out, "# HELP drift_vpn_peer_established Whether the peer is in Established state (1=yes, 0=no)");
+    let _ = writeln!(out, "# TYPE drift_vpn_peer_established gauge");
+    for p in &report.peers {
+        let _ = writeln!(
+            out,
+            "drift_vpn_peer_established{{peer=\"{}\"}} {}",
+            p.peer_id_hex,
+            if p.is_established { 1 } else { 0 }
+        );
+    }
+
+    let _ = writeln!(out, "# HELP drift_vpn_peer_srtt_seconds Smoothed round-trip time per peer");
+    let _ = writeln!(out, "# TYPE drift_vpn_peer_srtt_seconds gauge");
+    for p in &report.peers {
+        if let Some(us) = p.srtt_us {
+            let secs = us as f64 / 1_000_000.0;
+            let _ = writeln!(
+                out,
+                "drift_vpn_peer_srtt_seconds{{peer=\"{}\"}} {:.6}",
+                p.peer_id_hex, secs
+            );
+        }
+    }
+
+    let _ = writeln!(out, "# HELP drift_vpn_peer_seconds_since_last_seen Staleness — secs since the last AEAD-valid packet from this peer");
+    let _ = writeln!(out, "# TYPE drift_vpn_peer_seconds_since_last_seen gauge");
+    for p in &report.peers {
+        let v = if p.seconds_since_last_seen == u64::MAX {
+            // Mesh-only peers that haven't bootstrapped yet —
+            // emit -1 to make it distinguishable in graphs from
+            // a freshly-stale peer.
+            -1.0
+        } else {
+            p.seconds_since_last_seen as f64
+        };
+        let _ = writeln!(
+            out,
+            "drift_vpn_peer_seconds_since_last_seen{{peer=\"{}\"}} {}",
+            p.peer_id_hex, v
+        );
+    }
+
+    let _ = writeln!(out, "# HELP drift_vpn_peer_tx_packets_total Packets sent to peer in current session");
+    let _ = writeln!(out, "# TYPE drift_vpn_peer_tx_packets_total counter");
+    for p in &report.peers {
+        let _ = writeln!(
+            out,
+            "drift_vpn_peer_tx_packets_total{{peer=\"{}\"}} {}",
+            p.peer_id_hex, p.tx_packets
+        );
+    }
+
+    let _ = writeln!(out, "# HELP drift_vpn_peer_rx_packets_total Packets received from peer in current session");
+    let _ = writeln!(out, "# TYPE drift_vpn_peer_rx_packets_total counter");
+    for p in &report.peers {
+        let _ = writeln!(
+            out,
+            "drift_vpn_peer_rx_packets_total{{peer=\"{}\"}} {}",
+            p.peer_id_hex, p.rx_packets
+        );
+    }
+
+    out
+}
+
+/// HTTP server for the `/metrics` endpoint. Tiny by design —
+/// only handles `GET /metrics` (and `GET /` as a friendly
+/// pointer); everything else gets a 404. Connection: close
+/// after each response so we don't have to do keepalive.
+///
+/// Prometheus' default scrape interval is 15s; the server
+/// rebuilds the snapshot per request, which is cheap (one
+/// peer-table walk + a handful of atomic reads).
+#[cfg(target_os = "linux")]
+pub async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusContext>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(error = %e, %addr, "couldn't bind prometheus listener");
+            return;
+        }
+    };
+    tracing::info!(%addr, "prometheus /metrics listening");
+
+    loop {
+        let (mut sock, _) = match listener.accept().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(error = %e, "prometheus accept error");
+                continue;
+            }
+        };
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            // Read the request line. We don't actually parse
+            // headers — we just need to see "GET /metrics" so
+            // we can return either the metrics or a 404.
+            let mut buf = [0u8; 1024];
+            let n = match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                sock.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(n)) => n,
+                _ => return,
+            };
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let first_line = req.lines().next().unwrap_or("");
+
+            let response = if first_line.starts_with("GET /metrics") {
+                let report = ctx.build_report().await;
+                let body = render_prometheus(&report);
+                format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: text/plain; version=0.0.4\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    body.len(),
+                    body
+                )
+            } else if first_line.starts_with("GET / ") || first_line.starts_with("GET / HTTP") {
+                let body =
+                    "drift-vpn metrics endpoint\n\nGET /metrics for Prometheus scrape.\n";
+                format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: text/plain\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    body.len(),
+                    body
+                )
+            } else {
+                let body = "not found\n";
+                format!(
+                    "HTTP/1.1 404 Not Found\r\n\
+                     Content-Type: text/plain\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    body.len(),
+                    body
+                )
+            };
+
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        });
+    }
+}
