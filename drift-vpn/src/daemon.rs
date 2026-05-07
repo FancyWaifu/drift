@@ -235,11 +235,32 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
         let _ = transport.send_data(&r.peer_id, b"\x00", 0, 0).await;
     }
 
-    // 6. tun → drift loop.
-    let t_send = transport.clone();
+    // 6. tun → drift pipeline (v0.7 opportunistic batcher).
+    //
+    // Two tasks instead of one:
+    //   * READER: blocking read from the tun, parse + route +
+    //     classify, push a `BatchItem` into an mpsc channel.
+    //     One packet per iteration; never builds a Vec.
+    //   * SENDER: drain the channel in mini-batches. Block on
+    //     `recv()` for the first item, then `try_recv` until
+    //     either MAX_BATCH or the channel is empty, then flush
+    //     via `send_data_batch_qos`.
+    //
+    // Result: under heavy traffic, sendmmsg ships up to N packets
+    // per syscall AND the per-shard peer locks are taken N times
+    // total instead of N times per packet. Under sparse traffic,
+    // batches naturally degenerate to size 1 — no extra latency,
+    // no per-packet timer, no allocation that the per-packet path
+    // didn't already pay.
+    const MAX_BATCH: usize = 32;
+    const QUEUE_CAP: usize = 1024;
+
+    let (out_tx, mut out_rx) =
+        tokio::sync::mpsc::channel::<drift::transport::BatchItem>(QUEUE_CAP);
+
     let routes_send = routes.clone();
     let metrics_send = metrics.clone();
-    let t2d = tokio::spawn(async move {
+    let t2d_reader = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
             let n = match tun_r.read(&mut buf).await {
@@ -271,44 +292,88 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
                     continue;
                 }
             };
-            // Classify L4 to pick deadline + coalesce group for QoS.
             let (deadline_ms, coalesce_group) =
                 crate::routing::classify_for_qos(pkt);
-            match t_send
-                .send_data(&route.peer_id, pkt, deadline_ms, coalesce_group)
-                .await
-            {
-                Ok(_) => {
-                    metrics_send
-                        .send_data_ok
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Backpressure: if the sender is behind, the tun
+            // reader blocks here, which propagates back through
+            // the kernel queue. Same semantics as the previous
+            // per-packet code where a slow send_data also stalled
+            // the reader.
+            let item = drift::transport::BatchItem {
+                peer: route.peer_id,
+                payload: pkt.to_vec(),
+                deadline_ms,
+                coalesce_group,
+            };
+            if out_tx.send(item).await.is_err() {
+                warn!("send queue closed — exiting tun→drift reader");
+                break;
+            }
+        }
+    });
+
+    let t_send = transport.clone();
+    let metrics_send2 = metrics.clone();
+    let t2d_sender = tokio::spawn(async move {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut batch: Vec<drift::transport::BatchItem> = Vec::with_capacity(MAX_BATCH);
+        loop {
+            // Block until at least one item is available.
+            let first = match out_rx.recv().await {
+                Some(item) => item,
+                None => {
+                    debug!("send queue closed — exiting tun→drift sender");
+                    break;
                 }
-                Err(e) => {
-                    metrics_send
-                        .send_data_errs
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // WARN, not DEBUG — silently dropping outbound
-                    // packets degrades the VPN; users want to know.
-                    // The most common cause for repeated drops in
-                    // steady state is `payload > MAX_PAYLOAD` from
-                    // Linux GSO/TSO (kernel hands us 64KB pseudo-
-                    // segments). The startup `disable_offloads_and_verify`
-                    // catches most cases; a stuck driver is the
-                    // remaining one.
-                    let hint = if pkt.len() > drift::transport::MAX_PAYLOAD {
-                        " (oversized — check `ethtool -k <iface>`, offloads may be stuck on)"
-                    } else {
-                        ""
-                    };
+            };
+            batch.push(first);
+            // Opportunistically grab any more packets that are
+            // already queued, up to MAX_BATCH. This drives real
+            // sendmmsg batching when traffic is heavy.
+            while batch.len() < MAX_BATCH {
+                match out_rx.try_recv() {
+                    Ok(item) => batch.push(item),
+                    Err(_) => break,
+                }
+            }
+
+            let n_attempted = batch.len();
+            // Pre-compute oversized-packet warnings before
+            // we hand the items off — the batched API will
+            // silently skip them, but we still want to see
+            // those warnings for diagnosis.
+            for it in batch.iter() {
+                if it.payload.len() > drift::transport::MAX_PAYLOAD {
                     warn!(
-                        error = %e,
-                        pkt_len = pkt.len(),
-                        peer = %hex::encode(route.peer_id),
-                        "send_data dropped packet{}",
-                        hint
+                        pkt_len = it.payload.len(),
+                        peer = %hex::encode(it.peer),
+                        "oversized packet — check `ethtool -k <iface>`, offloads may be stuck on"
                     );
                 }
             }
+
+            match t_send.send_data_batch_qos(&batch).await {
+                Ok(sent) => {
+                    metrics_send2
+                        .send_data_ok
+                        .fetch_add(sent as u64, Relaxed);
+                    if sent < n_attempted {
+                        // Some packets were skipped (peer not
+                        // established yet, oversized, etc.).
+                        // The transport doesn't tell us which.
+                        metrics_send2
+                            .send_data_errs
+                            .fetch_add((n_attempted - sent) as u64, Relaxed);
+                    }
+                }
+                Err(e) => {
+                    metrics_send2
+                        .send_data_errs
+                        .fetch_add(n_attempted as u64, Relaxed);
+                    warn!(error = %e, n = n_attempted, "send_data_batch_qos failed");
+                }
+            }
+            batch.clear();
         }
     });
 
@@ -391,7 +456,8 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
     //    transport torn down). Whichever exits first, abort
     //    the other so the daemon shuts down cleanly.
     tokio::select! {
-        _ = t2d => {}
+        _ = t2d_reader => {}
+        _ = t2d_sender => {}
         _ = d2t => {}
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT — shutting down");
