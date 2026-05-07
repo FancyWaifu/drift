@@ -1131,6 +1131,54 @@ impl Transport {
         }
     }
 
+    /// Register a peer that has no known direct address — it
+    /// will be reached only via mesh forwarding through another
+    /// peer. Sets `via_mesh = true` up front so `send_data`
+    /// consults the mesh routing table on every call instead
+    /// of attempting a direct send to a placeholder addr.
+    ///
+    /// Used by drift-vpn's hub-and-spoke topology: a spoke that
+    /// can't accept incoming connections (mobile, behind NAT)
+    /// gets registered this way; the hub peer that connects to
+    /// both ends advertises a route via beacons; once the hub
+    /// learns the mesh path, traffic flows transparently.
+    ///
+    /// Until a route is learned, `send_data` will return
+    /// `UnknownPeer` because there's no path. That's correct —
+    /// just like sending to a peer whose direct addr is offline
+    /// at startup.
+    pub async fn add_mesh_peer(
+        &self,
+        peer_static_pub: [u8; STATIC_KEY_LEN],
+        direction: Direction,
+    ) -> Result<PeerId> {
+        let id = derive_peer_id(&peer_static_pub);
+        // 0.0.0.0:0 is a non-routable placeholder that the
+        // mesh router will replace via `learned_route` lookups
+        // every send_data call.
+        let placeholder: SocketAddr = "0.0.0.0:0"
+            .parse()
+            .expect("constant addr parses");
+        let mut peers = self.inner.peers.lock_for(&id).await;
+        match peers.get(&id) {
+            Some(existing) if existing.peer_static_pub != peer_static_pub => {
+                self.inner
+                    .metrics
+                    .peer_id_collisions
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(peer_id = ?id, "peer id collision in add_mesh_peer; rejecting");
+                Err(DriftError::PeerIdCollision)
+            }
+            Some(_) => Ok(id),
+            None => {
+                let mut peer = Peer::new(id, placeholder, peer_static_pub, direction);
+                peer.via_mesh = true;
+                peers.insert(peer);
+                Ok(id)
+            }
+        }
+    }
+
     pub async fn send_data(
         &self,
         dst: &PeerId,
@@ -2378,6 +2426,15 @@ impl Inner {
                             )
                         };
                         let target = mesh.unwrap_or(peer.addr);
+                        // Mesh-only peer awaiting a learned
+                        // route: skip the retransmit. Once a
+                        // beacon arrives and the route table is
+                        // populated, the next send_data will
+                        // pick up `mesh = Some(...)` and we
+                        // emit a fresh HELLO with a real target.
+                        if target.ip().is_unspecified() {
+                            continue;
+                        }
                         out.push((wire, target, peer.interface_id));
                     }
                 }
@@ -3475,6 +3532,17 @@ fn build_hello(
     identity: &Identity,
     mesh_next_hop: Option<SocketAddr>,
 ) -> SendAction {
+    // Mesh-only peer with no route yet: peer.addr is the
+    // 0.0.0.0:0 placeholder that `add_mesh_peer` set, and no
+    // mesh route has been learned via beacons. Sending a HELLO
+    // to 0.0.0.0:0 would just fail with EINVAL on every retry.
+    // Stay in Pending; a later send_data will retry once the
+    // mesh route table has an entry.
+    let target_pre = mesh_next_hop.unwrap_or(peer.addr);
+    if target_pre.ip().is_unspecified() {
+        return SendAction::Queued;
+    }
+
     let client_nonce = random_nonce();
     let ephemeral = Identity::generate();
     let ephemeral_pub = ephemeral.public_bytes();

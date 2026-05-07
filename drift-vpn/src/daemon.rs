@@ -138,15 +138,22 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
     //    once the peer comes online.
     let mut routes = RouteTable::new();
     let mut supervisor_states: Vec<SupervisorState> = Vec::new();
+    // Mesh-only peers we need to bootstrap: their initial HELLO
+    // can't fire until the mesh route table has a learned
+    // route, which arrives via a beacon AFTER the daemon is
+    // running. The warmup task below retries `send_data` for
+    // each one every 2s until they reach Established (or get
+    // dropped from the table). The batched tun→drift sender
+    // skips Pending peers silently — without this retry the
+    // first user packet to a mesh-only peer would just be
+    // dropped, indefinitely.
+    let mut mesh_only_peers: Vec<PeerId> = Vec::new();
     for (i, peer_cfg) in cfg.peers.iter().enumerate() {
         let peer_pub = peer_cfg
             .pubkey_bytes()
             .with_context(|| format!("peer #{}", i))?;
         let peer_pid = derive_peer_id(&peer_pub);
         let endpoints = peer_cfg.endpoint_list();
-        if endpoints.is_empty() {
-            return Err(anyhow!("peer #{} has no endpoints", i));
-        }
         // Both sides use Direction::Initiator. DRIFT's dual-
         // initiation tiebreaker resolves the simultaneous-HELLO
         // case correctly (lower pubkey "wins" as Responder),
@@ -158,14 +165,35 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
         // Initiator side stays in Established with stale keys.
         // Always-Initiator avoids that deadlock.
         let dir = Direction::Initiator;
-        let chosen = try_endpoints(&transport, peer_pub, &peer_pid, &endpoints, dir).await?;
-        info!(
-            peer = %hex::encode(peer_pid),
-            endpoint = %chosen,
-            allowed_ips = ?peer_cfg.allowed_ips,
-            ?dir,
-            "peer registered"
-        );
+        let chosen_for_supervisor: Option<String> = if endpoints.is_empty() {
+            // v0.8 mesh-only peer: no direct endpoint, will be
+            // reached via forwarding once another peer (the
+            // hub) advertises a route via beacons. We pre-
+            // register so our routing layer knows about
+            // peer_pid and so the transport's mesh router has
+            // a target to set `peer.addr` on once a route is
+            // learned. No supervisor — there's nothing to fail
+            // over to.
+            transport.add_mesh_peer(peer_pub, dir).await?;
+            mesh_only_peers.push(peer_pid);
+            info!(
+                peer = %hex::encode(peer_pid),
+                allowed_ips = ?peer_cfg.allowed_ips,
+                ?dir,
+                "mesh-only peer registered (no endpoint; reach via forwarding)"
+            );
+            None
+        } else {
+            let chosen = try_endpoints(&transport, peer_pub, &peer_pid, &endpoints, dir).await?;
+            info!(
+                peer = %hex::encode(peer_pid),
+                endpoint = %chosen,
+                allowed_ips = ?peer_cfg.allowed_ips,
+                ?dir,
+                "peer registered"
+            );
+            Some(chosen)
+        };
         routes.add(PeerRoute {
             peer_id: peer_pid,
             allowed_ips: peer_cfg.allowed_ips.clone(),
@@ -187,10 +215,18 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
         // rate limiter and avoid the thundering herd when many
         // peers see the same outage at once.
         if cfg.failover.enabled && endpoints.len() > 1 {
-            let initial_idx = endpoints.iter().position(|e| e == &chosen).unwrap_or(0);
-            supervisor_states.push(SupervisorState::new(
-                peer_pid, endpoints, initial_idx,
-            ));
+            // chosen_for_supervisor is always Some when
+            // endpoints isn't empty, but pattern-match for
+            // safety.
+            if let Some(chosen) = chosen_for_supervisor {
+                let initial_idx = endpoints
+                    .iter()
+                    .position(|e| e == &chosen)
+                    .unwrap_or(0);
+                supervisor_states.push(SupervisorState::new(
+                    peer_pid, endpoints, initial_idx,
+                ));
+            }
         }
     }
     let routes = Arc::new(routes);
@@ -202,6 +238,46 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
         let sup_cfg = cfg.failover.clone();
         tokio::spawn(async move {
             supervise_all(sup_transport, sup_metrics, supervisor_states, sup_cfg).await;
+        });
+    }
+
+    // Spawn the mesh-only warmup retrier. Calls `send_data`
+    // (the per-packet, handshake-bootstrapping API) on each
+    // pending mesh-only peer every 2s. Once a peer reaches
+    // Established, it's removed from the list. When the list
+    // is empty, the task exits.
+    if !mesh_only_peers.is_empty() {
+        let warm_transport = transport.clone();
+        tokio::spawn(async move {
+            let mut pending = mesh_only_peers;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Filter out peers that have reached Established
+                // or disappeared from the table. We can't use
+                // `Vec::retain` directly because the predicate
+                // needs to await; loop manually.
+                let mut next = Vec::with_capacity(pending.len());
+                for pid in pending.into_iter() {
+                    let still_pending = match warm_transport.peer_metrics(&pid).await {
+                        Some(m) => !m.is_established,
+                        None => false, // gone — stop trying
+                    };
+                    if still_pending {
+                        next.push(pid);
+                    }
+                }
+                pending = next;
+                if pending.is_empty() {
+                    debug!("mesh-only warmup: all peers established or gone — exiting");
+                    break;
+                }
+                for pid in pending.iter() {
+                    // 1-byte payload triggers HELLO if the
+                    // peer is Pending; harmless DATA if
+                    // Established (lost the race).
+                    let _ = warm_transport.send_data(pid, b"\x00", 0, 0).await;
+                }
+            }
         });
     }
 
