@@ -311,6 +311,45 @@ pub struct Metrics {
     pub unknown_peer_drops: u64,
 }
 
+/// Per-peer link-quality snapshot. Returned by
+/// `Transport::peer_metrics(&PeerId)` for callers (drift-vpn,
+/// applications, observability) that want to make routing or
+/// failover decisions based on actual link health.
+///
+/// All fields are point-in-time snapshots; treat as advisory.
+/// Multi-counter computations (e.g. "loss rate") should be
+/// done by the caller from successive snapshots.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerMetrics {
+    /// Smoothed RTT to this peer (RFC 6298 SRTT). `None` until
+    /// the first sample lands — handshake completion gives one
+    /// for free, subsequent samples come from path probes,
+    /// rekey RTTs, and (if enabled) the periodic Ping/Pong.
+    pub srtt: Option<Duration>,
+    /// Smoothed RTT variance. Roughly `mean(|sample - srtt|)`.
+    /// Useful as a jitter signal — a low SRTT with high RTTVAR
+    /// is a path that's mostly fast but spikes badly.
+    pub rttvar: Option<Duration>,
+    /// Last instant we received an authenticated packet from
+    /// this peer. Compare to `Instant::now()` for staleness.
+    /// A peer that hasn't been seen in 30s is probably dead
+    /// even if `srtt` looks healthy.
+    pub last_seen: Instant,
+    /// Next sequence number we will assign to outgoing packets
+    /// — i.e. one more than the count of packets we've sent
+    /// under the current session keys. Resets on rekey, so this
+    /// is "packets since last rekey," not lifetime.
+    pub next_tx_seq: u32,
+    /// Highest receive sequence we've seen from this peer in
+    /// the current session — i.e. the count of unique packets
+    /// they've sent us (modulo any out-of-order arrivals
+    /// already counted via the replay bitmap).
+    pub highest_rx_seq: u32,
+    /// Whether the peer is currently in the Established state.
+    /// Convenient for callers that just want a yes/no.
+    pub is_established: bool,
+}
+
 /// Shared inner state — cloned into the background receive task.
 ///
 /// Accessed by submodules (handshake, cookies, path, etc.) via
@@ -1081,6 +1120,51 @@ impl Transport {
     /// the peer isn't in our table or has no live session.
     pub async fn close_peer(&self, dst: &PeerId) -> Result<()> {
         self.inner.close_peer(dst).await
+    }
+
+    /// Whether `peer` currently has an Established session
+    /// (data can flow without further handshake). Returns
+    /// `false` for unknown peers, Pending peers, mid-handshake
+    /// peers, and peers with sessions that have been reset.
+    /// Cheap — one peer-table lookup under the per-shard lock.
+    pub async fn peer_is_established(&self, peer: &PeerId) -> bool {
+        let peers = self.inner.peers.lock_for(peer).await;
+        peers
+            .get(peer)
+            .map(|p| matches!(p.handshake, drift_core::session::HandshakeState::Established { .. }))
+            .unwrap_or(false)
+    }
+
+    /// Current addr the transport will send to for `peer`.
+    /// `None` if the peer is unknown. Used by happy-eyeballs
+    /// callers to verify a session was established at the
+    /// addr they probed (vs. the transport auto-updating the
+    /// peer's addr based on an incoming HELLO from elsewhere).
+    pub async fn peer_addr(&self, peer: &PeerId) -> Option<SocketAddr> {
+        let peers = self.inner.peers.lock_for(peer).await;
+        peers.get(peer).map(|p| p.addr)
+    }
+
+    /// Per-peer link-quality snapshot. `None` if the peer is
+    /// unknown. See `PeerMetrics` for field semantics.
+    ///
+    /// Intended for callers driving routing or failover (e.g.
+    /// drift-vpn deciding to switch endpoints because RTT
+    /// degraded). One peer-table lookup under a per-shard lock.
+    pub async fn peer_metrics(&self, peer: &PeerId) -> Option<PeerMetrics> {
+        let peers = self.inner.peers.lock_for(peer).await;
+        let p = peers.get(peer)?;
+        Some(PeerMetrics {
+            srtt: p.neighbor_srtt,
+            rttvar: p.neighbor_rttvar,
+            last_seen: p.last_seen,
+            next_tx_seq: p.next_tx_seq,
+            highest_rx_seq: p.highest_rx_seq,
+            is_established: matches!(
+                p.handshake,
+                drift_core::session::HandshakeState::Established { .. }
+            ),
+        })
     }
 
     /// Reset a peer's session state without notifying the remote.

@@ -71,29 +71,7 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
     // available we log a warning but continue (the user may
     // notice degraded TCP throughput).
     let tun_name = cfg.interface.name.as_deref().unwrap_or("tun0");
-    match tokio::process::Command::new("ethtool")
-        .args(["-K", tun_name, "tso", "off", "gso", "off", "gro", "off", "lro", "off"])
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => {
-            info!(iface = tun_name, "disabled TSO/GSO/GRO/LRO via ethtool");
-        }
-        Ok(out) => {
-            warn!(
-                iface = tun_name,
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "ethtool returned non-zero — TCP throughput may be degraded"
-            );
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                iface = tun_name,
-                "couldn't run ethtool (offload not disabled) — TCP throughput may be degraded"
-            );
-        }
-    }
+    disable_offloads_and_verify(tun_name).await;
 
     // 2. DRIFT transport. v0.2 supports multiple `listen` URLs
     //    so one daemon serves clients on whichever wire works
@@ -207,17 +185,23 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
             if let Err(e) = t_send.send_data(&route.peer_id, pkt, 0, 0).await {
                 // WARN, not DEBUG — silently dropping outbound
                 // packets degrades the VPN; users want to know.
-                // Common cause: payload > DRIFT MAX_PAYLOAD
-                // (Linux GSO/TSO handing us a 64KB pseudo-
-                // segment). Workaround: disable GSO via
-                // `ethtool -K tun0 gso off tso off` until the
-                // tun crate exposes the IFF_MULTI_QUEUE +
-                // TUN_F_TSO knobs.
+                // The most common cause for repeated drops in
+                // steady state is `payload > MAX_PAYLOAD` from
+                // Linux GSO/TSO (kernel hands us 64KB pseudo-
+                // segments). The startup `disable_offloads_and_verify`
+                // catches most cases; a stuck driver is the
+                // remaining one.
+                let hint = if pkt.len() > drift::transport::MAX_PAYLOAD {
+                    " (oversized — check `ethtool -k <iface>`, offloads may be stuck on)"
+                } else {
+                    ""
+                };
                 warn!(
                     error = %e,
                     pkt_len = pkt.len(),
                     peer = %hex::encode(route.peer_id),
-                    "send_data dropped packet"
+                    "send_data dropped packet{}",
+                    hint
                 );
             }
         }
@@ -284,6 +268,91 @@ pub async fn run(cfg: Config, identity: Identity) -> Result<()> {
 /// v0.1 supports `udp://` only; multi-transport URL prefixes
 /// (`tcp://`, `tls://`, `ws://`, `http://`, `onion://`) land
 /// in v0.2 along with the happy-eyeballs client.
+/// Disable NIC offloads on the tun and verify they actually
+/// stuck. Some kernels/drivers report success on `-K` requests
+/// while leaving the offload enabled (especially under
+/// virtualization). Reading back with `-k` and checking each
+/// flag catches those silent failures.
+///
+/// Best-effort: if `ethtool` isn't available, log and continue.
+/// Verification mismatches log at WARN with a hint pointing
+/// at `ethtool -k` so operators can investigate.
+async fn disable_offloads_and_verify(iface: &str) {
+    const FLAGS: &[&str] = &["tso", "gso", "gro", "lro"];
+
+    let mut args = vec!["-K", iface];
+    for f in FLAGS {
+        args.push(f);
+        args.push("off");
+    }
+    match tokio::process::Command::new("ethtool")
+        .args(&args)
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            warn!(
+                iface,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "ethtool -K returned non-zero — TCP throughput may be degraded"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                iface,
+                "couldn't run ethtool (offload not disabled) — TCP throughput may be degraded"
+            );
+            return;
+        }
+    }
+
+    // Read back. Output format is one feature per line:
+    //     tcp-segmentation-offload: off
+    //     generic-segmentation-offload: off
+    //     ...
+    let readback = match tokio::process::Command::new("ethtool")
+        .args(["-k", iface])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => {
+            warn!(iface, "couldn't read back ethtool offload state — assuming disabled");
+            return;
+        }
+    };
+    let text = String::from_utf8_lossy(&readback);
+    let mut bad: Vec<&str> = Vec::new();
+    for (flag, full_name) in [
+        ("tso", "tcp-segmentation-offload"),
+        ("gso", "generic-segmentation-offload"),
+        ("gro", "generic-receive-offload"),
+        ("lro", "large-receive-offload"),
+    ] {
+        // A line like `tcp-segmentation-offload: on` means the
+        // offload is still active despite our -K request.
+        let on_line = format!("{}: on", full_name);
+        if text.lines().any(|l| l.trim_start().starts_with(&on_line)) {
+            bad.push(flag);
+        }
+    }
+
+    if bad.is_empty() {
+        info!(iface, "disabled TSO/GSO/GRO/LRO via ethtool (verified)");
+    } else {
+        warn!(
+            iface,
+            still_on = ?bad,
+            "ethtool -K succeeded but offloads still report ON — \
+             expect large-packet drops; check `ethtool -k {}`",
+            iface
+        );
+    }
+}
+
 async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
     let (_scheme, addr) = url
         .split_once("://")
@@ -324,11 +393,21 @@ async fn try_endpoints(
     endpoints: &[String],
     dir: Direction,
 ) -> Result<String> {
+    use rand::Rng;
     use std::time::Duration;
-    const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+    const PROBE_BASE: Duration = Duration::from_millis(1500);
+    const PROBE_JITTER_MAX_MS: u64 = 500;
 
     let first_addr = resolve_endpoint(&endpoints[0]).await?;
     transport.add_peer(peer_pub, first_addr, dir).await?;
+
+    // Per-peer probe timeout with random jitter. Symmetric
+    // peers (same configs, started together) would otherwise
+    // probe in lockstep and converge on the same race window.
+    // Jitter in [0, 500ms] breaks the symmetry on the first
+    // cycle so even pathological scheduling diverges fast.
+    let probe_timeout = PROBE_BASE
+        + Duration::from_millis(rand::thread_rng().gen_range(0..PROBE_JITTER_MAX_MS));
 
     for (i, url) in endpoints.iter().enumerate() {
         let addr = match resolve_endpoint(url).await {
@@ -353,14 +432,24 @@ async fn try_endpoints(
             }
         }
 
-        let before = transport.metrics().handshakes_completed;
         let _ = transport.send_data(peer_pid, b"\x00", 0, 0).await;
 
-        let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+        // Per-peer probe with addr verification. The transport
+        // accepts incoming HELLOs by static_pub match and
+        // auto-updates `peer.addr` to the source. So if the
+        // remote peer simultaneously fell through to its real
+        // endpoint and its HELLO landed here, our peer would
+        // become Established at THAT addr — not the dead one
+        // we're probing. We only attribute "winner" to the
+        // current endpoint if BOTH the session is Established
+        // AND `peer.addr` still matches the addr we set.
+        let deadline = tokio::time::Instant::now() + probe_timeout;
         let mut completed = false;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if transport.metrics().handshakes_completed > before {
+            if transport.peer_is_established(peer_pid).await
+                && transport.peer_addr(peer_pid).await == Some(addr)
+            {
                 completed = true;
                 break;
             }
