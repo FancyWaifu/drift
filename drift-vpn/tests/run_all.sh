@@ -26,6 +26,8 @@ TESTS=(
     "spoof.sh"
     "lossy.sh"
     "stability.sh"
+    "failover_basic.sh"
+    "failover_flap.sh"
 )
 
 # Force a single image build at the start so the per-test
