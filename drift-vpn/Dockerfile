@@ -22,7 +22,7 @@ RUN cargo build --release -p drift-vpn --bin drift-vpn
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates iproute2 iputils-ping iputils-tracepath iperf3 iptables ethtool \
+    ca-certificates iproute2 iputils-ping iputils-tracepath iperf3 iptables ethtool curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/src/drift/target/release/drift-vpn /usr/local/bin/drift-vpn

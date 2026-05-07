@@ -148,6 +148,17 @@ pub struct Interface {
     /// is kernel-assigned (`tun0`, `tun1`, …).
     #[serde(default)]
     pub name: Option<String>,
+    /// Optional `host:port` for a Prometheus `/metrics` HTTP
+    /// listener. When set, the daemon serves metrics in
+    /// Prometheus text exposition format suitable for direct
+    /// scrape by a Prometheus instance. Disabled by default —
+    /// operators who want metrics opt in.
+    ///
+    /// Example: `prom_listen = "0.0.0.0:9091"` (the
+    /// conventionally-reserved range for Prometheus exporters
+    /// is 9100+, but anything works).
+    #[serde(default)]
+    pub prom_listen: Option<String>,
 }
 
 fn default_mtu() -> u32 {
