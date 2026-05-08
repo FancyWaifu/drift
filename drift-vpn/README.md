@@ -11,9 +11,9 @@ drift-vpn looks like WireGuard from the outside — TOML config, peers identifie
 
 If you already have a working WireGuard deployment, you don't need this. If your network is *hostile* — corporate firewall, censored country, asymmetric NAT, mobile clients behind carrier-grade NAT — drift-vpn is what works when WireGuard doesn't.
 
-## Status: v0.10, production-ready for "tinker and homelab"
+## Status: v0.12, production-ready for "tinker and homelab"
 
-15 versions of features, validated on real Linux LXCs:
+Validated on real Linux LXCs and macOS (Apple Silicon):
 
 | Version | What shipped |
 |---|---|
@@ -27,10 +27,12 @@ If you already have a working WireGuard deployment, you don't need this. If your
 | v0.8 | mesh-only peers (hub-and-spoke without manual routes) |
 | v0.9 | Prometheus `/metrics` HTTP endpoint |
 | v0.10 | real-Linux verification + mesh-routed-DATA hop_ttl bug fix |
+| v0.11 | perf experiments (io_uring side-thread, single-task collapse) — both regressed against the v0.7 two-task baseline and were reverted; v0.7 is the correctly-tuned model for tokio |
+| v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64/x86_64, Windows x86_64 keygen/show only) |
 
 What's NOT yet there:
 
-- **macOS / Windows clients.** The daemon code is Linux-only via `#![cfg(target_os = "linux")]`. The `tun` crate supports utun and Wintun; the gate is what we haven't lifted yet.
+- **Windows daemon.** `keygen` and `show` work on Windows today; the `up` daemon needs a Wintun port. WSL2 is the recommended Windows path until then.
 - **No coordination service.** Peers find each other via static config — no Tailscale-style coordinator.
 - **No NAT hole-punching.** Both sides need a reachable endpoint somewhere in their `endpoints` list.
 - **No identity rotation.** "Lost laptop" story is the same as WireGuard's: update every peer's config.
@@ -48,8 +50,8 @@ What's NOT yet there:
 | Health monitoring | None | Per-peer SRTT, last-seen, failover counters |
 | Operator UI | `wg show` | `drift-vpn status` + Prometheus `/metrics` |
 | Throughput (1-stream Linux) | ~5–10 Gbps (kernel) | ~1.5 Gbps (userspace) |
-| Platforms | Linux/Windows kernel; userspace on Mac/iOS/Android | Linux-only daemon today |
-| Maturity | Years of audits + production use | New project, 14-test suite |
+| Platforms | Linux/Windows kernel; userspace on Mac/iOS/Android | Linux + macOS daemon (Windows: keygen/show; daemon via WSL2) |
+| Maturity | Years of audits + production use | New project, 16-test suite |
 
 **One-line summary**: WireGuard works great until your network blocks UDP. drift-vpn doesn't care what your network blocks — it switches protocols mid-session.
 
@@ -329,13 +331,26 @@ drift-vpn/src/
 ├── routing.rs    # IP-packet parsing + AllowedIPs lookup + L4 QoS classifier
 ├── metrics.rs    # atomic counters (DaemonMetrics)
 ├── status.rs     # status socket server + Prometheus exporter
-├── tun_uring.rs  # (Linux only) io_uring side-thread for tun I/O
 └── daemon.rs     # the rest: TUN ↔ DRIFT, supervisor, mesh warmup
 ```
 
-## Build from source
+## Install
 
-Linux:
+### Pre-built binaries
+
+Tagged releases (`drift-vpn-vX.Y.Z`) build a five-platform matrix and attach tarballs/zips to the GitHub release:
+
+```bash
+TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, x86_64-unknown-linux-gnu,
+                              # aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
+TAG=drift-vpn-v0.12.0
+curl -L -o drift-vpn.tar.gz \
+  https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-vpn-$TAG-$TARGET.tar.gz
+tar xzf drift-vpn.tar.gz
+sudo mv drift-vpn-$TAG-$TARGET/drift-vpn /usr/local/bin/
+```
+
+### From source
 
 ```bash
 git clone https://github.com/FancyWaifu/drift
@@ -344,7 +359,9 @@ cargo build --release -p drift-vpn
 sudo cp target/release/drift-vpn /usr/local/bin/
 ```
 
-The Linux daemon needs:
+### Platform notes
+
+**Linux** — full daemon support. Needs:
 - `/dev/net/tun` accessible (kernel module loaded)
 - `CAP_NET_ADMIN` capability (run as root, or use `setcap cap_net_admin+pe`)
 - `ethtool` in `$PATH` for the offload-disable startup step (warns but continues if missing)
@@ -356,11 +373,13 @@ lxc.cgroup2.devices.allow: c 10:200 rwm
 lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 ```
 
-macOS and Windows: build artifacts are not yet shipped. The underlying `tun` crate supports utun (macOS) and Wintun (Windows); the daemon's `#![cfg(target_os = "linux")]` gate is the only thing in the way. PRs welcome.
+**macOS** — full daemon support via utun (Apple Silicon + Intel). Run with sudo so the kernel allocates a `utunN` device. Routes to peer addresses are not auto-installed by the `tun` crate on macOS — add them with `route -n add` after `up` if your config relies on them (Linux's `tun` install is automatic via the assigned netmask).
+
+**Windows** — `keygen` and `show` work today. The `up` daemon is gated until a Wintun port lands. For Windows clients in the meantime, run drift-vpn inside WSL2.
 
 ## Test suite
 
-14 integration tests via `tests/run_all.sh`. Each runs in isolated Docker containers on its own subnet:
+16 integration tests via `tests/run_all.sh`. Each runs in isolated Docker containers on its own subnet:
 
 ```bash
 bash drift-vpn/tests/run_all.sh

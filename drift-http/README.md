@@ -194,6 +194,8 @@ cd drift-http/tests
 ./open_url.sh               # drift:// open: GET /, nested path, bridge-port reuse
 ./multi_transport.sh        # 1 server bound to UDP + TCP, fetched via both
 ./multi_transport_3way.sh   # 1 server bound to UDP + TCP + WS, fetched via all three
+./multi_transport_4way.sh   # adds TLS to the 3way: UDP + TCP + WS + TLS
+./petname.sh                # connect --peer auto-records contact; petname resolves on second connect
 ```
 
 URL parser unit tests:
