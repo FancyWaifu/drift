@@ -1,21 +1,6 @@
 #!/usr/bin/env bash
 # v0.8 test: mesh-only peers via hub-and-spoke topology.
 #
-# STATUS: WIP. Infrastructure (config + add_mesh_peer + warmup
-# retrier) is in place and beacon propagation is observed in
-# logs ("learned routes from beacon ... updated=2"). The
-# forwarded-handshake path is timing-sensitive in macOS Docker
-# and the test currently fails to complete A↔C ping in this
-# environment within the 15s wait window. NOT yet wired into
-# `run_all.sh`. Run manually:
-#
-#   bash drift-vpn/tests/mesh_only.sh
-#
-# Likely needs a real Linux environment for reliable
-# verification, OR a longer timeout, OR the hub forwarding to
-# explicitly drive HELLO/HELLO_ACK across boundaries.
-
-#
 # Topology:
 #
 #     node-a              node-b              node-c
