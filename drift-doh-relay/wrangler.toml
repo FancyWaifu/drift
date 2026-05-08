@@ -1,0 +1,30 @@
+# Cloudflare Worker config for the DRIFT-over-DoH rendezvous.
+#
+# Deploy:
+#   npx wrangler deploy
+#
+# After deploy, your Worker URL will be something like
+#   https://drift-doh-relay.<your-subdomain>.workers.dev
+# and DRIFT clients connect via:
+#   doh://drift-doh-relay.<your-subdomain>.workers.dev/v1/<my-pub-hex>/<peer-pub-hex>
+
+name = "drift-doh-relay"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Per-peer inboxes live in a Durable Object so concurrent requests
+# for the same peer pubkey serialize cleanly. The "name" routing
+# (used in `idFromName(<pubkey-hex>)`) hashes deterministically to
+# one DO instance per peer.
+[[durable_objects.bindings]]
+name = "PEER_INBOX"
+class_name = "PeerInbox"
+
+# Cloudflare requires a migration block on first deploy to register
+# the DO class. The free tier requires SQLite-backed storage, so
+# we use `new_sqlite_classes`. (Paid plans also accept `new_classes`
+# for the older KV-backed storage, but SQLite is the supported path
+# going forward.)
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PeerInbox"]

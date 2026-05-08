@@ -1,0 +1,16 @@
+{
+    "name": "drift-doh-relay",
+    "version": "0.1.0",
+    "description": "Cloudflare Worker rendezvous for the DRIFT `doh://` adapter — buckets DRIFT fragments by destination pubkey and shuttles them between peers.",
+    "private": true,
+    "scripts": {
+        "deploy": "wrangler deploy",
+        "dev": "wrangler dev",
+        "tail": "wrangler tail"
+    },
+    "devDependencies": {
+        "@cloudflare/workers-types": "^4.20240722.0",
+        "typescript": "^5.4.0",
+        "wrangler": "^3.60.0"
+    }
+}

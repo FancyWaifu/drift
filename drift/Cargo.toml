@@ -53,6 +53,15 @@ hex = "0.4"
 # base64 for the SSE wire (`http://` adapter): each DRIFT
 # packet becomes one `data: <base64>\n\n` SSE event.
 base64 = "0.22"
+# base32 for the `dns://` adapter: DRIFT packets ride inside DNS
+# QNAME labels, which are restricted to LDH (letters, digits,
+# hyphen). Base32 fits that alphabet exactly and gives 5 bits per
+# char (vs 4 for hex), so each query carries ~25% more payload.
+data-encoding = "2"
+# HTTP client for the `doh://` adapter (DRIFT-over-DoH-over-Cloudflare-
+# Worker). rustls feature so we don't pull in OpenSSL; gzip off
+# because DRIFT bodies are already AEAD ciphertext (incompressible).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 # TLS-shaped DRIFT transport (`tls://...`). The wire is plain
 # TCP wrapped in TLS so middleboxes that allow only HTTPS-shaped
 # traffic can't tell DRIFT apart from a normal web app. The TLS
@@ -87,6 +96,13 @@ tokio = { version = "1", features = ["full"] }
 proptest = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["async_tokio"] }
+# Mock relay used only by `tests/wire_doh.rs` — stands in for the
+# real Cloudflare Worker so the DoH adapter's wire format can be
+# exercised without an internet round-trip. Hyper 1.x with the
+# explicit body/util crates that come with the modular split.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 # Re-enable wtransport with `dangerous-configuration` for tests
 # (unlocks with_no_cert_validation, avoiding cert-hash plumbing
 # for self-signed localhost certs). Production code uses the
@@ -221,3 +237,15 @@ path = "examples/drift_chat.rs"
 [[example]]
 name = "drift-kv"
 path = "examples/drift_kv.rs"
+
+[[example]]
+name = "doh-smoke"
+path = "examples/doh_smoke.rs"
+
+[[example]]
+name = "doh-chat"
+path = "examples/doh_chat.rs"
+
+[[example]]
+name = "doh-chat-demo"
+path = "examples/doh_chat_demo.rs"

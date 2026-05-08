@@ -1,0 +1,11 @@
+# npm-managed dependencies — checked in via package-lock.json instead.
+node_modules/
+
+# Wrangler's local build cache and dev-mode state. May contain
+# account-specific or session-bound data; never check in.
+.wrangler/
+
+# Local-only env / secrets, if anyone ever adds them.
+.dev.vars
+.env
+.env.*
