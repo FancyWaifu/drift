@@ -32,8 +32,10 @@ End-user binaries shipped from this repo. Each has its own README with install +
 
 | Tool | What it is | Install |
 |---|---|---|
+| **[drift-vpn](drift-vpn/README.md)** | Identity-routed multi-transport VPN. WireGuard-shaped config, but with cross-scheme runtime failover (UDP→TCP/TLS/WS), hub-and-spoke mesh routing, and built-in Prometheus metrics. Linux + macOS daemon. | `cargo install --path drift-vpn --bin drift-vpn` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-mosh](drift-mosh/README.md)** | Mobile-shell replacement (mosh-style) — survives wifi-to-cellular, laptop suspend, client crash. UDP / TCP / WebSocket. | `cargo install --path drift-mosh --bin drift-mosh` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-http](drift-http/README.md)** | Apache-style file server + Jellyfin-style proxy + system-wide `drift://` URL handler. Pubkey-addressed; no DDNS, no reverse proxy, no TLS cert. | `cargo install --path drift-http --bin drift-http` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
+| **[drift-git](drift-git/README.md)** | `git push drift://<peerhex>@<host>:<port>/<repo>` over DRIFT — git remote helper + serving daemon. No SSH keys, no GitHub. UDP / TCP / TLS / WS. | `cargo install --path drift-git --bins` |
 | **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`. | `cargo install --path drift` |
 | **[drift-wormhole](drift-wormhole/README.md)** | Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, no rendezvous server. | `cargo install --path drift-wormhole --bin drift-wormhole` |
 | **[drift-bench](drift-bench/)** | Cross-protocol benchmark: DRIFT vs QUIC vs WireGuard, identical workloads. | `cargo build --release -p drift-bench` |
@@ -91,10 +93,15 @@ drift-wasm/      browser-side stack, same drift-core compiled to wasm32
     wire_webrtc.rs        Browser WebRTC RTCDataChannel adapter
     wire_webtransport.rs  Browser WebTransport HTTP/3 adapter (cert-hash pinnable)
 
+drift-vpn/       Identity-routed multi-transport VPN. WireGuard-shaped TOML config,
+                   cross-scheme runtime failover, hub-and-spoke mesh routing,
+                   `drift-vpn status`, Prometheus /metrics endpoint. Linux + macOS.
 drift-mosh/      Mobile-shell replacement built on DRIFT. Multi-transport CLI,
                    restart migration, scrollback reattach, TOFU known-hosts.
 drift-http/      HTTP-over-DRIFT: Apache-style file server, opaque proxy,
                    drift:// URL handler with macOS / Linux registration.
+drift-git/       Git over DRIFT: `git push drift://<peerhex>@<host>:<port>/<repo>`.
+                   Git remote helper + bare-repo serving daemon, ACL'd by pubkey.
 drift-wormhole/  Magic-Wormhole-shaped file transfer over DRIFT. SHA-256
                    byte-fidelity, progress bar, scheme-prefixed peer URLs.
 drift-bench/     Cross-protocol benchmark harness (DRIFT vs QUIC vs WireGuard).
@@ -438,18 +445,21 @@ The bench suite also includes `cargo bench --bench throughput` (header encode/de
 
 ## Releases
 
-Tagged releases of the user-facing tools fire a GitHub Actions matrix that builds for macOS arm64 + amd64 and Linux amd64 + arm64:
+Tagged releases of the user-facing tools fire a GitHub Actions matrix that builds platform-specific binaries:
 
-- **`drift-mosh-vX.Y.Z`** → [`Release drift-mosh`](.github/workflows/release-drift-mosh.yml) → tarballs at [github.com/FancyWaifu/drift/releases](https://github.com/FancyWaifu/drift/releases)
-- **`drift-http-vX.Y.Z`** → [`Release drift-http`](.github/workflows/release-drift-http.yml) → same matrix, same release page
+- **`drift-vpn-vX.Y.Z`** → [`Release drift-vpn`](.github/workflows/release-drift-vpn.yml) → Linux amd64/arm64 + macOS arm64/x86_64 + Windows x86_64 (`keygen` / `show` only on Windows; daemon needs WSL2 today)
+- **`drift-mosh-vX.Y.Z`** → [`Release drift-mosh`](.github/workflows/release-drift-mosh.yml) → macOS arm64/x86_64 + Linux amd64/arm64
+- **`drift-http-vX.Y.Z`** → [`Release drift-http`](.github/workflows/release-drift-http.yml) → same matrix as drift-mosh
+
+All artifacts land at [github.com/FancyWaifu/drift/releases](https://github.com/FancyWaifu/drift/releases).
 
 ```bash
 TARGET=aarch64-apple-darwin   # pick yours
-TAG=drift-mosh-v0.1.0
+TAG=drift-vpn-v0.12.0
 curl -L -o pkg.tar.gz \
-  https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-mosh-$TAG-$TARGET.tar.gz
+  https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-vpn-$TAG-$TARGET.tar.gz
 tar xzf pkg.tar.gz
-sudo mv drift-mosh-$TAG-$TARGET/drift-mosh* /usr/local/bin/
+sudo mv drift-vpn-$TAG-$TARGET/drift-vpn /usr/local/bin/
 ```
 
 ## Inspiration
