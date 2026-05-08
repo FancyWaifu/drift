@@ -19,11 +19,13 @@ rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Linux-only: the `tun` crate gives us /dev/net/tun + Tokio
-# AsyncRead/AsyncWrite. macOS has utun support via the same
-# crate but the test path is Docker (Linux), so we keep the
-# dep cfg-gated to Linux only for now.
-[target.'cfg(target_os = "linux")'.dependencies]
+# v0.12: tun/utun via the same crate on Linux and macOS.
+# Linux: /dev/net/tun. macOS: utun via utun_control. Same
+# AsyncRead/AsyncWrite surface either way. Windows Wintun is
+# also supported by the crate; we'll wire it up in a future
+# release once the Windows-specific status-server (named
+# pipe) is in place.
+[target.'cfg(unix)'.dependencies]
 tun = { version = "0.6", features = ["async"] }
 
 [[bin]]
