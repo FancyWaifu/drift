@@ -12,11 +12,12 @@
 //!   peer's `allowed_ips` (reverse-path filter), and write
 //!   the packet to the tun device.
 //!
-//! Linux only. macOS support would mostly be configuring the
-//! utun device differently; the Tokio-async-IO interface is
-//! the same.
+//! v0.12: Linux + macOS support via the `tun` crate's
+//! cross-platform abstraction. Windows (Wintun) needs a
+//! different status-server (named pipe), so the daemon is
+//! Unix-only at the file level.
 
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 use crate::config::Config;
 use crate::metrics::DaemonMetrics;
@@ -88,10 +89,12 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
     // segmentation-offload can hand us 64KB pseudo-segments
     // that exceed DRIFT's MAX_PAYLOAD (1348 bytes) and get
     // dropped. Disabling forces the kernel to emit real
-    // MTU-sized segments. Best-effort — if `ethtool` isn't
-    // available we log a warning but continue (the user may
-    // notice degraded TCP throughput).
+    // MTU-sized segments. macOS utun doesn't have these
+    // offloads, so this is a no-op on non-Linux.
+    #[cfg(target_os = "linux")]
     disable_offloads_and_verify(&tun_name).await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = &tun_name; // silence unused-var on non-Linux
 
     // 2. DRIFT transport. v0.2 supports multiple `listen` URLs
     //    so one daemon serves clients on whichever wire works
@@ -580,6 +583,7 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
 /// Best-effort: if `ethtool` isn't available, log and continue.
 /// Verification mismatches log at WARN with a hint pointing
 /// at `ethtool -k` so operators can investigate.
+#[cfg(target_os = "linux")]
 async fn disable_offloads_and_verify(iface: &str) {
     const FLAGS: &[&str] = &["tso", "gso", "gro", "lro"];
 

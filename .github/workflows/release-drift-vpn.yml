@@ -1,0 +1,139 @@
+name: Release drift-vpn
+
+# Fires on tags like `drift-vpn-v0.12.0`. Builds the drift-vpn
+# binary for Linux (amd64+arm64), macOS (Intel+Apple Silicon),
+# and Windows (amd64). Packages each into a tarball/zip,
+# attaches them to a GitHub release.
+#
+# Notes:
+#   - Linux daemon: tun crate via /dev/net/tun (CAP_NET_ADMIN
+#     required at runtime).
+#   - macOS daemon: utun via the same crate (sudo required).
+#   - Windows: today the binary builds for `keygen` / `show`
+#     and emits a clear "up requires Unix" error. Wintun
+#     integration is on the roadmap; we ship the Windows
+#     binary now so CI is healthy and the keygen + show
+#     tooling works on Windows machines too.
+
+on:
+  push:
+    tags: ['drift-vpn-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. drift-vpn-v0.12.0)'
+        required: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            ext: ''
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            ext: ''
+            archive: tar.gz
+            cross: true
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            ext: ''
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            ext: ''
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            ext: '.exe'
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (aarch64-linux only)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build drift-vpn binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build -p drift-vpn --release --target ${{ matrix.target }} --bin drift-vpn
+          else
+            cargo build -p drift-vpn --release --target ${{ matrix.target }} --bin drift-vpn
+          fi
+
+      - name: Package tarball (Linux/macOS)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          STAGE=drift-vpn-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/drift-vpn${{ matrix.ext }} "$STAGE/"
+          cp drift-vpn/README.md "$STAGE/"
+          cp LICENSE* "$STAGE/" 2>/dev/null || true
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "STAGE=$STAGE" >> $GITHUB_ENV
+          echo "ARCHIVE=$STAGE.tar.gz" >> $GITHUB_ENV
+
+      - name: Package zip (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "drift-vpn-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/drift-vpn${{ matrix.ext }}" "$stage/"
+          Copy-Item "drift-vpn/README.md" "$stage/"
+          if (Test-Path LICENSE)     { Copy-Item LICENSE     "$stage/" }
+          if (Test-Path LICENSE.md)  { Copy-Item LICENSE.md  "$stage/" }
+          if (Test-Path LICENSE.txt) { Copy-Item LICENSE.txt "$stage/" }
+          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip"
+          "STAGE=$stage"           | Out-File -Append $env:GITHUB_ENV
+          "ARCHIVE=$stage.zip"     | Out-File -Append $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/drift-vpn-v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+          generate_release_notes: true
+          name: drift-vpn ${{ github.ref_name }}
+          body: |
+            Pre-built drift-vpn binaries.
+
+            **Linux** (`x86_64`, `aarch64`): full daemon support — `up`, `keygen`, `show`, `status`. Requires `CAP_NET_ADMIN` and `/dev/net/tun` accessible at runtime. See README for the systemd unit and Proxmox LXC config.
+
+            **macOS** (Apple Silicon + Intel): full daemon support via utun. `sudo drift-vpn up -c <config>` to bring the tunnel online. The daemon's tun device shows up as `utun0`/`utun1`/etc.
+
+            **Windows** (`x86_64`): `keygen` and `show` work today. `up` is gated until the Wintun port lands (see roadmap). For Windows clients today, run drift-vpn inside WSL2.
+
+            See each archive's `README.md` for full install + usage.

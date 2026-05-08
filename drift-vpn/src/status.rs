@@ -135,7 +135,7 @@ impl StatusContext {
 /// Best-effort: if the socket can't be bound (e.g. parent dir
 /// not writable), log a warning and exit cleanly. The daemon
 /// itself stays running.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
     use tokio::io::AsyncWriteExt;
 
@@ -190,7 +190,7 @@ pub async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
 }
 
 /// Client side: connect, read one JSON blob, parse, return.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub async fn fetch(path: &Path) -> Result<StatusReport> {
     use tokio::io::AsyncReadExt;
     let mut sock = tokio::net::UnixStream::connect(path)
@@ -413,7 +413,7 @@ pub fn render_prometheus(report: &StatusReport) -> String {
 /// Prometheus' default scrape interval is 15s; the server
 /// rebuilds the snapshot per request, which is cheap (one
 /// peer-table walk + a handful of atomic reads).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusContext>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

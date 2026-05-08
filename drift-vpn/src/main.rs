@@ -11,7 +11,9 @@ mod metrics;
 mod routing;
 mod status;
 
-#[cfg(target_os = "linux")]
+// v0.12: tun/utun via the `tun` crate works on Linux + macOS;
+// Windows Wintun is on the roadmap.
+#[cfg(unix)]
 mod daemon;
 
 #[derive(Parser)]
@@ -84,24 +86,25 @@ async fn main() -> Result<()> {
             config: path,
             status_socket,
         } => {
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             {
                 let cfg = config::Config::load(&path).await?;
                 let id = identity::load(&cfg.interface.identity_file).await?;
                 let sock = status_socket.unwrap_or_else(status::default_socket_path);
                 daemon::run(cfg, id, sock).await?;
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(unix))]
             {
                 let _ = (path, status_socket);
                 anyhow::bail!(
-                    "drift-vpn `up` is Linux-only in v0.1 (TUN device support); \
-                     other commands (keygen, show) work cross-platform"
+                    "drift-vpn `up` requires a Unix-like OS for TUN/utun support \
+                     (Linux + macOS today; Windows Wintun support is on the roadmap). \
+                     `keygen` and `show` work cross-platform."
                 );
             }
         }
         Cmd::Status { socket, json } => {
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             {
                 let path = socket.unwrap_or_else(status::default_socket_path);
                 let report = status::fetch(&path).await?;
@@ -111,10 +114,10 @@ async fn main() -> Result<()> {
                     print!("{}", status::render_human(&report));
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(unix))]
             {
                 let _ = (socket, json);
-                anyhow::bail!("drift-vpn status is Linux-only");
+                anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
             }
         }
     }
