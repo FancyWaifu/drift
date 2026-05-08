@@ -21,6 +21,8 @@ pub mod io;
 pub mod multipath;
 pub mod streams;
 pub mod transport;
+pub mod wire_dns;
+pub mod wire_doh;
 pub mod wire_http;
 
 // `onion://` adapter — opt-in via `--features onion`. The whole

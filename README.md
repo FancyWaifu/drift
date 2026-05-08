@@ -64,6 +64,12 @@ drift/           native tokio-based stack built on drift-core
     wire_http.rs     `http://` adapter — Server-Sent Events downstream + per-
                        packet POST upstream. Browser-fallback wire when WS is
                        blocked by middleboxes
+    wire_dns.rs      `dns://` adapter — DRIFT packets shaped as DNS queries
+                       (base32-encoded QNAME, fragmentation header). Direct
+                       peer-to-peer over UDP, no resolver in the loop.
+    wire_doh.rs      `doh://` adapter — DRIFT-over-DoH-over-Cloudflare-Worker.
+                       HTTPS to your own Worker; Worker routes fragments by
+                       destination pubkey via Durable Objects.
     wire_onion.rs    `onion://` Tor adapter via arti — hidden-service hosting
                        + dialing (gated behind `--features onion`)
     streams.rs       Reliable streams, NewReno + BBR congestion control
@@ -105,6 +111,8 @@ drift-git/       Git over DRIFT: `git push drift://<peerhex>@<host>:<port>/<repo
 drift-wormhole/  Magic-Wormhole-shaped file transfer over DRIFT. SHA-256
                    byte-fidelity, progress bar, scheme-prefixed peer URLs.
 drift-bench/     Cross-protocol benchmark harness (DRIFT vs QUIC vs WireGuard).
+drift-doh-relay/ Cloudflare Worker rendezvous for the `doh://` adapter. Five-
+                   minute deploy, $0/month, no infrastructure. Run your own.
 drift-ffi/       C ABI for invoking DRIFT from C / Python / Go / Swift / anywhere
                    that speaks the C ABI.
 drift-wasm-test/ Node harness verifying drift-wasm interops with the native stack
@@ -159,6 +167,38 @@ transport.add_peer(server_pub, peer_addr, Direction::Initiator).await?;
 ```
 
 Lower-level `Transport::bind_with_io(io, ...)` still exists for cases where the adapter has out-of-band setup (WebRTC's SDP exchange, WebTransport's TLS-cert handoff). It accepts any `Arc<dyn PacketIO>` directly.
+
+### Hostile-network transports: `dns://` and `doh://`
+
+Two adapters specifically built for environments where every "normal" wire (UDP, TCP, WS, even TLS) is filtered.
+
+**`dns://` — direct peer-to-peer, DNS-shaped UDP**
+
+DRIFT packets ride as DNS queries between two peers who can reach each other on UDP. Looks like a stub resolver pounding an authoritative server to any middlebox or `tcpdump` listener — a stealth profile for networks that allow DNS but block other UDP.
+
+```rust
+let (server, url) = Transport::bind_url("dns://0.0.0.0:5354", id, cfg).await?;
+// peer side: connect_url("dns://server-host:5354", ...)
+```
+
+Same encoding both directions: 4-byte fragment header + base32 payload across ≤3 QNAME labels + `drift.local` suffix. 1400-byte DRIFT packets fragment into ~13 queries. See `drift/src/wire_dns.rs`.
+
+**`doh://` — relayed through a Cloudflare Worker**
+
+The "always works" wire. Both DRIFT peers POST DoH-shaped requests to a Cloudflare Worker you deploy in five minutes (free tier, no domain, no VPS, no public IP). The Worker buckets fragments by destination pubkey via a Durable Object and shuttles them between peers. To DPI middleboxes, the wire is plain HTTPS to a Cloudflare hostname — indistinguishable from any browser running DoH.
+
+```rust
+let url = format!(
+    "doh://drift-doh-relay.<your-subdomain>.workers.dev/v1/{}/{}/dns-query",
+    hex::encode(my_id.public_bytes()),
+    hex::encode(peer_pubkey),
+);
+let (transport, addr) = Transport::connect_url(&url, my_id, cfg).await?;
+```
+
+Deploy your own relay in five minutes — see [`drift-doh-relay/README.md`](drift-doh-relay/README.md). **Don't share Workers** — each user should run their own to keep their pubkey routing patterns private and avoid exhausting someone else's free-tier quota.
+
+End-to-end demos: `drift/examples/doh_chat.rs` (interactive two-peer chat), `drift/examples/doh_chat_demo.rs` (self-driving full-handshake test against a deployed Worker).
 
 ### Multi-Interface Bridging
 
