@@ -1919,13 +1919,23 @@ impl Inner {
                 // queueing.
                 continue;
             }
+            // For via_mesh peers, build_data_packet must set
+            // hop_ttl so a forwarding hop will accept it. The
+            // mesh next-hop addr is already in peer.addr (it
+            // gets set to the relay's addr during handshake).
+            // Direct peers pass None here as before.
+            let mesh_next_hop = if peer.via_mesh {
+                Some(peer.addr)
+            } else {
+                None
+            };
             if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
                 self.local_peer_id,
                 peer,
                 &it.payload,
                 it.deadline_ms,
                 it.coalesce_group,
-                None,
+                mesh_next_hop,
             ) {
                 batch.push((bytes, target, iface));
             }

@@ -31,6 +31,7 @@ TESTS=(
     "failover_cross_scheme.sh"
     "status.sh"
     "prom.sh"
+    "mesh_only.sh"
 )
 
 # Force a single image build at the start so the per-test
