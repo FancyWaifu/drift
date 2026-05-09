@@ -52,6 +52,11 @@ enum Mode {
         /// Exit after this many seconds even if recv_count not met.
         #[arg(short, long, default_value = "30")]
         timeout: u64,
+        /// Additional listener URLs to attach via add_listener
+        /// (repeatable). Used to make this peer a bridge that
+        /// services clients on multiple transports simultaneously.
+        #[arg(long)]
+        also_bind: Vec<String>,
     },
     /// Connect to URL with a known peer pubkey, send N
     /// fire-and-forget DATA messages, exit. Used for one-way
@@ -95,7 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             url,
             recv_count,
             timeout,
-        } => listen(&url, recv_count, timeout).await,
+            also_bind,
+        } => listen(&url, recv_count, timeout, also_bind).await,
         Mode::Send {
             url,
             peer_pub_hex,
@@ -114,7 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── listen ───────────────────────────────────────────────────────
 
-async fn listen(url: &str, recv_count: usize, timeout_s: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn listen(
+    url: &str,
+    recv_count: usize,
+    timeout_s: u64,
+    also_bind: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let identity = Identity::generate();
     let my_pub = identity.public_bytes();
     let my_hex = hex::encode(my_pub);
@@ -123,6 +134,16 @@ async fn listen(url: &str, recv_count: usize, timeout_s: u64) -> Result<(), Box<
         Transport::bind_url(url, identity, default_config()).await?;
     let transport = Arc::new(transport);
     println!("[evt] role=listen pubkey={} bound={}", my_hex, bound_url);
+
+    // Attach extra listener URLs so a single transport services
+    // clients arriving over multiple transports simultaneously.
+    // Cross-transport mesh routing falls out automatically: any
+    // peer reachable on iface 0 (UDP) can talk to any peer on
+    // iface 1 (TCP), 2 (WS), etc. with no application code.
+    for extra in &also_bind {
+        let extra_url = transport.add_listener(extra).await?;
+        println!("[evt] also_bound={}", extra_url);
+    }
 
     let mut got: usize = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
