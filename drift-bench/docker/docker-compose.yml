@@ -5,7 +5,7 @@ services:
   server:
     build:
       context: ../..
-      dockerfile: bench/docker/Dockerfile
+      dockerfile: drift-bench/docker/Dockerfile
     image: drift-bench:latest
     networks:
       bench_net:

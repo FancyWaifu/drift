@@ -121,8 +121,12 @@ drift-ffi/       C ABI for invoking DRIFT from C / Python / Go / Swift / anywher
                    that speaks the C ABI.
 drift-wasm-test/ Node harness verifying drift-wasm interops with the native stack
                    over WebSocket (and through a bridge to a UDP peer).
-docker/two-bridge/ 12-container demo: 2 DRIFT bridges + 10 clients (5 per bridge),
-                   end-to-end mesh routing across the bridge link.
+docker/          Docker test infrastructure for the workspace.
+  Dockerfile         Image build for compose/ scenarios (drift:latest)
+  compose/           ~30 docker-compose scenarios (NAT, mesh, packet loss, scale)
+  scripts/           Runners that orchestrate compose/ scenarios
+  two-bridge/        Standalone 12-container demo: 2 bridges + 10 clients,
+                       cross-bridge mesh routing
 ```
 
 ## Setting up a real DRIFT deployment
@@ -427,10 +431,10 @@ cargo test --features onion --release --test onion_self_dial -- --ignored --noca
 
 ### Cross-protocol benchmark harness
 
-`drift-bench/` is a single binary that speaks DRIFT, QUIC ([quinn](https://docs.rs/quinn)), and WireGuard ([boringtun](https://docs.rs/boringtun)) with identical workloads (handshake, RTT ping-pong, sustained throughput). `bench/docker/run.sh` builds a two-container harness on a shared bridge network and reports each protocol's numbers side-by-side as a Markdown table.
+`drift-bench/` is a single binary that speaks DRIFT, QUIC ([quinn](https://docs.rs/quinn)), and WireGuard ([boringtun](https://docs.rs/boringtun)) with identical workloads (handshake, RTT ping-pong, sustained throughput). `drift-bench/docker/run.sh` builds a two-container harness on a shared bridge network and reports each protocol's numbers side-by-side as a Markdown table.
 
 ```bash
-cd bench/docker
+cd drift-bench/docker
 ./run.sh                                    # default: 1024 B payload, 1000 RTT samples
 NETEM_DELAY=20ms NETEM_LOSS=1% ./run.sh     # simulate WAN with tc/netem
 ```
@@ -445,7 +449,7 @@ Three workloads, all measured client-side:
 
 ### Results (loopback, single Apple Silicon host)
 
-These are local-machine numbers from this repo at the current commit. Docker-bridge numbers (vethpair overhead, two containers, `tc/netem` shaping) are reproduced via `bench/docker/run.sh` and will differ.
+These are local-machine numbers from this repo at the current commit. Docker-bridge numbers (vethpair overhead, two containers, `tc/netem` shaping) are reproduced via `drift-bench/docker/run.sh` and will differ.
 
 **Handshake** (connect → first byte echoed, 30 samples, fresh identity per iter):
 
