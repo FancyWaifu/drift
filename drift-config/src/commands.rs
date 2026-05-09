@@ -66,9 +66,7 @@ pub fn keygen(
     let mut doc = cfg_io::read_or_default(config_path)?;
     let host = Host {
         pubkey: pubkey_hex.clone(),
-        ssh: args.ssh.clone(),
         endpoints: args.endpoints.clone(),
-        note: None,
     };
     doc.hosts.insert(name.clone(), host);
     cfg_io::write(config_path, &doc)?;
@@ -105,9 +103,7 @@ pub fn peer_add(args: &PeerAddArgs, config_path: &Path) -> Result<()> {
         args.name.clone(),
         Host {
             pubkey: args.pubkey.to_lowercase(),
-            ssh: args.ssh.clone(),
             endpoints: args.endpoints.clone(),
-            note: args.note.clone(),
         },
     );
     cfg_io::write(config_path, &doc)?;
@@ -136,14 +132,8 @@ pub fn peer_ls(config_path: &Path) -> Result<()> {
         };
         println!("  {} ({})", name, role_hint);
         println!("    pubkey:  {}…", pub_short);
-        if let Some(ssh) = &h.ssh {
-            println!("    ssh:     {}", ssh);
-        }
         for ep in &h.endpoints {
             println!("    via:     {}", ep);
-        }
-        if let Some(note) = &h.note {
-            println!("    note:    {}", note);
         }
     }
     Ok(())

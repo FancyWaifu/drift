@@ -61,9 +61,6 @@ pub struct KeygenArgs {
     /// Repeat for multiple. Empty = pure roaming client.
     #[arg(long = "endpoint", short = 'e')]
     pub endpoints: Vec<String>,
-    /// `user@host` for ssh-driven deploy of this host. Optional.
-    #[arg(long)]
-    pub ssh: Option<String>,
     /// Refuse to overwrite an existing identity file.
     #[arg(long)]
     pub force: bool,
@@ -89,12 +86,6 @@ pub struct PeerAddArgs {
     /// One or more DRIFT URLs (e.g. udp://1.2.3.4:51820).
     #[arg(long = "endpoint", short = 'e')]
     pub endpoints: Vec<String>,
-    /// Optional ssh target.
-    #[arg(long)]
-    pub ssh: Option<String>,
-    /// Free-form note (stored verbatim in drift.toml).
-    #[arg(long)]
-    pub note: Option<String>,
 }
 
 #[derive(Args)]

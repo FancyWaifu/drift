@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod contacts;
 pub mod identity;
 pub mod info;
@@ -43,6 +44,11 @@ pub enum Command {
     Listen(ListenArgs),
     /// Run a mesh relay node
     Relay(RelayArgs),
+    /// Run this device as a multi-transport DRIFT bridge.
+    /// Listen URLs come from --listen flags or, if none given,
+    /// from this host's entry in the shared drift.toml inventory
+    /// managed by `drift-config`.
+    Bridge(BridgeArgs),
     /// Manage local contacts (petname → pubkey address book)
     Contacts(ContactsArgs),
 }
@@ -120,6 +126,29 @@ pub enum TransportPreset {
     Default,
     Iot,
     Realtime,
+}
+
+#[derive(clap::Args)]
+pub struct BridgeArgs {
+    /// Listen URLs (repeatable). Examples:
+    ///   --listen udp://0.0.0.0:51820
+    ///   --listen tcp://0.0.0.0:443
+    ///   --listen ws://0.0.0.0:8443
+    /// If omitted, listen URLs are read from this host's
+    /// `endpoints` in drift.toml.
+    #[arg(long = "listen")]
+    pub listen: Vec<String>,
+
+    /// Path to drift.toml. Default: /etc/drift/drift.toml as
+    /// root, or the user-config equivalent. Only consulted when
+    /// --listen is empty.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Which `[hosts.<name>]` entry in drift.toml is THIS host?
+    /// Default: detect from /etc/hostname or $HOSTNAME.
+    #[arg(long = "host")]
+    pub host_name: Option<String>,
 }
 
 #[derive(clap::Args)]

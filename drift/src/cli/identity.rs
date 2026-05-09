@@ -27,21 +27,48 @@ pub fn save_identity(secret: &[u8; 32], path: &Path) -> Result<()> {
 }
 
 /// Load a 32-byte secret key from a DRIFT identity file.
+///
+/// Accepts two on-disk formats so a single identity file works
+/// across every DRIFT tool:
+///
+/// 1. **DRFT-magic binary** (legacy `drift` CLI format): 4-byte
+///    `DRFT` magic + 32 raw bytes = 36 bytes total.
+/// 2. **Hex** (drift-vpn / drift-config / drift-mosh format):
+///    64 hex chars optionally followed by whitespace.
+///
+/// Anything else is an error.
 pub fn load_identity(path: &Path) -> Result<[u8; 32]> {
     let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    if data.len() != FILE_LEN {
-        bail!(
-            "invalid identity file: expected {} bytes, got {}",
-            FILE_LEN,
-            data.len()
-        );
+
+    // Format 1: DRFT-magic binary.
+    if data.len() == FILE_LEN && &data[..4] == MAGIC {
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&data[4..]);
+        return Ok(secret);
     }
-    if &data[..4] != MAGIC {
-        bail!("invalid identity file: bad magic (expected DRFT)");
+
+    // Format 2: hex (the format drift-vpn keygen and drift-config
+    // keygen both write). Trim ASCII whitespace and try to decode.
+    if let Ok(s) = std::str::from_utf8(&data) {
+        let trimmed = s.trim();
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            let bytes = (0..trimmed.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&trimmed[i..i + 2], 16))
+                .collect::<std::result::Result<Vec<u8>, _>>()
+                .context("hex decode failed")?;
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&bytes);
+            return Ok(secret);
+        }
     }
-    let mut secret = [0u8; 32];
-    secret.copy_from_slice(&data[4..]);
-    Ok(secret)
+
+    bail!(
+        "invalid identity file at {}: expected either DRFT-magic binary \
+         (36 bytes starting with `DRFT`) or 64 hex chars, got {} bytes",
+        path.display(),
+        data.len()
+    );
 }
 
 /// Encode bytes as lowercase hex.
