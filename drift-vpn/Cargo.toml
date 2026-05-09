@@ -7,6 +7,10 @@ description = "Identity-routed multi-transport VPN built on DRIFT"
 [dependencies]
 drift = { path = "../drift" }
 drift-core = { path = "../drift-core" }
+# Shared inventory schema + file I/O. Lets `drift-vpn config gen`
+# read the same `drift.toml` an operator manages with
+# `drift-config`.
+drift-config = { path = "../drift-config" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "fs", "signal", "process"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
