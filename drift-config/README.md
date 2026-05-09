@@ -10,7 +10,7 @@ pubkeys by hand.
 
 ```bash
 # Generate this device's identity + endpoints, register in drift.toml
-drift-config keygen --name drift1 \
+drift-config keygen drift1 \
   --endpoint udp://0.0.0.0:51820 \
   --endpoint tcp://0.0.0.0:443
 
@@ -112,8 +112,8 @@ cargo install --path drift-config --path drift
 
 # 2. Initialize an inventory and generate this host's identity.
 sudo mkdir -p /etc/drift
-sudo drift-config init --name homenet
-sudo drift-config keygen --name boxa \
+sudo drift-config init homenet
+sudo drift-config keygen boxa \
   --endpoint "udp://0.0.0.0:51820" \
   --endpoint "tcp://0.0.0.0:443"
 # → prints box A's pubkey. Note it down.
@@ -135,7 +135,7 @@ router for off-LAN clients).
 cargo install --path drift-config --path drift
 
 # 2. Initialize the inventory.
-drift-config init --name homenet
+drift-config init homenet
 
 # 3. Register box A as a peer (paste box A's pubkey from above).
 drift-config peer add boxa \
@@ -144,7 +144,7 @@ drift-config peer add boxa \
   --endpoint "tcp://<box-a-host-or-ip>:443"
 
 # 4. Generate this client's identity (no endpoints — it's a roamer).
-drift-config keygen --name boxb
+drift-config keygen boxb
 
 # 5. Verify the inventory looks right.
 drift-config show
@@ -165,21 +165,21 @@ A full drift-vpn deployment using drift-config:
 cargo install --path drift-config --path drift --path drift-vpn
 
 # ─── On box A (will be the hub) ──────────────────────────────────
-sudo drift-config init --name myvpn
-sudo drift-config keygen --name boxa \
+sudo drift-config init myvpn
+sudo drift-config keygen boxa \
   --endpoint "udp://0.0.0.0:51820" \
   --endpoint "tcp://0.0.0.0:443"
 # → box A's pubkey: <PUB_A>
 
 # ─── On box B (a spoke) ──────────────────────────────────────────
-sudo drift-config init --name myvpn
-sudo drift-config keygen --name boxb \
+sudo drift-config init myvpn
+sudo drift-config keygen boxb \
   --endpoint "udp://0.0.0.0:51820"
 # → box B's pubkey: <PUB_B>
 
 # ─── On box C (roaming client, no listener) ──────────────────────
-drift-config init --name myvpn
-drift-config keygen --name boxc
+drift-config init myvpn
+drift-config keygen boxc
 # → box C's pubkey: <PUB_C>
 
 # ─── Build the full inventory ON ANY ONE OF THEM (e.g. your laptop) ─
@@ -219,19 +219,22 @@ config gen`, then scp the new configs out.
 
 ## Subcommand reference
 
-### `drift-config init [--name <network>] [--force]`
+### `drift-config init [<network>] [--force]`
 
-Create a starter `drift.toml` with the given network name.
+Create a starter `drift.toml`. The optional `<network>` positional
+sets the cosmetic network name (defaults to `drift-network`).
 Refuses to overwrite an existing file unless `--force`.
 
-### `drift-config keygen --name <host> [--endpoint <url>]... [--force]`
+### `drift-config keygen [<host>] [--endpoint <url>]... [--force]`
 
 Generate this device's X25519 identity and register it in
-`drift.toml` as `[hosts.<host>]`. Repeat `--endpoint` for each
+`drift.toml` as `[hosts.<host>]`. The `<host>` positional names
+this entry; if omitted, defaults to the OS hostname
+(`/etc/hostname` or `$HOSTNAME`). Repeat `--endpoint` for each
 URL other peers should use to reach this host:
 
 ```bash
-drift-config keygen --name drift1 \
+drift-config keygen drift1 \
   --endpoint udp://0.0.0.0:51820 \
   --endpoint tcp://0.0.0.0:443 \
   --endpoint ws://0.0.0.0:8443
@@ -239,9 +242,6 @@ drift-config keygen --name drift1 \
 
 Hosts with no `--endpoint` are roaming clients (laptops, phones)
 that initiate outbound connections only.
-
-`--name` defaults to the device's hostname (`/etc/hostname` or
-`$HOSTNAME`).
 
 `--force` regenerates the identity, **rotating the pubkey**. Every
 peer's drift.toml will need to be updated. Don't pass it lightly.
@@ -386,7 +386,7 @@ drift-config v0.1 is intentionally small. Things explicitly
 ## Common pitfalls
 
 - **"no [hosts.X] entry in drift.toml"** when running `drift
-  bridge`: you forgot `drift-config keygen --name X` first.
+  bridge`: you forgot `drift-config keygen X` first.
   Pass `--host <name>` to the bridge if your inventory uses a
   different name than the OS hostname.
 - **"identity already exists"** on `drift-config keygen`: the
