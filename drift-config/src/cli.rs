@@ -25,9 +25,9 @@ pub enum Command {
     /// Create a fresh drift.toml with sensible defaults.
     Init(InitArgs),
 
-    /// Generate this host's X25519 identity, register it in
-    /// drift.toml under `--name`. Use this on every device that
-    /// will run a DRIFT tool.
+    /// Generate this host's X25519 identity and register it in
+    /// drift.toml as `[hosts.<name>]`. Run on every device that
+    /// will use a DRIFT tool.
     Keygen(KeygenArgs),
 
     /// Manage peer entries.
@@ -45,8 +45,8 @@ pub enum Command {
 #[derive(Args)]
 pub struct InitArgs {
     /// Network name (purely cosmetic, used in `show` output).
-    #[arg(long, default_value = "drift-network")]
-    pub name: String,
+    /// Defaults to "drift-network".
+    pub network: Option<String>,
     /// Refuse to overwrite if drift.toml already exists.
     #[arg(long)]
     pub force: bool,
@@ -54,9 +54,9 @@ pub struct InitArgs {
 
 #[derive(Args)]
 pub struct KeygenArgs {
-    /// Local name for this host. Defaults to `hostname` output.
-    #[arg(long)]
-    pub name: Option<String>,
+    /// Local name for this host (the `[hosts.X]` key in
+    /// drift.toml). Defaults to the OS hostname.
+    pub host: Option<String>,
     /// Endpoint URLs other peers should use to reach this host.
     /// Repeat for multiple. Empty = pure roaming client.
     #[arg(long = "endpoint", short = 'e')]
