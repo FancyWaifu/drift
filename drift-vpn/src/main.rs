@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod config;
+mod config_gen;
 mod identity;
 mod metrics;
 mod routing;
@@ -59,6 +60,53 @@ enum Cmd {
         /// Print raw JSON instead of the human-readable summary.
         #[clap(long)]
         json: bool,
+    },
+
+    /// Generate per-host drift-vpn configs from the shared
+    /// drift.toml inventory managed by `drift-config`.
+    Config {
+        #[clap(subcommand)]
+        cmd: ConfigCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Add a [vpn] block to drift.toml with the chosen CIDR.
+    Init {
+        /// Path to drift.toml. Default: /etc/drift/drift.toml as
+        /// root, otherwise <user-config>/drift/drift.toml.
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+        /// Tun network range, e.g. 10.99.0.0/24.
+        #[clap(long, default_value = "10.99.0.0/24")]
+        cidr: String,
+        /// Tun MTU. 1340 leaves room under DRIFT's payload limit.
+        #[clap(long, default_value = "1340")]
+        mtu: u32,
+    },
+    /// Assign a tun address + role to one host in [vpn].
+    Assign {
+        /// Path to drift.toml.
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+        /// Host name (must already exist in [hosts.X]).
+        host: String,
+        /// IP inside the [vpn] cidr, e.g. 10.99.0.1.
+        #[clap(long)]
+        tun: String,
+        /// hub | spoke | client.
+        #[clap(long, default_value = "spoke")]
+        role: String,
+    },
+    /// Generate per-host config.toml files into ./out/<host>/.
+    Gen {
+        /// Path to drift.toml.
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+        /// Output directory.
+        #[clap(short, long, default_value = "./out")]
+        out: PathBuf,
     },
 }
 
@@ -120,6 +168,34 @@ async fn main() -> Result<()> {
                 anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
             }
         }
+        Cmd::Config { cmd } => match cmd {
+            ConfigCmd::Init { config, cidr, mtu } => {
+                let path = resolve_config_path(config)?;
+                config_gen::init(&path, &cidr, mtu)?;
+            }
+            ConfigCmd::Assign {
+                config,
+                host,
+                tun,
+                role,
+            } => {
+                let path = resolve_config_path(config)?;
+                config_gen::assign(&path, &host, &tun, &role)?;
+            }
+            ConfigCmd::Gen { config, out } => {
+                let path = resolve_config_path(config)?;
+                config_gen::gen(&path, &out)?;
+            }
+        },
     }
     Ok(())
+}
+
+/// Resolve `--config <path>` (or fall back to drift-config's
+/// platform-default location) for the `config` subcommands.
+fn resolve_config_path(opt: Option<PathBuf>) -> Result<PathBuf> {
+    match opt {
+        Some(p) => Ok(p),
+        None => drift_config::io::default_path(),
+    }
 }

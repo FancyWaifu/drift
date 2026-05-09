@@ -1,0 +1,39 @@
+[package]
+name = "drift-config"
+version = "0.1.0"
+edition = "2021"
+description = "Inventory + identity manager for DRIFT deployments. Used by drift-vpn (and future tools) to set up multi-node networks from one declarative file."
+
+[lib]
+# Other DRIFT crates (drift-vpn especially) depend on the schema
+# + I/O helpers without pulling in clap. The binary just adds a
+# CLI on top.
+name = "drift_config"
+path = "src/lib.rs"
+
+[[bin]]
+name = "drift-config"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse drift-core for identity generation so the keygen output is
+# byte-identical to `drift-vpn keygen` / `drift keygen` — single source
+# of truth for what an identity file looks like.
+drift-core = { path = "../drift-core" }
+# Same RNG drift-vpn keygen uses, so the on-disk format and
+# entropy source match exactly.
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+hex = "0.4"
+# Cross-platform per-user config dir resolution (Linux:
+# $XDG_CONFIG_HOME, macOS: ~/Library/Application Support, Windows:
+# %APPDATA%). Same crate drift's contacts module already pulls in.
+dirs = "5"
+
+[target.'cfg(unix)'.dependencies]
+# `geteuid()` for "running as root → use /etc/drift, otherwise →
+# user config dir." Same conditional dep drift's main crate uses.
+libc = "0.2"
