@@ -36,7 +36,8 @@ End-user binaries shipped from this repo. Each has its own README with install +
 | **[drift-mosh](drift-mosh/README.md)** | Mobile-shell replacement (mosh-style) — survives wifi-to-cellular, laptop suspend, client crash. UDP / TCP / WebSocket. | `cargo install --path drift-mosh --bin drift-mosh` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-http](drift-http/README.md)** | Apache-style file server + Jellyfin-style proxy + system-wide `drift://` URL handler. Pubkey-addressed; no DDNS, no reverse proxy, no TLS cert. | `cargo install --path drift-http --bin drift-http` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-git](drift-git/README.md)** | `git push drift://<peerhex>@<host>:<port>/<repo>` over DRIFT — git remote helper + serving daemon. No SSH keys, no GitHub. UDP / TCP / TLS / WS. | `cargo install --path drift-git --bins` |
-| **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`. | `cargo install --path drift` |
+| **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`, `bridge`. | `cargo install --path drift` |
+| **[drift-config](drift-config/README.md)** | Identity + inventory manager — one declarative `drift.toml` per host that every DRIFT tool reads. Eliminates manual pubkey cross-filling. | `cargo install --path drift-config` |
 | **[drift-wormhole](drift-wormhole/README.md)** | Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, no rendezvous server. | `cargo install --path drift-wormhole --bin drift-wormhole` |
 | **[drift-bench](drift-bench/)** | Cross-protocol benchmark: DRIFT vs QUIC vs WireGuard, identical workloads. | `cargo build --release -p drift-bench` |
 | **[drift-ffi](drift-ffi/README.md)** | C ABI — call DRIFT from C, C++, Python, Go, Swift, anything. | `cargo build --release -p drift-ffi` |
@@ -111,6 +112,9 @@ drift-git/       Git over DRIFT: `git push drift://<peerhex>@<host>:<port>/<repo
 drift-wormhole/  Magic-Wormhole-shaped file transfer over DRIFT. SHA-256
                    byte-fidelity, progress bar, scheme-prefixed peer URLs.
 drift-bench/     Cross-protocol benchmark harness (DRIFT vs QUIC vs WireGuard).
+drift-config/    Identity + inventory manager. One declarative drift.toml per
+                   host; every DRIFT tool reads from it. Eliminates the manual
+                   pubkey cross-filling pain on multi-node deployments.
 drift-doh-relay/ Cloudflare Worker rendezvous for the `doh://` adapter. Five-
                    minute deploy, $0/month, no infrastructure. Run your own.
 drift-ffi/       C ABI for invoking DRIFT from C / Python / Go / Swift / anywhere
