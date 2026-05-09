@@ -18,18 +18,14 @@ pub fn init(args: &InitArgs, config_path: &Path) -> Result<()> {
             config_path.display()
         );
     }
-    let network_name = args
-        .network
-        .clone()
-        .unwrap_or_else(|| "drift-network".to_string());
     let doc = DriftToml {
         network: Network {
-            name: network_name.clone(),
+            name: args.network.clone(),
         },
         ..Default::default()
     };
     cfg_io::write(config_path, &doc)?;
-    println!("created {} (network={:?})", config_path.display(), network_name);
+    println!("created {}", config_path.display());
     println!();
     println!("next steps:");
     println!("  drift-config keygen <this-host> [--endpoint udp://0.0.0.0:51820]");

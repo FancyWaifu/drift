@@ -28,6 +28,12 @@ read it.
 
 ---
 
+## A note on names — the only thing you actually name is **hosts**
+
+drift-config has exactly one identifier you'll use for real: the **host name**. Each device that runs a DRIFT tool is a host (`drift1`, `boxa`, `macbook`, …). Host names are how peers find each other in the inventory — every config that references a peer references it by host name.
+
+That's the only naming you do. There's also a cosmetic "network" label on the file as a whole (it shows up in `drift-config show` so you can tell `homenet.toml` apart from `worknet.toml`), but it's optional, defaults to `"drift-network"`, and nothing routes by it. **You don't need to think about it.**
+
 ## Why this exists
 
 Without drift-config, deploying drift-vpn across N devices means:
@@ -112,7 +118,7 @@ cargo install --path drift-config --path drift
 
 # 2. Initialize an inventory and generate this host's identity.
 sudo mkdir -p /etc/drift
-sudo drift-config init homenet
+sudo drift-config init
 sudo drift-config keygen boxa \
   --endpoint "udp://0.0.0.0:51820" \
   --endpoint "tcp://0.0.0.0:443"
@@ -135,7 +141,7 @@ router for off-LAN clients).
 cargo install --path drift-config --path drift
 
 # 2. Initialize the inventory.
-drift-config init homenet
+drift-config init
 
 # 3. Register box A as a peer (paste box A's pubkey from above).
 drift-config peer add boxa \
@@ -165,20 +171,20 @@ A full drift-vpn deployment using drift-config:
 cargo install --path drift-config --path drift --path drift-vpn
 
 # ─── On box A (will be the hub) ──────────────────────────────────
-sudo drift-config init myvpn
+sudo drift-config init
 sudo drift-config keygen boxa \
   --endpoint "udp://0.0.0.0:51820" \
   --endpoint "tcp://0.0.0.0:443"
 # → box A's pubkey: <PUB_A>
 
 # ─── On box B (a spoke) ──────────────────────────────────────────
-sudo drift-config init myvpn
+sudo drift-config init
 sudo drift-config keygen boxb \
   --endpoint "udp://0.0.0.0:51820"
 # → box B's pubkey: <PUB_B>
 
 # ─── On box C (roaming client, no listener) ──────────────────────
-drift-config init myvpn
+drift-config init
 drift-config keygen boxc
 # → box C's pubkey: <PUB_C>
 
@@ -219,11 +225,13 @@ config gen`, then scp the new configs out.
 
 ## Subcommand reference
 
-### `drift-config init [<network>] [--force]`
+### `drift-config init [--network <label>] [--force]`
 
-Create a starter `drift.toml`. The optional `<network>` positional
-sets the cosmetic network name (defaults to `drift-network`).
-Refuses to overwrite an existing file unless `--force`.
+Create a starter `drift.toml`. Most users just run
+`drift-config init` with no arguments — that's all you need.
+Optional `--network <label>` sets a cosmetic name shown in
+`drift-config show`; it's pure documentation, nothing routes by
+it. Refuses to overwrite an existing file unless `--force`.
 
 ### `drift-config keygen [<host>] [--endpoint <url>]... [--force]`
 

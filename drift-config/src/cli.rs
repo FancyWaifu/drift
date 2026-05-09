@@ -44,9 +44,11 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Network name (purely cosmetic, used in `show` output).
-    /// Defaults to "drift-network".
-    pub network: Option<String>,
+    /// Cosmetic label for this network. Only shown in
+    /// `drift-config show`; nothing routes by it. Most users
+    /// never need to set this — leave it at the default.
+    #[arg(long, default_value = "drift-network")]
+    pub network: String,
     /// Refuse to overwrite if drift.toml already exists.
     #[arg(long)]
     pub force: bool,
