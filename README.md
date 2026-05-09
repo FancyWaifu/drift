@@ -125,7 +125,15 @@ docker/two-bridge/ 12-container demo: 2 DRIFT bridges + 10 clients (5 per bridge
                    end-to-end mesh routing across the bridge link.
 ```
 
-## Quick Start (native)
+## Setting up a real DRIFT deployment
+
+Want to actually deploy DRIFT — a bridge for friends, a multi-host VPN, a few peers using drift-mosh together? **Start with [`drift-config/README.md`](drift-config/README.md).**
+
+It's the entry-point doc for operators: install instructions, two complete walkthroughs (5-min single-bridge + client; 10-min 3-node VPN), the full schema reference for `drift.toml`, and a clear map of which DRIFT tool reads what. drift-config owns the inventory of identities and endpoints; every other DRIFT tool (`drift bridge`, `drift-vpn`, `drift-mosh`, `drift-http`) reads from the same file, so you never cross-fill 64-char pubkeys by hand.
+
+## Quick Start (library API)
+
+For embedding DRIFT directly inside another Rust program (not a tool deployment), the library API looks like:
 
 ```rust
 use drift::identity::Identity;
