@@ -249,3 +249,7 @@ path = "examples/doh_chat.rs"
 [[example]]
 name = "doh-chat-demo"
 path = "examples/doh_chat_demo.rs"
+
+[[example]]
+name = "transport-peer"
+path = "examples/transport_peer.rs"
