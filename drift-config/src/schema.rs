@@ -47,29 +47,25 @@ fn default_network_name() -> String {
     "drift-network".to_string()
 }
 
-/// One host's generic DRIFT info. Identity + reachability + how
-/// drift-config can ssh in to deploy.
+/// One host's generic DRIFT info: identity + reachability.
+///
+/// Deliberately *small*. drift.toml is meant to be shareable
+/// (commit it to a private repo, paste it in a friend's chat to
+/// bootstrap them) — so it carries only what other peers need to
+/// reach this host. Operator-side deployment info (ssh targets,
+/// systemd paths, etc.) belongs in a separate operator-local
+/// file, never in the inventory.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Host {
     /// 64-hex X25519 pubkey. Required for any peer that another
     /// host wants to reach.
     pub pubkey: String,
 
-    /// `user@host` form for ssh-driven deployment. Optional —
-    /// hosts with no `ssh` (typically roaming clients like
-    /// laptops) are configured manually.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ssh: Option<String>,
-
     /// DRIFT URLs at which this host accepts inbound connections.
     /// Empty = the host doesn't listen (pure roaming client).
     /// Order matters: peers try these in priority order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
-
-    /// Free-form notes ignored by tooling but useful in the file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
 }
 
 /// drift-vpn overlay: settings that apply to the VPN as a whole
