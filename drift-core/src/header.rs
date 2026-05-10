@@ -87,6 +87,39 @@ pub enum PacketType {
     /// the ping originated with (AEAD-sealed). Sender timed
     /// the round trip on send, computes SRTT on receipt.
     Pong = 18,
+    /// Federated envelope — opaque payload that gets relayed
+    /// through one or two bridges by **pubkey lookup**, not by
+    /// the multi-hop mesh routing table. Modeled on Matrix /
+    /// XMPP server-to-server federation: every routing hop is
+    /// an explicitly-configured pairing rather than a learned
+    /// route, so delivery is direct table-lookup at each bridge.
+    ///
+    /// Envelope wire format (inside the AEAD-sealed body of the
+    /// outer packet, after `Header`):
+    ///
+    /// ```text
+    /// [0..32]   target_bridge_pub   — pubkey of the bridge that
+    ///                                 should next-hop this. When
+    ///                                 the receiving bridge sees
+    ///                                 its own pubkey here, the
+    ///                                 envelope is at its final
+    ///                                 bridge hop and gets
+    ///                                 delivered to a local client.
+    /// [32..64]  target_client_pub   — pubkey of the final recipient
+    /// [64..96]  source_client_pub   — pubkey of the originating
+    ///                                 client (carried unchanged
+    ///                                 across hops so the recipient
+    ///                                 knows who sent it)
+    /// [96..98]  payload_len (u16 BE)
+    /// [98..]    payload             — opaque bytes; for DRIFT
+    ///                                 client-to-client crypto
+    ///                                 these are a full inner
+    ///                                 DRIFT packet sealed with
+    ///                                 the client↔client session
+    ///                                 key. Bridges never decrypt
+    ///                                 this payload.
+    /// ```
+    Federated = 19,
 }
 
 impl PacketType {
@@ -107,6 +140,7 @@ impl PacketType {
             16 => Ok(Self::ResumptionTicket),
             17 => Ok(Self::Ping),
             18 => Ok(Self::Pong),
+            19 => Ok(Self::Federated),
             _ => Err(DriftError::UnknownType(v)),
         }
     }

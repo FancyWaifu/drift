@@ -99,6 +99,24 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         }
     }
 
+    // Federation peers: same wire setup as --peer, *plus* a
+    // registration into the federation table. The recv side's
+    // Federated handler consults that table when forwarding
+    // envelopes between bridges.
+    if !args.federates.is_empty() {
+        eprintln!("│ federation peers:");
+        for spec in &args.federates {
+            let (addr, pubkey) = parse_peer_spec(spec)?;
+            let handle = transport
+                .add_peer(pubkey, addr, Direction::Initiator)
+                .await
+                .with_context(|| format!("add_peer for federate {}", spec))?;
+            transport.register_federation_peer(pubkey, handle);
+            outbound_handles.push(handle);
+            eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
+        }
+    }
+
     eprintln!("└───────────────────────────────────────────────────────");
     eprintln!();
     eprintln!("ready. share the pubkey above with anyone you want to bridge.");

@@ -260,3 +260,7 @@ path = "examples/transport_peer.rs"
 [[example]]
 name = "mesh-chat"
 path = "examples/mesh_chat.rs"
+
+[[example]]
+name = "federated-chat"
+path = "examples/federated_chat.rs"
