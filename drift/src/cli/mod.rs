@@ -149,6 +149,15 @@ pub struct BridgeArgs {
     /// Default: detect from /etc/hostname or $HOSTNAME.
     #[arg(long = "host")]
     pub host_name: Option<String>,
+
+    /// Outbound peers this bridge should also initiate sessions
+    /// with. Format: `<url>@<pubkey-hex>`. Repeatable. Used to
+    /// chain two bridges together so mesh routing has end-to-end
+    /// visibility: bridge A `--peer udp://B:51820@<B-pub>` makes
+    /// A initiate to B, which lets A's clients reach B's clients
+    /// without any client knowing the other bridge.
+    #[arg(long = "peer")]
+    pub peers: Vec<String>,
 }
 
 #[derive(clap::Args)]

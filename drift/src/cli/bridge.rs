@@ -21,7 +21,8 @@ use super::identity::load_identity;
 use super::{expand_path, BridgeArgs};
 use anyhow::{anyhow, bail, Context, Result};
 use drift::identity::Identity;
-use drift::{Transport, TransportConfig};
+use drift::{Direction, Transport, TransportConfig};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
@@ -69,6 +70,24 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         eprintln!("│   {}", bound);
     }
     eprintln!("│ accept_any_peer: true (any peer with the pubkey can connect)");
+
+    // Register outbound peers (the bridge-to-bridge link case).
+    // For each `--peer <url>@<pubhex>`, parse the addr and add
+    // the peer as Initiator on the bridge's existing transport.
+    // DRIFT's mesh layer will exchange beacons so each side learns
+    // routes to the other's clients.
+    if !args.peers.is_empty() {
+        eprintln!("│ outbound peers:");
+        for spec in &args.peers {
+            let (addr, pubkey) = parse_peer_spec(spec)?;
+            transport
+                .add_peer(pubkey, addr, Direction::Initiator)
+                .await
+                .with_context(|| format!("add_peer for {}", spec))?;
+            eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
+        }
+    }
+
     eprintln!("└───────────────────────────────────────────────────────");
     eprintln!();
     eprintln!("ready. share the pubkey above with anyone you want to bridge.");
@@ -134,6 +153,45 @@ fn listen_urls_from_inventory(args: &BridgeArgs) -> Result<Vec<String>> {
         );
     }
     Ok(host.endpoints.clone())
+}
+
+/// Parse a `--peer <url>@<pubkey-hex>` spec into a (SocketAddr,
+/// 32-byte pubkey) pair. The URL syntax is `<scheme>://<host>:<port>`;
+/// the SocketAddr is just the `host:port` portion. (We don't
+/// resolve through `make_connector` here because we want the
+/// bridge's existing listener socket to be used for outbound
+/// sends, not a fresh connector socket.)
+fn parse_peer_spec(spec: &str) -> Result<(SocketAddr, [u8; 32])> {
+    let (url, pub_hex) = spec.split_once('@').ok_or_else(|| {
+        anyhow!(
+            "--peer spec {:?} missing '@'; format is <url>@<pubkey-hex>",
+            spec
+        )
+    })?;
+    let pubkey_bytes = hex::decode(pub_hex)
+        .with_context(|| format!("hex decode of pubkey in {:?}", spec))?;
+    if pubkey_bytes.len() != 32 {
+        bail!(
+            "--peer {} pubkey must be 64 hex chars (32 bytes), got {}",
+            spec,
+            pubkey_bytes.len()
+        );
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&pubkey_bytes);
+
+    // Strip the scheme prefix. We only need the host:port part
+    // because the bridge already has a listener socket bound;
+    // `add_peer(addr, Initiator)` records the addr and DRIFT
+    // uses the existing interface to send to it.
+    let host_port = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url);
+    let addr: SocketAddr = host_port
+        .parse()
+        .with_context(|| format!("parse host:port from {:?}", url))?;
+    Ok((addr, pubkey))
 }
 
 /// Best-effort hostname detection. `$HOSTNAME` is set on most
