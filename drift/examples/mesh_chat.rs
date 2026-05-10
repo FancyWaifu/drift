@@ -99,9 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     let transport = Arc::new(transport);
 
-    // 2. Register bridge as a direct peer (this drives the
-    //    HELLO/HELLO_ACK handshake with the bridge over UDP).
-    let _bridge_handle = transport
+    // 2. Register bridge as a direct peer.
+    let bridge_handle = transport
         .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
         .await?;
 
@@ -112,6 +111,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_handle = transport
         .add_mesh_peer(target_pub, Direction::Initiator)
         .await?;
+
+    // 4. Kick the bridge handshake. add_peer alone does NOT
+    //    initiate HELLO — DRIFT only drives a handshake when
+    //    there's data to send. send_data to mesh-routed targets
+    //    won't trigger a HELLO to the BRIDGE (it tries to forward
+    //    via mesh, which can't work yet because the route hasn't
+    //    been learned). So we fire a single "trigger" DATA at the
+    //    bridge to force the direct handshake; once that lands,
+    //    beacons start flowing and the mesh route to `target` can
+    //    be learned through them.
+    //
+    //    The bridge process discards everything it receives (it's
+    //    just a relay), so this byte is harmless.
+    if let Err(e) = transport
+        .send_data(&bridge_handle, b".", 0, 0)
+        .await
+    {
+        eprintln!("[evt] bridge trigger send_data error: {} (continuing)", e);
+    }
 
     println!(
         "[evt] role=mesh-chat my_pub={} bridge={} target={} settle={}s",
