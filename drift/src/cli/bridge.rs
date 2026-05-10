@@ -72,18 +72,23 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
     eprintln!("│ accept_any_peer: true (any peer with the pubkey can connect)");
 
     // Register outbound peers (the bridge-to-bridge link case).
-    // For each `--peer <url>@<pubhex>`, parse the addr and add
-    // the peer as Initiator on the bridge's existing transport.
-    // DRIFT's mesh layer will exchange beacons so each side learns
-    // routes to the other's clients.
+    // For each `--peer <url>@<pubhex>`, parse the addr, add
+    // the peer as Initiator, and then fire a one-byte "trigger"
+    // DATA at it to kick off the HELLO handshake. add_peer alone
+    // does NOT initiate — DRIFT only drives a handshake when
+    // there's data to send. Without this trigger, the bridge-to-
+    // bridge session never establishes, beacons never flow, and
+    // clients on the other bridge are unroutable.
+    let mut outbound_handles: Vec<drift_core::PeerId> = Vec::new();
     if !args.peers.is_empty() {
         eprintln!("│ outbound peers:");
         for spec in &args.peers {
             let (addr, pubkey) = parse_peer_spec(spec)?;
-            transport
+            let handle = transport
                 .add_peer(pubkey, addr, Direction::Initiator)
                 .await
                 .with_context(|| format!("add_peer for {}", spec))?;
+            outbound_handles.push(handle);
             eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
         }
     }
@@ -92,6 +97,15 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
     eprintln!();
     eprintln!("ready. share the pubkey above with anyone you want to bridge.");
     eprintln!("ctrl-c to stop.");
+
+    // Fire trigger bytes at each outbound peer to kick HELLOs.
+    // We do this AFTER printing "ready" so the operator sees the
+    // bridge is live before any per-peer activity.
+    for handle in outbound_handles {
+        if let Err(e) = transport.send_data(&handle, b".", 0, 0).await {
+            tracing::warn!(error = %e, "outbound peer trigger failed");
+        }
+    }
 
     // Pump received DATA. The bridge does no application
     // processing — it exists for cross-transport mesh forwarding,
