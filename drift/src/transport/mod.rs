@@ -24,6 +24,7 @@ const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 #[cfg(unix)]
 pub(crate) mod batch;
 mod cookies;
+mod federated;
 #[cfg(unix)]
 mod ecn;
 pub(crate) mod mesh;
@@ -225,6 +226,12 @@ pub struct Received {
     /// manager) use this to feed the congestion controller a
     /// gentle backoff signal before any actual loss occurs.
     pub ecn_ce: bool,
+    /// For packets that arrived as a federated envelope, this
+    /// is the 32-byte pubkey of the *originating client* (not
+    /// the bridge that delivered the packet to us). `peer_id`
+    /// in that case will be the bridge's id. `None` for normal
+    /// (non-federated) packets.
+    pub federated_from: Option<[u8; 32]>,
 }
 
 /// Runtime counters exposed via `Transport::metrics()`.
@@ -429,6 +436,21 @@ pub(crate) struct Inner {
     /// installed.
     pub(crate) session_reset_tx:
         Arc<StdMutex<Option<mpsc::UnboundedSender<PeerId>>>>,
+    /// Federation table — bridge-pubkey → PeerId mapping. Used by
+    /// the `PacketType::Federated` handler to look up the next-hop
+    /// bridge by pubkey (the only routing-relevant info in the
+    /// envelope). Populated by `Transport::add_federation_peer`;
+    /// every entry MUST also be present in `peers` so the lookup
+    /// can be followed by a normal `send_data` to that PeerId.
+    ///
+    /// This is a *direct* routing table — each entry is a real
+    /// pubkey-identified peer the local node has a session with —
+    /// not the multi-hop mesh routes in `routes`. The federation
+    /// shape is "every peer-bridge is explicitly configured,"
+    /// modeled on Matrix's `.well-known/matrix/server` discovery
+    /// pattern rather than DRIFT's beacon-driven mesh.
+    pub(crate) federation_table:
+        Arc<StdMutex<StdHashMap<[u8; 32], PeerId>>>,
 }
 
 pub struct Transport {
@@ -572,6 +594,7 @@ impl Transport {
             cid_map: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_out_cid: Arc::new(StdMutex::new(StdHashMap::new())),
             session_reset_tx: Arc::new(StdMutex::new(None)),
+            federation_table: Arc::new(StdMutex::new(StdHashMap::new())),
         });
 
         // ECN was set up by bind_with_config before calling
@@ -1189,6 +1212,79 @@ impl Transport {
         self.inner
             .send_data(dst, payload, deadline_ms, coalesce_group)
             .await
+    }
+
+    // ─── Federated routing ──────────────────────────────────────
+    //
+    // Federation is a *non-mesh* relay model: bridges talk directly
+    // to each other by explicit configuration (no beacon-driven
+    // route discovery), and clients pubkey-address a far-side peer
+    // via `(target_bridge_pub, target_client_pub)`. Modeled on
+    // Matrix / XMPP server-to-server federation.
+
+    /// Register a peer bridge for federation. The bridge must
+    /// already have been added as a regular peer via `add_peer`
+    /// (this method just maps its 32-byte pubkey to its PeerId
+    /// for the federation envelope lookup).
+    pub fn register_federation_peer(
+        &self,
+        bridge_pub: [u8; 32],
+        bridge_peer_id: PeerId,
+    ) {
+        let mut t = self.inner.federation_table.lock().unwrap();
+        t.insert(bridge_pub, bridge_peer_id);
+    }
+
+    /// Send a federated payload to `target_client_pub` via the
+    /// remote bridge `target_bridge_pub`. The payload is wrapped
+    /// in a `PacketType::Federated` envelope and shipped to the
+    /// local bridge `via_bridge_peer` — that bridge forwards to
+    /// the target bridge (per its federation table), which
+    /// delivers to the target client.
+    ///
+    /// End-to-end semantics: bridges only see the envelope (which
+    /// has pubkeys + an opaque payload). The payload itself is
+    /// whatever the application wants — for DRIFT client-to-client
+    /// crypto, the application supplies an AEAD-sealed inner
+    /// DRIFT packet.
+    pub async fn send_federated(
+        &self,
+        via_bridge_peer: &PeerId,
+        target_bridge_pub: [u8; 32],
+        target_client_pub: [u8; 32],
+        payload: &[u8],
+    ) -> Result<()> {
+        // Federated envelopes carry a 98-byte header on top of
+        // the user payload (32+32+32+2). Subtract that from
+        // MAX_PAYLOAD to get the real per-call ceiling.
+        let max_user_payload =
+            MAX_PAYLOAD.saturating_sub(federated::FED_HEADER_LEN);
+        if payload.len() > max_user_payload {
+            return Err(DriftError::PayloadTooLarge {
+                got: max_user_payload,
+                cap: payload.len(),
+            });
+        }
+        let source_client_pub = self.inner.identity.public_bytes();
+        let envelope = federated::build(
+            &target_bridge_pub,
+            &target_client_pub,
+            &source_client_pub,
+            payload,
+        );
+        // Reuse the regular DATA send path but tag the packet
+        // type as Federated. send_data wraps payload as Data;
+        // here we go through a specialized path so the outer
+        // packet's `packet_type` byte is Federated.
+        self.inner
+            .send_typed(via_bridge_peer, PacketType::Federated, &envelope)
+            .await
+    }
+
+    /// Number of currently-registered federation peers. For
+    /// observability and tests.
+    pub fn federation_peer_count(&self) -> usize {
+        self.inner.federation_table.lock().unwrap().len()
     }
 
     /// Batched variant: build every DATA packet in the batch
@@ -2012,6 +2108,152 @@ impl Inner {
         self.peer_out_cid.lock().unwrap().insert(peer_id, peer_rx_cid);
     }
 
+    /// Send a `PacketType::Federated` packet to a peer. The peer
+    /// must already be in `HandshakeState::Established` (the call
+    /// fails with `UnknownPeer` otherwise — federation forwards
+    /// happen on top of live sessions, never as the first packet).
+    async fn send_typed(
+        &self,
+        dst: &PeerId,
+        packet_type: PacketType,
+        payload: &[u8],
+    ) -> Result<()> {
+        if packet_type != PacketType::Federated {
+            // Currently only Federated rides this path; other
+            // packet types have their own builders (Data via
+            // send_data, Hello via the handshake state machine,
+            // etc.). Be explicit so a future caller doesn't
+            // accidentally route the wrong type through here.
+            return Err(DriftError::DecodeError);
+        }
+        let action = {
+            let mut peers = self.peers.lock_for(dst).await;
+            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            if !matches!(peer.handshake, HandshakeState::Established { .. }) {
+                return Err(DriftError::UnknownPeer);
+            }
+            build_federated_packet(self.local_peer_id, peer, payload)?
+        };
+        self.dispatch(action).await
+    }
+
+    /// Decrypt + route a `PacketType::Federated` envelope.
+    /// Three-way dispatch on the envelope's pubkey fields:
+    ///
+    /// 1. `target_client_pub == self.local_pubkey` →
+    ///    deliver to the application as a `Received` with
+    ///    `federated_from = Some(source_client_pub)`. This is
+    ///    the recipient-client branch.
+    /// 2. `target_bridge_pub == self.local_pubkey` →
+    ///    we're the destination bridge. Look up the target
+    ///    client by deriving `PeerId` from its pubkey, and
+    ///    forward the envelope on the local-client session.
+    /// 3. Otherwise → look up `target_bridge_pub` in the
+    ///    federation table; forward via that peer-bridge's
+    ///    session if known, else drop.
+    async fn handle_federated(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+        _src: SocketAddr,
+        _received_at: Instant,
+        ecn_ce: bool,
+    ) -> Result<Option<Received>> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        let peer_id = header.src_id;
+
+        // Decrypt with the Federated type tag in AAD.
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::Federated as u8, &aad, body)?
+        };
+
+        let env = federated::parse(&payload_bytes)?;
+        let our_pub = self.identity.public_bytes();
+
+        // (1) Final delivery to us as a client.
+        if env.target_client_pub == our_pub {
+            return Ok(Some(Received {
+                peer_id, // bridge that delivered to us
+                seq: header.seq,
+                supersedes: 0,
+                payload: env.payload.to_vec(),
+                ecn_ce,
+                federated_from: Some(env.source_client_pub),
+            }));
+        }
+
+        // (2) We're the destination bridge — forward to the
+        //     target client over our local session with them.
+        if env.target_bridge_pub == our_pub {
+            let client_peer_id = derive_peer_id(&env.target_client_pub);
+            // Re-build the envelope unchanged; only the outer
+            // DRIFT envelope (src, dst, encryption) changes.
+            let re_envelope = federated::build(
+                &env.target_bridge_pub,
+                &env.target_client_pub,
+                &env.source_client_pub,
+                env.payload,
+            );
+            if let Err(e) = self
+                .send_typed(&client_peer_id, PacketType::Federated, &re_envelope)
+                .await
+            {
+                debug!(
+                    error = %e,
+                    target = ?env.target_client_pub,
+                    "federated: failed to deliver to local client"
+                );
+            }
+            return Ok(None);
+        }
+
+        // (3) Intermediate hop — forward via federation table.
+        let next_hop = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .get(&env.target_bridge_pub)
+            .copied();
+        if let Some(next_peer) = next_hop {
+            let re_envelope = federated::build(
+                &env.target_bridge_pub,
+                &env.target_client_pub,
+                &env.source_client_pub,
+                env.payload,
+            );
+            if let Err(e) = self
+                .send_typed(&next_peer, PacketType::Federated, &re_envelope)
+                .await
+            {
+                debug!(
+                    error = %e,
+                    target = ?env.target_bridge_pub,
+                    "federated: failed to forward to peer bridge"
+                );
+            }
+        } else {
+            debug!(
+                target = ?env.target_bridge_pub,
+                "federated: no route to target bridge, dropping"
+            );
+        }
+        Ok(None)
+    }
+
     async fn dispatch(&self, action: SendAction) -> Result<()> {
         match action {
             SendAction::Data(bytes, addr, iface) => {
@@ -2252,6 +2494,7 @@ impl Inner {
             supersedes: 0,
             payload,
             ecn_ce,
+            federated_from: None,
         }))
     }
 
@@ -2352,6 +2595,10 @@ impl Inner {
             }
             PacketType::Data => {
                 self.handle_data(&header, data, body, src, received_at, ecn_ce)
+                    .await
+            }
+            PacketType::Federated => {
+                self.handle_federated(&header, data, body, src, received_at, ecn_ce)
                     .await
             }
         }
@@ -3169,6 +3416,7 @@ impl Inner {
                     supersedes: header.supersedes,
                     payload,
                     ecn_ce,
+                    federated_from: None,
                 }),
                 probe,
                 just_established,
@@ -3357,6 +3605,38 @@ fn build_data_packet_with_cid(
 
     let target = mesh_next_hop.unwrap_or(peer.addr);
     Ok(SendAction::Data(wire, target, peer.interface_id))
+}
+
+/// Build a `PacketType::Federated` outbound wire packet. Mirrors
+/// the long-header path of `build_data_packet_with_cid` but with
+/// the type byte set to `Federated`, no deadline / coalesce / CID
+/// (federation always uses the long header so the recv side has
+/// the explicit src/dst IDs needed to thread the envelope back to
+/// `process_incoming`'s Federated handler).
+fn build_federated_packet(
+    local_peer_id: PeerId,
+    peer: &mut Peer,
+    payload: &[u8],
+) -> Result<SendAction> {
+    let seq = peer
+        .next_seq_checked()
+        .ok_or(DriftError::SessionExhausted)?;
+    let send_time_ms = peer.send_time_ms();
+    let mut header = Header::new(PacketType::Federated, seq, local_peer_id, peer.id);
+    header.payload_len = payload.len() as u16;
+    header.send_time_ms = send_time_ms;
+
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+    let aad = canonical_aad(&hbuf);
+
+    let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+
+    let mut wire = Vec::with_capacity(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
+    wire.extend_from_slice(&hbuf);
+    tx.seal_into(seq, PacketType::Federated as u8, &aad, payload, &mut wire)?;
+
+    Ok(SendAction::Data(wire, peer.addr, peer.interface_id))
 }
 
 /// Run the server-side half of the handshake: derive session key

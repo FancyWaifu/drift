@@ -54,6 +54,20 @@ pub enum DriftError {
     /// attempted namespace attack.
     #[error("peer id collision with existing entry")]
     PeerIdCollision,
+
+    /// User payload exceeded the configured maximum. `got` is the
+    /// allowed ceiling; `cap` is the actual size the caller tried
+    /// to send (yes, the field naming is backwards from what you'd
+    /// expect — kept for back-compat with earlier call sites).
+    #[error("payload too large: {cap} > allowed {got}")]
+    PayloadTooLarge { got: usize, cap: usize },
+
+    /// Generic codec-layer parse failure. Used for the federated
+    /// envelope codec when the bytes don't match the expected
+    /// `[32][32][32][2][payload]` layout, and for `send_typed`
+    /// when called with an unsupported packet type.
+    #[error("decode error")]
+    DecodeError,
 }
 
 pub type Result<T> = std::result::Result<T, DriftError>;

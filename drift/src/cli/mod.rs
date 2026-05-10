@@ -158,6 +158,15 @@ pub struct BridgeArgs {
     /// without any client knowing the other bridge.
     #[arg(long = "peer")]
     pub peers: Vec<String>,
+
+    /// Federation peers — like `--peer`, but the resulting
+    /// session also gets registered in the federation table.
+    /// Bridges chain together via `--federate` and forward
+    /// `PacketType::Federated` envelopes by pubkey lookup
+    /// rather than via beacon-driven mesh routing. Format:
+    /// `<url>@<pubkey-hex>` (same as `--peer`). Repeatable.
+    #[arg(long = "federate")]
+    pub federates: Vec<String>,
 }
 
 #[derive(clap::Args)]
