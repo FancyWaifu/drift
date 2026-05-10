@@ -50,6 +50,12 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         // can connect, like a public website. Peer authorization
         // happens via the application layer above.
         accept_any_peer: true,
+        // Faster beacon interval (500 ms instead of the 2 s
+        // default). Bridges are the route advertisers in the
+        // mesh; quicker beacons mean cross-bridge mesh routes
+        // converge within a few seconds. Same value the
+        // two_bridge_demo uses.
+        beacon_interval_ms: 500,
         ..TransportConfig::default()
     };
 
@@ -98,13 +104,21 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
     eprintln!("ready. share the pubkey above with anyone you want to bridge.");
     eprintln!("ctrl-c to stop.");
 
-    // Fire trigger bytes at each outbound peer to kick HELLOs.
-    // We do this AFTER printing "ready" so the operator sees the
-    // bridge is live before any per-peer activity.
+    // Periodic ping to each outbound peer. Three jobs in one:
+    //   1) Triggers the initial HELLO (add_peer alone never does).
+    //   2) Keeps the bridge-bridge link warm so beacons keep
+    //      propagating route updates across it.
+    //   3) Re-establishes the link if either bridge restarts.
+    // The receiving bridge silently drains these pings.
     for handle in outbound_handles {
-        if let Err(e) = transport.send_data(&handle, b".", 0, 0).await {
-            tracing::warn!(error = %e, "outbound peer trigger failed");
-        }
+        let t = transport.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                ticker.tick().await;
+                let _ = t.send_data(&handle, b".", 0, 0).await;
+            }
+        });
     }
 
     // Pump received DATA. The bridge does no application

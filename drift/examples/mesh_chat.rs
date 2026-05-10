@@ -88,11 +88,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let my_hex = hex::encode(my_pub);
 
     // 1. Connect directly to the bridge over UDP/TCP/WS/whatever.
+    //    Faster beacon interval (500 ms instead of the 2 s default)
+    //    so cross-bridge mesh routes converge within a few seconds —
+    //    same setting the working two_bridge_demo uses.
     let (transport, bridge_addr) = Transport::connect_url(
         bridge_url,
         identity,
         TransportConfig {
             accept_any_peer: true,
+            beacon_interval_ms: 500,
             ..TransportConfig::default()
         },
     )
@@ -104,12 +108,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
         .await?;
 
-    // 3. Register the target as a mesh-routed peer. via_mesh=true
-    //    so DRIFT sends with hop_ttl > 1 and consults the mesh
-    //    routing table on every send_data instead of trying a
-    //    direct path.
+    // 3. Register the target as a regular (non-mesh) peer with a
+    //    placeholder address. DRIFT's send path will use a learned
+    //    mesh route once beacons propagate; the placeholder addr
+    //    is never actually sent to. NOTE: deliberately NOT using
+    //    `add_mesh_peer` here — that sets via_mesh=true with
+    //    addr=0.0.0.0:0, and the via_mesh send fallback is
+    //    `learned_route.or(Some(peer.addr))`, which means "if
+    //    route not yet learned, send to 0.0.0.0:0" — packets
+    //    silently vanish. With via_mesh=false the fallback is
+    //    just `learned_route` (None), which queues correctly
+    //    until a route arrives. Match what two_bridge_demo does.
+    let placeholder: std::net::SocketAddr = "127.0.0.99:60000".parse()?;
     let target_handle = transport
-        .add_mesh_peer(target_pub, Direction::Initiator)
+        .add_peer(target_pub, placeholder, Direction::Initiator)
         .await?;
 
     // 4. Kick the bridge handshake. add_peer alone does NOT
