@@ -256,3 +256,7 @@ path = "examples/doh_chat_demo.rs"
 [[example]]
 name = "transport-peer"
 path = "examples/transport_peer.rs"
+
+[[example]]
+name = "mesh-chat"
+path = "examples/mesh_chat.rs"
