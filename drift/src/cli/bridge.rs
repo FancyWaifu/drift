@@ -203,6 +203,41 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         });
     }
 
+    // Federation directory announcer: every 10 s, broadcast the
+    // pubkeys of every client currently connected to us to all
+    // of our federation peers. Receiving bridges record those
+    // pubkeys in their peer directory with a 60 s TTL; clients
+    // dialing a target whose bridge they don't know can then
+    // send Federated envelopes with `target_bridge_pub = ZERO`
+    // and let any transit bridge in the chain resolve via its
+    // directory. See drift::UNKNOWN_BRIDGE_PUB and
+    // Transport::announce_directory.
+    //
+    // 10 s is fast enough that a newly-attached client is
+    // discoverable within seconds; 60 s TTL is long enough to
+    // absorb a missed announcement (one network blip) without
+    // flapping. Operators with tighter discovery requirements
+    // could narrow this later via a config flag.
+    {
+        let t = transport.clone();
+        tokio::spawn(async move {
+            // Stagger the first announce by 1 s so the bridge
+            // gets a moment to settle in (initial connect_federate
+            // calls, peer-table warmup) before we publish state.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                let pubs = t.established_client_pubkeys().await;
+                t.announce_directory(&pubs).await;
+                tracing::debug!(
+                    n_clients = pubs.len(),
+                    "federation directory: announced"
+                );
+                ticker.tick().await;
+            }
+        });
+    }
+
     // Pump received DATA. The bridge does no application
     // processing — it exists for cross-transport mesh forwarding,
     // which Transport handles internally regardless of whether

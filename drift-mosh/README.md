@@ -127,6 +127,15 @@ the direct dial wins — fewer hops, no bridge operator in the
 middle. `--server-addr` / `--bridge` on the command line still
 override the inventory if you want to force a particular route.
 
+For the **fully zero-config** case, set a `default_bridge` at
+the top of drift.toml instead of recording every individual
+target. `drift-mosh-client --server-pub <X>` then dials the
+default bridge with the all-zero "consult your directory"
+sentinel, and the bridge resolves `<X>` via its federation
+directory (populated by 10 s announcements from federation
+peers). See [`drift-config/README.md`](../drift-config/README.md)
+for the discovery flow + threat-model gates.
+
 ### Federation — reaching a server through one or two bridges
 
 When client and server can't directly reach each other — different networks, NAT on both sides, firewalls that block everything except outbound HTTPS — DRIFT bridges relay the session. drift-mosh speaks federation natively via two flags:

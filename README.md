@@ -290,6 +290,29 @@ drift-mosh-client --server-pub <SERVER_PUB> --exec uptime
 
 The inventory entry's `endpoints` (direct dial) or `via_bridge` (federation route) is consulted automatically; direct wins when both are present. `drift-mosh-server --bridge <url>@<pub>` reconnects on a 2 s watchdog if the bridge it's connected to restarts — so a bridge bouncing doesn't strand the server.
 
+### Dynamic discovery — `default_bridge` + bridge announcements
+
+The fully-zero-config case: the operator doesn't even know which bridge hosts a particular target. Drift.toml just declares "if you don't know how to reach a host, ask this bridge":
+
+```toml
+# /etc/drift/drift.toml
+default_bridge = "<bridge-pubkey-hex>"
+
+[hosts.bridge-x]
+pubkey = "<bridge-pubkey-hex>"
+endpoints = ["udp://bridge-x.example:51820"]
+```
+
+```bash
+drift-mosh-client --server-pub <ANY_PUB> --exec uptime
+# → dials bridge-x, sends Federated envelope with the all-zero
+#   sentinel as target_bridge_pub; bridge-x looks up <ANY_PUB>
+#   in its federation directory and re-routes to whichever
+#   federated bridge announced it.
+```
+
+Bridges (`drift bridge`) announce their connected clients to every federation peer every 10 s via `PacketType::FederationDirectory`. Receiving bridges record `client_pubkey → (announcer_bridge, last_announced_at)` with a 60 s TTL. Threat-model gate: only senders in our `federation_table` may write to the directory — see `drift/tests/adversarial_federation.rs::federation_directory_rejects_non_bridge_announcer`. Stale entries are evicted at lookup time, so a client whose bridge stops announcing drops out of routing within a minute rather than stranding traffic at a dead next-hop.
+
 ### Adding a new transport
 
 Drop a new adapter into any file (drift's source tree, your own crate, a downstream consumer's crate — anywhere). The URL dispatcher finds it via `inventory::iter` at runtime; nothing in drift core needs editing.

@@ -263,6 +263,36 @@ This is the "identity-first" promise: addresses are pubkeys, the
 inventory tells the network how to deliver. Direct endpoints
 beat bridged routes when both are available.
 
+### Dynamic discovery — when you don't know the target's bridge
+
+The fully zero-config flavor: set a `default_bridge` at the
+top of `drift.toml` instead of recording every individual
+target. Tools that look up an unknown target fall back to
+dialing the default bridge with a "consult your directory"
+sentinel — the bridge then routes via whichever federated peer
+has announced the target.
+
+```toml
+# /etc/drift/drift.toml
+default_bridge = "<bridge-pubkey-hex>"
+
+[network]
+name = "lab"
+
+[hosts.bridge-x]
+pubkey = "<bridge-pubkey-hex>"
+endpoints = ["udp://bridge-x.example:51820"]
+```
+
+`drift bridge` instances announce their connected clients to
+every federation peer (`--federate`) every 10 seconds. A
+receiving bridge keeps the directory entries with a 60-second
+TTL — stale entries evict at lookup time, so a client whose
+bridge stops announcing drops out of routing in under a
+minute. Only `--federate`'d bridges may write to the directory;
+arbitrary clients can't poison it. (See `drift/tests/
+adversarial_federation.rs::federation_directory_rejects_non_bridge_announcer`.)
+
 ---
 
 ## 10-minute quickstart: 3-node VPN

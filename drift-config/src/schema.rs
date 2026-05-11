@@ -34,6 +34,20 @@ pub struct DriftToml {
     /// `drift-vpn config init`.
     #[serde(default)]
     pub vpn: Option<VpnOverlay>,
+
+    /// Default bridge for outbound dials to hosts that aren't in
+    /// this inventory (or are here but have no `endpoints` /
+    /// `via_bridge`). When set, tools that resolve a target by
+    /// pubkey and find no specific route fall back to dialing
+    /// this bridge with `target_bridge_pub = UNKNOWN_BRIDGE_PUB`
+    /// — the bridge then consults its federation directory to
+    /// route to whichever federated peer is hosting the target.
+    ///
+    /// Holds the bridge's 64-hex pubkey. The bridge itself must
+    /// also be in `[hosts.…]` with `endpoints` so dialing tools
+    /// can reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_bridge: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

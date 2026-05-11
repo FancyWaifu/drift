@@ -25,6 +25,7 @@ const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 pub(crate) mod batch;
 mod cookies;
 mod federated;
+pub use federated::UNKNOWN_BRIDGE_PUB;
 #[cfg(unix)]
 mod ecn;
 pub(crate) mod mesh;
@@ -463,6 +464,27 @@ pub(crate) struct Inner {
     /// pattern rather than DRIFT's beacon-driven mesh.
     pub(crate) federation_table:
         Arc<StdMutex<StdHashMap<[u8; 32], PeerId>>>,
+
+    /// Directory of remote clients known to be reachable via one
+    /// of our federation peers. Populated by
+    /// `PacketType::FederationDirectory` announcements; consulted
+    /// when routing a `PacketType::Federated` envelope whose
+    /// `target_bridge_pub` is the all-zero sentinel
+    /// (`federated::UNKNOWN_BRIDGE_PUB`) — i.e. the client doesn't
+    /// know which bridge holds the target.
+    ///
+    /// `client_pubkey → (announcer_bridge_peer_id, last_announced_at)`
+    /// with a 60 s TTL: entries that aren't re-announced within
+    /// that window are evicted, so a client whose bridge stops
+    /// announcing drops out of routing fast rather than stranding
+    /// traffic at a stale next-hop.
+    ///
+    /// Security: only federation peers (entries in
+    /// `federation_table`) can write to this table — see
+    /// `handle_federation_directory`.
+    pub(crate) peer_directory: Arc<
+        StdMutex<StdHashMap<[u8; 32], (PeerId, std::time::Instant)>>,
+    >,
 }
 
 pub struct Transport {
@@ -607,6 +629,7 @@ impl Transport {
             peer_out_cid: Arc::new(StdMutex::new(StdHashMap::new())),
             session_reset_tx: Arc::new(StdMutex::new(None)),
             federation_table: Arc::new(StdMutex::new(StdHashMap::new())),
+            peer_directory: Arc::new(StdMutex::new(StdHashMap::new())),
         });
 
         // ECN was set up by bind_with_config before calling
@@ -1432,6 +1455,116 @@ impl Transport {
             .lock()
             .unwrap()
             .contains_key(bridge_pub)
+    }
+
+    /// Announce a list of locally-connected client pubkeys to every
+    /// peer in our federation table. Used by `drift bridge`'s
+    /// directory-announce task: every N seconds the bridge gathers
+    /// the pubkeys of its currently-connected clients (peers in
+    /// the peer table that aren't themselves federation bridges)
+    /// and ships them via `PacketType::FederationDirectory` to
+    /// each fed peer.
+    ///
+    /// Receiving bridges record `client_pub → (sender_peer_id, now)`
+    /// in their peer directory; entries expire after 60 s without
+    /// re-announcement. Clients can then send `Federated` envelopes
+    /// with `target_bridge_pub = UNKNOWN_BRIDGE_PUB` and let any
+    /// transit bridge resolve via its directory.
+    ///
+    /// `client_pubs` is chunked into `MAX_DIRECTORY_ENTRIES`-sized
+    /// packets so a single announcement always fits comfortably
+    /// under MAX_PAYLOAD. The function returns after all chunks
+    /// have been queued; failures to individual peers are logged
+    /// and otherwise ignored (one fed peer being unreachable
+    /// shouldn't prevent the others from receiving the update).
+    pub async fn announce_directory(&self, client_pubs: &[[u8; 32]]) {
+        let peers: Vec<PeerId> = self
+            .inner
+            .federation_table
+            .lock()
+            .unwrap()
+            .values()
+            .copied()
+            .collect();
+        if peers.is_empty() {
+            return;
+        }
+        let chunks: Vec<Vec<u8>> = client_pubs
+            .chunks(federated::MAX_DIRECTORY_ENTRIES)
+            .map(federated::build_directory)
+            .collect();
+        // Empty announcements still get sent — they let peers
+        // know we have zero connected clients (so they can prune
+        // stale entries from us by waiting out the 60 s TTL).
+        // The build_directory call above handles len=0 → one
+        // 4-byte payload.
+        let chunks = if chunks.is_empty() {
+            vec![federated::build_directory(&[])]
+        } else {
+            chunks
+        };
+        for peer_id in peers {
+            for chunk in &chunks {
+                if let Err(e) = self
+                    .inner
+                    .send_typed(&peer_id, PacketType::FederationDirectory, chunk)
+                    .await
+                {
+                    debug!(
+                        error = %e,
+                        peer = ?peer_id,
+                        "directory: announce send failed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Snapshot the pubkeys of all currently-Established peers
+    /// that are NOT themselves federation bridges. This is what
+    /// `drift bridge` advertises in its directory announcements:
+    /// "these are the clients I host." Excludes peers in
+    /// `federation_table` so a bridge doesn't accidentally tell
+    /// its federation peers "I host bridge X" and create a
+    /// route-back-to-self loop.
+    pub async fn established_client_pubkeys(&self) -> Vec<[u8; 32]> {
+        let fed_pubs: std::collections::HashSet<[u8; 32]> = self
+            .inner
+            .federation_table
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        let mut out = Vec::new();
+        let peers = self.inner.peers.lock_all().await;
+        for p in peers.iter() {
+            if matches!(
+                p.handshake,
+                drift_core::session::HandshakeState::Established { .. }
+            ) && !fed_pubs.contains(&p.peer_static_pub)
+            {
+                out.push(p.peer_static_pub);
+            }
+        }
+        out
+    }
+
+    /// Number of currently-known entries in the peer directory.
+    /// For observability + tests.
+    pub fn peer_directory_count(&self) -> usize {
+        self.inner.peer_directory.lock().unwrap().len()
+    }
+
+    /// Returns true if the given client pubkey is currently in our
+    /// peer directory (without expiry check). Used by tests.
+    #[doc(hidden)]
+    pub fn peer_directory_contains(&self, client_pub: &[u8; 32]) -> bool {
+        self.inner
+            .peer_directory
+            .lock()
+            .unwrap()
+            .contains_key(client_pub)
     }
 
     /// Test-only escape hatch: ship arbitrary bytes through an
@@ -2357,12 +2490,15 @@ impl Inner {
         packet_type: PacketType,
         payload: &[u8],
     ) -> Result<()> {
-        if packet_type != PacketType::Federated {
-            // Currently only Federated rides this path; other
-            // packet types have their own builders (Data via
-            // send_data, Hello via the handshake state machine,
-            // etc.). Be explicit so a future caller doesn't
-            // accidentally route the wrong type through here.
+        // Only Federated and FederationDirectory ride this path;
+        // other packet types have their own builders (Data via
+        // send_data, Hello via the handshake state machine, etc.).
+        // Be explicit so a future caller doesn't accidentally
+        // route the wrong type through here.
+        if !matches!(
+            packet_type,
+            PacketType::Federated | PacketType::FederationDirectory
+        ) {
             return Err(DriftError::DecodeError);
         }
         let action = {
@@ -2371,7 +2507,7 @@ impl Inner {
             if !matches!(peer.handshake, HandshakeState::Established { .. }) {
                 return Err(DriftError::UnknownPeer);
             }
-            build_federated_packet(self.local_peer_id, peer, payload)?
+            build_typed_packet(self.local_peer_id, peer, packet_type, payload)?
         };
         self.dispatch(action).await
     }
@@ -2586,16 +2722,59 @@ impl Inner {
             return Ok(None);
         }
 
-        // (3) Intermediate hop — forward via federation table.
-        let next_hop = self
-            .federation_table
-            .lock()
-            .unwrap()
-            .get(&env.target_bridge_pub)
-            .copied();
+        // (3) Intermediate hop — forward via federation table,
+        // with a peer-directory fallback for client-supplied
+        // "I don't know the bridge" requests (target_bridge_pub
+        // is the all-zero sentinel). When the sentinel is set,
+        // we look up the *target client* in our directory and
+        // forward to whichever bridge announced them — rewriting
+        // the envelope's target_bridge_pub so the next hop and
+        // the eventual destination can both validate routing
+        // normally.
+        let unknown = env.target_bridge_pub == federated::UNKNOWN_BRIDGE_PUB;
+        let (next_hop, resolved_bridge_pub) = if unknown {
+            // Directory lookup. Evict the entry if it's older
+            // than 60 s — let the announcement layer refresh it.
+            let mut dir = self.peer_directory.lock().unwrap();
+            let now = std::time::Instant::now();
+            let entry = dir.get(&env.target_client_pub).copied();
+            if let Some((pid, t)) = entry {
+                if now.duration_since(t) > std::time::Duration::from_secs(60) {
+                    dir.remove(&env.target_client_pub);
+                    (None, env.target_bridge_pub)
+                } else {
+                    // Look up the announcer's pubkey so we can
+                    // rewrite the envelope's target_bridge_pub.
+                    let pubs = self.federation_table.lock().unwrap();
+                    let announcer_pub = pubs
+                        .iter()
+                        .find_map(|(p, id)| if *id == pid { Some(*p) } else { None });
+                    drop(pubs);
+                    match announcer_pub {
+                        Some(pub_) => (Some(pid), pub_),
+                        // Announcer left the fed table since the
+                        // entry was recorded — stale; drop.
+                        None => {
+                            dir.remove(&env.target_client_pub);
+                            (None, env.target_bridge_pub)
+                        }
+                    }
+                }
+            } else {
+                (None, env.target_bridge_pub)
+            }
+        } else {
+            let nh = self
+                .federation_table
+                .lock()
+                .unwrap()
+                .get(&env.target_bridge_pub)
+                .copied();
+            (nh, env.target_bridge_pub)
+        };
         if let Some(next_peer) = next_hop {
             let re_envelope = federated::build(
-                &env.target_bridge_pub,
+                &resolved_bridge_pub,
                 &env.target_client_pub,
                 &env.source_bridge_pub,
                 &env.source_client_pub,
@@ -2607,10 +2786,15 @@ impl Inner {
             {
                 debug!(
                     error = %e,
-                    target = ?env.target_bridge_pub,
+                    target = ?resolved_bridge_pub,
                     "federated: failed to forward to peer bridge"
                 );
             }
+        } else if unknown {
+            debug!(
+                target_client = ?env.target_client_pub,
+                "federated: directory has no route to target client, dropping"
+            );
         } else {
             debug!(
                 target = ?env.target_bridge_pub,
@@ -2618,6 +2802,89 @@ impl Inner {
             );
         }
         Ok(None)
+    }
+
+    /// Process a `PacketType::FederationDirectory` packet from a
+    /// peer bridge. Decrypts under the sender's session keys,
+    /// verifies the sender is in our federation_table (so an
+    /// arbitrary client can't populate the directory), and
+    /// records each announced client pubkey under the sender's
+    /// peer_id with the current timestamp.
+    ///
+    /// Stale entries (>60 s without re-announcement) are evicted
+    /// inline at lookup time in `handle_federated` case (3).
+    async fn handle_federation_directory(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        let peer_id = header.src_id;
+
+        // Decrypt with the FederationDirectory type tag in AAD.
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::FederationDirectory as u8, &aad, body)?
+        };
+
+        // Only trusted bridges may announce. A client that
+        // somehow sends a FederationDirectory packet here would
+        // pass the AEAD check (they have an Established session
+        // with us) but their pubkey wouldn't be in the federation
+        // table — and accepting their advertisement would let
+        // any client of an accept_any_peer bridge inject arbitrary
+        // routing entries, the same hole we closed for the
+        // Federated case-2 auto-register.
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let sender_is_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&sender_pub);
+        if !sender_is_bridge {
+            self.metrics
+                .federation_spoof_drops
+                .fetch_add(1, Ordering::Relaxed);
+            debug!(
+                sender = ?sender_pub,
+                "directory: dropped announcement from non-bridge peer"
+            );
+            return Err(DriftError::AuthFailed);
+        }
+
+        let pubs = federated::parse_directory(&payload_bytes)?;
+        let now = std::time::Instant::now();
+        let mut dir = self.peer_directory.lock().unwrap();
+        for pub_ in pubs {
+            // Don't record entries for ourselves — we know we're
+            // here, and overwriting with a remote announcement
+            // would cause our outgoing-to-self traffic to round-
+            // trip the bridge unnecessarily.
+            if pub_ == self.identity.public_bytes() {
+                continue;
+            }
+            dir.insert(pub_, (peer_id, now));
+        }
+        Ok(())
     }
 
     async fn dispatch(&self, action: SendAction) -> Result<()> {
@@ -2967,6 +3234,10 @@ impl Inner {
             PacketType::Federated => {
                 self.handle_federated(&header, data, body, src, received_at, ecn_ce)
                     .await
+            }
+            PacketType::FederationDirectory => {
+                self.handle_federation_directory(&header, data, body).await?;
+                Ok(None)
             }
         }
     }
@@ -3981,16 +4252,17 @@ fn build_data_packet_with_cid(
 /// (federation always uses the long header so the recv side has
 /// the explicit src/dst IDs needed to thread the envelope back to
 /// `process_incoming`'s Federated handler).
-fn build_federated_packet(
+fn build_typed_packet(
     local_peer_id: PeerId,
     peer: &mut Peer,
+    packet_type: PacketType,
     payload: &[u8],
 ) -> Result<SendAction> {
     let seq = peer
         .next_seq_checked()
         .ok_or(DriftError::SessionExhausted)?;
     let send_time_ms = peer.send_time_ms();
-    let mut header = Header::new(PacketType::Federated, seq, local_peer_id, peer.id);
+    let mut header = Header::new(packet_type, seq, local_peer_id, peer.id);
     header.payload_len = payload.len() as u16;
     header.send_time_ms = send_time_ms;
 
@@ -4002,7 +4274,7 @@ fn build_federated_packet(
 
     let mut wire = Vec::with_capacity(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
-    tx.seal_into(seq, PacketType::Federated as u8, &aad, payload, &mut wire)?;
+    tx.seal_into(seq, packet_type as u8, &aad, payload, &mut wire)?;
 
     Ok(SendAction::Data(wire, peer.addr, peer.interface_id))
 }
