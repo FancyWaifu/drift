@@ -65,6 +65,8 @@ data-encoding = "2"
 # Worker). rustls feature so we don't pull in OpenSSL; gzip off
 # because DRIFT bodies are already AEAD ciphertext (incompressible).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+# SHA-256 for the `fed-pipe` example (file-transfer integrity).
+sha2 = "0.10"
 # TLS-shaped DRIFT transport (`tls://...`). The wire is plain
 # TCP wrapped in TLS so middleboxes that allow only HTTPS-shaped
 # traffic can't tell DRIFT apart from a normal web app. The TLS
@@ -264,3 +266,7 @@ path = "examples/mesh_chat.rs"
 [[example]]
 name = "federated-chat"
 path = "examples/federated_chat.rs"
+
+[[example]]
+name = "fed-pipe"
+path = "examples/fed_pipe.rs"
