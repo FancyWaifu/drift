@@ -2668,7 +2668,32 @@ impl Inner {
             if self.config.accept_any_peer {
                 let mut peers = self.peers.lock_for(&source_peer_id).await;
                 match peers.get_mut(&source_peer_id) {
-                    Some(existing) if existing.federated_via.is_none() => {
+                    Some(existing) => {
+                        // Refresh the reply path on every case-1
+                        // receipt, not just the first. Without this,
+                        // a client that roams to a different bridge
+                        // (e.g. their on-ramp bridge restarted, or
+                        // they're now reaching us via a different
+                        // federation peer) gets stuck: subsequent
+                        // replies go to the stale `federated_via`
+                        // and black-hole.
+                        //
+                        // Security: the sender of an inbound
+                        // federated envelope is always our own
+                        // bridge (we connected to it). Whatever
+                        // `source_bridge_pub` they attest in the
+                        // envelope is, by definition, the trust
+                        // we extend to that bridge — same model as
+                        // a Matrix/XMPP client trusting its
+                        // homeserver's S2S routing. A malicious
+                        // federated bridge CAN steer reply traffic
+                        // by sending a single envelope claiming
+                        // source_client_pub=victim. That hazard
+                        // existed before this fix too: the first
+                        // arrival (None match below) already
+                        // pinned victim→attacker. Fixing it
+                        // properly requires XEdDSA presence
+                        // tickets (deferred).
                         existing.federated_via = Some(peer_id);
                         existing.federated_target_bridge_pub =
                             Some(env.source_bridge_pub);
@@ -2688,7 +2713,6 @@ impl Inner {
                         p.auto_registered = true;
                         peers.insert(p);
                     }
-                    _ => {}
                 }
             }
 
