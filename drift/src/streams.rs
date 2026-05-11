@@ -750,12 +750,22 @@ impl StreamManager {
     }
 
     /// Drop every per-peer stream-layer entry for `peer`.
-    /// Called when the underlying DRIFT session for that peer
-    /// regenerates — old streams reference invalidated session
-    /// keys and old sequence-number windows, so they can never
-    /// receive again. Wiping clears the way for the new
-    /// session's OPEN frames to land cleanly.
-    async fn wipe_peer_streams(&self, peer: &PeerId) {
+    /// Called automatically when the underlying DRIFT session for
+    /// that peer regenerates (HELLO restarts) — old streams
+    /// reference invalidated session keys and old sequence-number
+    /// windows, so they can never receive again. Wiping clears
+    /// the way for the new session's OPEN frames to land cleanly.
+    ///
+    /// Apps that bridge through federation should call this
+    /// manually when a logical client "session" ends, because the
+    /// federation-relay model means the underlying DRIFT session
+    /// (between app and bridge) never regenerates — so the
+    /// automatic listener above never fires for those peers.
+    /// drift-mosh-server's session_worker calls this on detach;
+    /// without it, a same-pubkey client whose new process picks
+    /// the same parity-base stream IDs would have its OPENs
+    /// silently dropped by `ensure_inbound_stream`.
+    pub async fn wipe_peer_streams(&self, peer: &PeerId) {
         let mut state = self.state.lock().await;
         // Drop StreamState entries (the deliver_tx in each goes
         // away here; the holding application's `recv()` will
@@ -1139,9 +1149,18 @@ impl StreamManager {
         // Reliable-OPEN fallback: if we've never seen this stream
         // before, the OPEN frame must have been dropped on a lossy
         // link. Auto-create the stream so the first DATA segment
-        // serves as the implicit OPEN. The per-peer stream cap
-        // inside `ensure_inbound_stream` still bounds allocation.
-        self.ensure_inbound_stream(peer, stream_id).await;
+        // serves as the implicit OPEN. Gated on `seq == 0` because
+        // a non-zero seq for an unknown stream isn't the start of
+        // a fresh stream — it's a STALE retransmit from a stream
+        // the application has already torn down (e.g. after
+        // `wipe_peer_streams`), and accepting it would inject the
+        // stale state's deliver_tx into a brand-new `accept()`
+        // return where the app would receive the stale bytes
+        // mid-conversation. The client's reliable retransmit of
+        // seq=0 will resurrect a legitimately-dropped OPEN.
+        if seq == 0 {
+            self.ensure_inbound_stream(peer, stream_id).await;
+        }
 
         // Mutate state to deliver/buffer, then build ACK to send.
         let (chunks_to_deliver, ack_wire) = {
