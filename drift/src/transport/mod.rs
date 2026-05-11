@@ -1588,6 +1588,25 @@ impl Transport {
             .await
     }
 
+    /// Test-only: ship a raw FederationDirectory payload to a peer.
+    /// Lets tests exercise the directory layer's semantics
+    /// (first-write-wins, idempotent-set, evict-on-failure)
+    /// without spinning up the 7 s announce ticker.
+    #[doc(hidden)]
+    pub async fn __debug_send_directory_announcement(
+        &self,
+        via_bridge_peer: &PeerId,
+        payload: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .send_typed(
+                via_bridge_peer,
+                PacketType::FederationDirectory,
+                payload,
+            )
+            .await
+    }
+
     /// Batched variant: build every DATA packet in the batch
     /// under the peer locks, then ship them to the kernel in
     /// one `sendmmsg(2)` call on Linux (or a sequential
@@ -2734,12 +2753,17 @@ impl Inner {
         let unknown = env.target_bridge_pub == federated::UNKNOWN_BRIDGE_PUB;
         let (next_hop, resolved_bridge_pub) = if unknown {
             // Directory lookup. Evict the entry if it's older
-            // than 60 s — let the announcement layer refresh it.
+            // than DIRECTORY_TTL — let the announcement layer
+            // refresh it. Bridges announce every ~7 s, so 20 s
+            // gives ~3 announce intervals of slack before we
+            // call a silent bridge dead.
+            const DIRECTORY_TTL: std::time::Duration =
+                std::time::Duration::from_secs(20);
             let mut dir = self.peer_directory.lock().unwrap();
             let now = std::time::Instant::now();
             let entry = dir.get(&env.target_client_pub).copied();
             if let Some((pid, t)) = entry {
-                if now.duration_since(t) > std::time::Duration::from_secs(60) {
+                if now.duration_since(t) > DIRECTORY_TTL {
                     dir.remove(&env.target_client_pub);
                     (None, env.target_bridge_pub)
                 } else {
@@ -2789,6 +2813,16 @@ impl Inner {
                     target = ?resolved_bridge_pub,
                     "federated: failed to forward to peer bridge"
                 );
+                // Send failure to the resolved next-hop is a
+                // strong signal that bridge is unreachable —
+                // session torn down, OS routing blackholed, etc.
+                // Drop every directory entry attributed to it so
+                // the next dial doesn't fall into the same hole.
+                // The next announce from a still-alive announcer
+                // (or recovery of this one) repopulates within
+                // the announce interval (~7 s).
+                let mut dir = self.peer_directory.lock().unwrap();
+                dir.retain(|_, (pid, _)| *pid != next_peer);
             }
         } else if unknown {
             debug!(
@@ -2872,17 +2906,59 @@ impl Inner {
         }
 
         let pubs = federated::parse_directory(&payload_bytes)?;
+        let new_set: std::collections::HashSet<[u8; 32]> = pubs
+            .into_iter()
+            .filter(|p| *p != self.identity.public_bytes())
+            .collect();
         let now = std::time::Instant::now();
         let mut dir = self.peer_directory.lock().unwrap();
-        for pub_ in pubs {
-            // Don't record entries for ourselves — we know we're
-            // here, and overwriting with a remote announcement
-            // would cause our outgoing-to-self traffic to round-
-            // trip the bridge unnecessarily.
-            if pub_ == self.identity.public_bytes() {
-                continue;
+
+        // ── Idempotent-set semantics (issue 3, implicit retraction) ──
+        //
+        // Each FederationDirectory packet from a bridge is the
+        // COMPLETE current set of that bridge's clients, not a
+        // delta. Prune entries we previously recorded under this
+        // announcer that aren't in the new set — that's how a
+        // client disconnecting from its bridge stops attracting
+        // traffic in <7 s (the announce interval) instead of
+        // waiting out the 20 s stale-entry TTL.
+        //
+        // Implementation note: the prune walks all entries which
+        // is O(n_dir). For deployments with thousands of clients
+        // this would want a reverse index (announcer → pubkeys);
+        // for now the linear scan is fine.
+        dir.retain(|client_pub, (announcer_pid, _)| {
+            *announcer_pid != peer_id || new_set.contains(client_pub)
+        });
+
+        // ── First-write-wins for cross-announcer conflicts (issue 2) ──
+        //
+        // If bridge B and bridge C both claim client X, B's
+        // earlier announcement wins for the lifetime of B's
+        // claim. A malicious federated peer racing to claim
+        // pubkeys it doesn't host can no longer hijack durable
+        // routing: the legitimate bridge's prior entry blocks
+        // the impostor. The race window is bounded by the 20 s
+        // TTL (or sooner via send-failure eviction below) — i.e.
+        // an attacker only wins for pubkeys whose legitimate
+        // bridge has already gone silent.
+        //
+        // Refresh-from-same-announcer is still allowed (just an
+        // updated timestamp); cross-announcer attempts are
+        // silently dropped.
+        for pub_ in new_set {
+            use std::collections::hash_map::Entry;
+            match dir.entry(pub_) {
+                Entry::Vacant(e) => {
+                    e.insert((peer_id, now));
+                }
+                Entry::Occupied(mut e) => {
+                    if e.get().0 == peer_id {
+                        e.get_mut().1 = now;
+                    }
+                    // else: first-write-wins — silently ignore.
+                }
             }
-            dir.insert(pub_, (peer_id, now));
         }
         Ok(())
     }
