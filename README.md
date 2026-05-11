@@ -18,6 +18,8 @@ Reticulum proved identity-first networking works. DRIFT proves it can also be fa
 
 **Mesh** — Multi-hop forwarding with end-to-end encryption preserved. RTT-weighted distance-vector routing. Hold-down timers, hysteresis, staleness expiry. Peer self-migration at equal cost.
 
+**Federation** — Matrix/XMPP-style bridge-to-bridge forwarding for the cases where mesh discovery doesn't fit: explicit `--federate` links between bridges plus pubkey-addressed envelopes (`PacketType::Federated`) that target a `(remote_bridge_pub, remote_client_pub)` tuple. Bridges see ciphertext only; end-to-end crypto stays between the real client endpoints. Heterogeneous-transport chains work end-to-end — UDP client → TCP federation link → WebSocket client (and any other permutation across UDP / TCP / TLS / WS) all share the same envelope.
+
 **Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebSocketStream (Chromium-only, automatic backpressure), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), plain HTTP/SSE (`GET /drift-sse` downstream + `POST /drift-send` per-packet upstream — fallback for proxies that strip WS upgrades), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
 
 **Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
@@ -57,11 +59,16 @@ drift-core/      sans-io protocol engine (WASM-safe, no tokio, no I/O)
 drift/           native tokio-based stack built on drift-core
   src/
     lib.rs           Transport re-exports
-    main.rs          `drift` CLI (keygen, info, send, listen, relay)
+    main.rs          `drift` CLI (keygen, info, send, listen, relay, bridge)
     io.rs            PacketIO + Listener traits, UDP / TCP / WebSocket / TLS /
                        WebRTC / WebTransport / Memory adapters, inventory-based
                        scheme registry (Transport::bind_url / connect_url /
                        add_listener)
+    cli/bridge.rs    `drift bridge` runner; --listen (repeatable) +
+                       --federate <url>@<pub> (repeatable) for cross-
+                       bridge client routing via Transport::connect_federate
+                       (honest outbound connect on the federate scheme,
+                        not a listener-socket reuse)
     wire_http.rs     `http://` adapter — Server-Sent Events downstream + per-
                        packet POST upstream. Browser-fallback wire when WS is
                        blocked by middleboxes
@@ -76,8 +83,12 @@ drift/           native tokio-based stack built on drift-core
     streams.rs       Reliable streams, NewReno + BBR congestion control
     multipath.rs     RTT-weighted path selection
     transport/
-      mod.rs         Core engine: send/recv, handshake, rekey, resumption
+      mod.rs         Core engine: send/recv, handshake, rekey, resumption,
+                       Transport::add_federated_peer / connect_federate
       mesh.rs        Routing table, beacons, hop-TTL forwarding, self-migration
+      federated.rs   PacketType::Federated envelope codec (130-byte header
+                       carrying target_bridge_pub, target_client_pub,
+                       source_bridge_pub, source_client_pub + opaque payload)
       cookies.rs     Adaptive DoS challenge-response
       path.rs        PathChallenge/Response, connection migration
       peer_shards.rs 16-shard peer table (lock contention reduction)
@@ -227,6 +238,36 @@ bridge.add_listener("tcp://0.0.0.0:9001").await?;
 bridge.add_listener("ws://0.0.0.0:9002").await?;
 // Packets route by identity, not by medium.
 ```
+
+### Federation — bridges that bridge each other
+
+Mesh routing discovers paths via beacons; federation is the explicit-config flavor for the cases where you want bridges in different networks to relay client traffic for each other without burning beacon bandwidth on the long-haul link. Modeled on Matrix and XMPP server-to-server.
+
+Each bridge declares its peer bridges with `--federate <url>@<pub>`. Clients address far-side peers by `(remote_bridge_pub, remote_client_pub)` and the wire envelope is `PacketType::Federated`:
+
+```bash
+# Bridge A listens for clients on UDP, federates to bridge B over TLS:
+drift bridge --listen udp://0.0.0.0:51820 \
+             --federate tls://bridge-b.example:51821@<B_PUBHEX>
+
+# Bridge B listens for clients on WebSocket and TLS for the federation
+# link from A. No --federate on B — incoming envelopes auto-register
+# A in B's federation table for the reply path.
+drift bridge --listen tls://0.0.0.0:51821 \
+             --listen ws://0.0.0.0:51822
+```
+
+A client connected to A reaches a client connected to B with one extra call:
+
+```rust
+let bridge_a = transport.add_peer(bridge_a_pub, bridge_a_addr, Direction::Initiator).await?;
+let remote   = transport.add_federated_peer(remote_client_pub, bridge_a, bridge_b_pub).await?;
+transport.send_data(&remote, b"hello across bridges", 0, 0).await?;
+```
+
+After `add_federated_peer`, normal `send_data(&remote, ...)` is transparently wrapped in a Federated envelope and shipped via `bridge_a`. The receiving client's `recv()` yields a `Received` whose `peer_id` matches the original sender (the bridge is invisible to the application).
+
+Internally, federation uses `Transport::connect_federate(url, pubkey)` to open an honest outbound connection on the URL's scheme — TCP/TLS/WS work as bridge-to-bridge links, not just UDP. Verified end-to-end across UDP, TCP, TLS, and WebSocket combinations (`drift-mosh/tests/mixed_transport_federation_test.sh`).
 
 ### Adding a new transport
 
@@ -416,6 +457,7 @@ Extensive coverage across 60+ integration test files, drift-core unit tests, and
 - **HTTP/SSE fallback**: `drift-wasm-test/test-http.mjs` — WASM client (no WebSocket, no streams, just `EventSource` + `fetch()` POST) handshakes with the native bridge over plain HTTP/1.1. Confirmed: bridge log shows `recv from peer=<wasm-id> 26B: "hello from wasm over http!"`. Routes through anything that proxies HTTP at all.
 - **Onion over Tor**: `drift/tests/onion_self_dial.rs` — gated `#[ignore]`, opt-in via `--features onion`. Hosts an onion service in-process, retrieves its `<base32>.onion` address, dials it back through the live Tor network, runs a full handshake + DATA exchange. Confirmed end-to-end in 117s on a real network.
 - **Multi-bridge Docker mesh**: `docker/two-bridge/` — 12 containers, 90 directed messages, 5 of which cross between two bridges
+- **Federation, heterogeneous transports**: `drift-mosh/tests/mixed_transport_federation_test.sh` — runs a full `drift-mosh --exec` shell command end-to-end across `D1 ──UDP──▶ D2 ──TLS──▶ D3 ──WS──▶ D4` (real Proxmox LXCs). Bytes traverse three different DRIFT transports in one chain; the federation envelope is identical regardless of the underlying wire. Also covered with TCP and WebSocket variants — every connection-oriented bridge link now works via `Transport::connect_federate`.
 - **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh` / `multi_transport_4way.sh` (4/4 transports including TLS pass)
 
 ```bash
