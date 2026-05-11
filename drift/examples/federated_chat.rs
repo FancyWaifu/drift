@@ -128,6 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .send_data(&bridge_handle, b".", 0, 0)
         .await;
 
+    // Register the target client as a federated peer. After
+    // this, plain `send_data(&target_handle, ...)` transparently
+    // routes through the bridge — exactly the API surface every
+    // existing DRIFT tool (drift-mosh, drift-wormhole, etc.) uses.
+    let target_handle = transport
+        .add_federated_peer(target_client_pub, bridge_handle, target_bridge_pub)
+        .await?;
+
     println!(
         "[evt] role=federated-chat my_pub={} bridge={} target_bridge={} target_client={} settle={}s",
         my_hex,
@@ -188,13 +196,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut msg = format!("{}#{} | ", args.send_text, i).into_bytes();
         msg.extend_from_slice(&hex::encode(nonce).into_bytes());
 
-        match transport
-            .send_federated(&bridge_handle, target_bridge_pub, target_client_pub, &msg)
-            .await
-        {
+        // Plain send_data — the federated_via field on the
+        // peer makes this transparently wrap in an envelope
+        // and route through the bridge. No need to know about
+        // federation at the app layer.
+        match transport.send_data(&target_handle, &msg, 0, 0).await {
             Ok(_) => {}
             Err(e) => {
-                return Err(format!("send_federated #{} failed: {}", i, e).into());
+                return Err(format!("send_data #{} failed: {}", i, e).into());
             }
         }
         println!("[evt] sent #{} bytes={}", i + 1, msg.len());
