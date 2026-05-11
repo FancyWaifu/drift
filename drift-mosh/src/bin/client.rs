@@ -169,7 +169,17 @@ async fn run() -> Result<()> {
             .await
             .context("add_peer(bridge) failed")?;
         // Warmup byte to kick the HELLO with the local bridge.
+        // add_peer alone never initiates a handshake — send_data
+        // does. The first session we need for federation is the
+        // client↔bridge one (federated peers ride on top of it).
         let _ = t.send_data(&bridge_handle, b".", 0, 0).await;
+        // Wait briefly for the bridge HELLO/HELLO_ACK round-trip.
+        // Without this, the immediate `mgr.open(server_peer)`
+        // below would race the bridge handshake and fail with
+        // `UnknownPeer` from send_typed (which requires the
+        // bridge to be Established before it can carry a
+        // Federated envelope).
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let server_peer = t
             .add_federated_peer(server_pub, bridge_handle, target_bridge_pub)
             .await
