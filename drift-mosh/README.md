@@ -67,6 +67,17 @@ Options:
                                 udp://host:port  (UDP, the default)
                                 tcp://host:port  (TCP — firewalled networks)
                                 ws://host:port   (WebSocket)
+                                tls://host:port  (TLS-wrapped TCP)
+      --bridge <URL@PUB>      Reach the server through a DRIFT bridge instead
+                              of a direct connection. URL is the bridge's
+                              listen URL; PUB is its pubkey.
+      --target-bridge <PUB>   Pubkey of the bridge the server is connected to.
+                              Required when the server is on a different bridge
+                              from the client (cross-bridge federation).
+      --exec <CMD>            Non-interactive mode: run CMD in the remote shell,
+                              drain its output, exit. Skips raw-mode; useful for
+                              scripts and CI.
+      --exec-timeout <SECS>   Cap --exec output draining at SECS seconds [default: 5]
       --remote-server-path <PATH>
                               Path to drift-mosh-server on the remote host
 ```
@@ -89,6 +100,43 @@ drift-mosh-client --server-pub <pub> --server-addr ws://host:443
 ```
 
 A single drift-mosh-server runs over one transport at a time — sessions are point-to-point, so simultaneous-multi-bind isn't useful here. (drift-http needs that pattern; drift-mosh doesn't.) The transport choice is in the URL the launcher persists, so `drift-mosh user@host` Just Works once the server is configured.
+
+### Federation — reaching a server through one or two bridges
+
+When client and server can't directly reach each other — different networks, NAT on both sides, firewalls that block everything except outbound HTTPS — DRIFT bridges relay the session. drift-mosh speaks federation natively via two flags:
+
+```bash
+# Server: don't bind a listener; instead connect out to a bridge.
+drift-mosh-server --bridge tcp://bridge.example:51820@<BRIDGE_PUB> --shell /bin/sh
+
+# Client (one bridge between us):
+drift-mosh-client --server-pub <SERVER_PUB> \
+                  --bridge udp://bridge.example:51820@<BRIDGE_PUB>
+
+# Client (two bridges — client and server on different bridges that
+# --federate to each other):
+drift-mosh-client --server-pub <SERVER_PUB> \
+                  --bridge udp://bridge-a:51820@<BRIDGE_A_PUB> \
+                  --target-bridge <BRIDGE_B_PUB>
+```
+
+The two bridges talk over their `--federate` link, whichever transport they were configured with. The wire from client → bridge-A, bridge-A → bridge-B, and bridge-B → server can all be different DRIFT transports — `mixed_transport_federation_test.sh` runs `UDP → TLS → WebSocket` end-to-end and gets a real shell prompt back.
+
+### Non-interactive shells (`--exec`)
+
+For scripts and CI, `--exec` runs one command and returns:
+
+```bash
+$ drift-mosh-client --no-ssh --server-pub <pub> --server-addr ws://host:443 \
+    --exec 'uname -a; whoami' --exec-timeout 5
+DRIFT_MOSH_SESSION_ID=1f212ad0a9f0d828acf0c17f5a4f8f31
+# uname -a; whoami
+Linux drift-4 6.8.12-9-pve ... x86_64
+root
+# exit
+```
+
+Skips raw-mode entry (works fine without a tty), pipes `cmd\nexit\n` to the pty, and drains output until the deadline or the shell exits. Combines with `--bridge` / `--target-bridge` for end-to-end federation tests.
 
 ### Config file
 
@@ -182,6 +230,14 @@ cd drift-mosh/tests
 # Session/reattach protocol — session_id is well-formed and
 # round-trips through Attach/AttachAck.
 ./reattach.exp
+
+# Cross-transport federation: drift-mosh shell session through
+# two bridges, each leg of the chain on a different DRIFT
+# transport. Needs four reachable Linux hosts; the script
+# defaults to a Proxmox LXC quad at 192.168.50.{52,168,253,33}
+# but the IPs are at the top of the file. Verifies
+# UDP → TLS → WS round-trips a real shell command.
+./mixed_transport_federation_test.sh
 ```
 
 Plus the scrollback unit tests:

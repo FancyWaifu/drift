@@ -99,19 +99,22 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         }
     }
 
-    // Federation peers: same wire setup as --peer, *plus* a
-    // registration into the federation table. The recv side's
-    // Federated handler consults that table when forwarding
-    // envelopes between bridges.
+    // Federation peers: open a real outbound connection on the
+    // URL's scheme and pin the peer to that interface. Reusing the
+    // bridge's primary listener socket — like the --peer path does —
+    // only works for UDP (one shared socket for in and out). For
+    // TCP/TLS/WS, a listener can't initiate outbound, so we need an
+    // honest connect on the federate's own scheme. `connect_federate`
+    // does the connect + add_interface + add_peer + interface_id pin
+    // + federation_table insert in one shot.
     if !args.federates.is_empty() {
         eprintln!("│ federation peers:");
         for spec in &args.federates {
-            let (addr, pubkey) = parse_peer_spec(spec)?;
+            let (url, pubkey) = parse_federate_spec(spec)?;
             let handle = transport
-                .add_peer(pubkey, addr, Direction::Initiator)
+                .connect_federate(&url, pubkey)
                 .await
-                .with_context(|| format!("add_peer for federate {}", spec))?;
-            transport.register_federation_peer(pubkey, handle);
+                .with_context(|| format!("connect_federate for {}", spec))?;
             outbound_handles.push(handle);
             eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
         }
@@ -238,6 +241,32 @@ fn parse_peer_spec(spec: &str) -> Result<(SocketAddr, [u8; 32])> {
         .parse()
         .with_context(|| format!("parse host:port from {:?}", url))?;
     Ok((addr, pubkey))
+}
+
+/// Parse a `--federate <url>@<pubkey-hex>` spec into a (URL,
+/// 32-byte pubkey) pair. Unlike `parse_peer_spec`, this *preserves*
+/// the URL scheme — `connect_federate` uses it to decide how to
+/// open the outbound connection (UDP socket, TCP connect, TLS
+/// connect, WS upgrade, …).
+fn parse_federate_spec(spec: &str) -> Result<(String, [u8; 32])> {
+    let (url, pub_hex) = spec.split_once('@').ok_or_else(|| {
+        anyhow!(
+            "--federate spec {:?} missing '@'; format is <url>@<pubkey-hex>",
+            spec
+        )
+    })?;
+    let pubkey_bytes = hex::decode(pub_hex)
+        .with_context(|| format!("hex decode of pubkey in {:?}", spec))?;
+    if pubkey_bytes.len() != 32 {
+        bail!(
+            "--federate {} pubkey must be 64 hex chars (32 bytes), got {}",
+            spec,
+            pubkey_bytes.len()
+        );
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&pubkey_bytes);
+    Ok((url.to_string(), pubkey))
 }
 
 /// Best-effort hostname detection. `$HOSTNAME` is set on most

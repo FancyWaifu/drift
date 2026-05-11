@@ -162,6 +162,67 @@ drift.toml — you're done with setup.
 
 ---
 
+## 6-minute quickstart: federation between two bridges
+
+Same shape as the one-bridge setup, but with two bridges that
+`--federate` to each other so clients on different bridges can
+reach each other by pubkey. Useful when you have populations of
+clients on two different networks (home + office, two regions,
+two clouds) and you don't want either network's clients to need
+direct connectivity to the other side.
+
+```bash
+# ─── On box A (bridge-A — needs a stable IP) ──────────────────────
+sudo drift-config init
+sudo drift-config keygen boxa --endpoint "udp://0.0.0.0:51820"
+# → bridge-A's pubkey: <PUB_A>
+
+# ─── On box B (bridge-B — also stable IP) ─────────────────────────
+sudo drift-config init
+sudo drift-config keygen boxb --endpoint "tls://0.0.0.0:51821" \
+                              --endpoint "ws://0.0.0.0:51822"
+# → bridge-B's pubkey: <PUB_B>
+
+# ─── Cross-register so each side knows about the other ───────────
+# On box A:
+sudo drift-config peer add boxb --pubkey <PUB_B> \
+  --endpoint "tls://<box-b-host>:51821"
+# On box B (no peer needed — incoming envelopes auto-register A).
+
+# ─── Start the bridges ────────────────────────────────────────────
+# Box A: federates to bridge-B over TLS (the connection-oriented
+#         link survives most middleboxes).
+sudo drift bridge --listen udp://0.0.0.0:51820 \
+                  --federate tls://<box-b-host>:51821@<PUB_B>
+
+# Box B: just listens — A's --federate connects in, and on the
+#         first incoming Federated envelope B auto-registers A in
+#         its own federation table for the reply path.
+sudo drift bridge --listen tls://0.0.0.0:51821 \
+                  --listen ws://0.0.0.0:51822
+```
+
+Any DRIFT client connected to bridge-A (over UDP) can now reach
+any client on bridge-B (over WS) by pubkey:
+
+```bash
+# drift-mosh, talking from a client on bridge-A to a server on bridge-B
+drift-mosh-client --server-pub <server_pub> \
+                  --bridge udp://<box-a-host>:51820@<PUB_A> \
+                  --target-bridge <PUB_B>
+```
+
+Bridges only ever see ciphertext + the four pubkeys in the
+envelope header (source bridge, source client, target bridge,
+target client) — DRIFT's end-to-end crypto stays between the
+real client endpoints.
+
+`drift-config peer add` / `drift bridge` don't yet have explicit
+`--federate` wiring through `drift.toml`; pass `--federate` to
+`drift bridge` on the command line for now.
+
+---
+
 ## 10-minute quickstart: 3-node VPN
 
 A full drift-vpn deployment using drift-config:

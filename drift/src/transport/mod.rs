@@ -1241,6 +1241,52 @@ impl Transport {
         t.insert(bridge_pub, bridge_peer_id);
     }
 
+    /// Establish an outbound federation link to another bridge over
+    /// an arbitrary transport (UDP/TCP/WS/TLS/…).  Unlike `add_peer`
+    /// — which assumes the existing primary interface can reach the
+    /// remote — this method actually *connects* using the URL's
+    /// scheme, attaches the resulting connection as a new interface
+    /// on this transport, and pins the peer's `interface_id` to it.
+    ///
+    /// This is what bridges should call for every `--federate <url>`
+    /// flag: it works for connection-oriented transports (TCP, TLS,
+    /// WS) where you can't legitimately send through a listener
+    /// socket. For UDP, it falls back to the equivalent of the old
+    /// "reuse primary socket" path by attaching the connector's
+    /// UDP socket as an additional interface — slightly less
+    /// efficient than reusing the primary for UDP-only deployments
+    /// but symmetric, simpler, and harmless.
+    ///
+    /// Returns the `PeerId` of the federation peer, which is also
+    /// recorded in the federation table for cross-bridge envelope
+    /// forwarding.
+    pub async fn connect_federate(
+        &self,
+        url: &str,
+        target_pubkey: [u8; STATIC_KEY_LEN],
+    ) -> Result<PeerId> {
+        let (io, addr) = crate::io::make_connector(url)
+            .await
+            .map_err(DriftError::Io)?;
+        let scheme = url
+            .find("://")
+            .map(|i| &url[..i])
+            .unwrap_or("udp");
+        let iface_idx = self.add_interface(format!("{}-federate-out", scheme), io);
+        let peer_id = self.add_peer(target_pubkey, addr, Direction::Initiator).await?;
+        // Pin the peer's outbound interface to the newly-attached
+        // connector, since interface 0 (the primary) may be a TCP
+        // listener placeholder or a different scheme's socket.
+        {
+            let mut peers = self.inner.peers.lock_for(&peer_id).await;
+            if let Some(p) = peers.get_mut(&peer_id) {
+                p.interface_id = iface_idx;
+            }
+        }
+        self.register_federation_peer(target_pubkey, peer_id);
+        Ok(peer_id)
+    }
+
     /// Register a remote client peer reachable via federation.
     /// After this call, normal `send_data(&peer_id, ...)` to
     /// the returned id transparently wraps payloads in a
@@ -2394,6 +2440,21 @@ impl Inner {
         //     target client over our local session with them.
         if env.target_bridge_pub == our_pub {
             let client_peer_id = derive_peer_id(&env.target_client_pub);
+
+            // Auto-register the source bridge in our federation
+            // table so the *reply path* works without requiring
+            // the operator to configure a symmetric `--federate`
+            // on both sides. Mirrors the source-client auto-
+            // register in case (1): seeing a Federated envelope
+            // from a peer is evidence enough that the peer is a
+            // bridge willing to relay our traffic back. Only do
+            // this when accept_any_peer is set — same gate as the
+            // other auto-register paths.
+            if self.config.accept_any_peer {
+                let mut t = self.federation_table.lock().unwrap();
+                t.entry(env.source_bridge_pub).or_insert(peer_id);
+            }
+
             // Re-build the envelope unchanged; only the outer
             // DRIFT envelope (src, dst, encryption) changes.
             let re_envelope = federated::build(
