@@ -107,16 +107,77 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
     // honest connect on the federate's own scheme. `connect_federate`
     // does the connect + add_interface + add_peer + interface_id pin
     // + federation_table insert in one shot.
+    //
+    // Symmetric `--federate` is required for bidirectional federation
+    // (the security model — see Transport::handle_federated). For
+    // TCP/TLS/WS pairs this creates a startup race: both bridges try
+    // to connect to each other before either is listening. We tolerate
+    // initial connect failure by spawning a background retry task,
+    // so eventually-up-on-both-sides connects without operator
+    // intervention.
     if !args.federates.is_empty() {
         eprintln!("│ federation peers:");
         for spec in &args.federates {
             let (url, pubkey) = parse_federate_spec(spec)?;
-            let handle = transport
-                .connect_federate(&url, pubkey)
-                .await
-                .with_context(|| format!("connect_federate for {}", spec))?;
-            outbound_handles.push(handle);
-            eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
+            match transport.connect_federate(&url, pubkey).await {
+                Ok(handle) => {
+                    outbound_handles.push(handle);
+                    eprintln!(
+                        "│   {} ({})",
+                        spec,
+                        &hex::encode(pubkey)[..16]
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "│   {} ({}) — initial connect failed ({}); \
+                         will retry in background",
+                        spec,
+                        &hex::encode(pubkey)[..16],
+                        e
+                    );
+                    let t = transport.clone();
+                    let url_owned = url.clone();
+                    tokio::spawn(async move {
+                        let mut backoff =
+                            std::time::Duration::from_millis(500);
+                        let max = std::time::Duration::from_secs(10);
+                        loop {
+                            tokio::time::sleep(backoff).await;
+                            match t.connect_federate(&url_owned, pubkey).await {
+                                Ok(handle) => {
+                                    tracing::info!(
+                                        target = %url_owned,
+                                        "federation peer connected after retry"
+                                    );
+                                    // Now run the keep-alive ping
+                                    // loop for this peer inline,
+                                    // since the outer for-loop has
+                                    // already moved past it.
+                                    let mut ticker = tokio::time::interval(
+                                        std::time::Duration::from_secs(2),
+                                    );
+                                    loop {
+                                        ticker.tick().await;
+                                        let _ = t
+                                            .send_data(&handle, b".", 0, 0)
+                                            .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        target = %url_owned,
+                                        error = %e,
+                                        "federation peer still unreachable; \
+                                         will retry"
+                                    );
+                                    backoff = (backoff * 2).min(max);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
         }
     }
 

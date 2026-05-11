@@ -44,33 +44,40 @@ scp -o BatchMode=yes $WORKDIR/d3.key root@$D3:/tmp/id.key >/dev/null 2>&1
 scp -o BatchMode=yes $WORKDIR/d1.hex root@$D1:/tmp/id.hex >/dev/null 2>&1
 scp -o BatchMode=yes $WORKDIR/d4.hex root@$D4:/tmp/id.hex >/dev/null 2>&1
 
-# ─── D3 bridge first: passive listener on TCP+WS ──────────────────
-# (no --federate so it doesn't try to connect out before D2 binds)
+# Federation is symmetric: BOTH bridges --federate to each other.
+# This matches Matrix / XMPP server-to-server trust — the only
+# model that survives the source-authentication check in
+# handle_federated (a forged envelope from an unrelated client
+# wouldn't pass).  The startup race (each side trying to connect
+# to the other's TCP listener before it's bound) is handled by
+# bridge.rs: an initial connect_federate failure spawns a
+# background retry task with exponential backoff, so the order
+# of bridge starts doesn't matter.
 echo ""
-echo "=== D3 bridge: listens TCP:51821 + WS:51822 (no outbound)"
+echo "=== D3 bridge: listens TCP:51821 + WS:51822, federates TCP→D2"
 ssh -o BatchMode=yes root@$D3 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/id.key bridge \
   --listen tcp://0.0.0.0:51821 \
   --listen ws://0.0.0.0:51822 \
+  --federate tcp://$D2:51821@$PUB_D2 \
   > /tmp/bridge.log 2>&1 &"
 sleep 2
 ssh -o BatchMode=yes root@$D3 'cat /tmp/bridge.log' | sed 's/^/  /'
 
-# ─── D2 bridge: UDP for D1, TCP for D3 federation ─────────────────
-# Connects out to D3:51821 over TCP for the federation link.
-# D3 auto-registers D2 in its federation table on first envelope.
+# ─── D2 bridge: UDP for D1, TCP listener AND federate for D3 ────
 echo ""
-echo "=== D2 bridge: listens UDP:51820, federates TCP→D3"
+echo "=== D2 bridge: listens UDP:51820 + TCP:51821, federates TCP→D3"
 ssh -o BatchMode=yes root@$D2 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/id.key bridge \
   --listen udp://0.0.0.0:51820 \
+  --listen tcp://0.0.0.0:51821 \
   --federate tcp://$D3:51821@$PUB_D3 \
   > /tmp/bridge.log 2>&1 &"
 sleep 2
 ssh -o BatchMode=yes root@$D2 'cat /tmp/bridge.log' | sed 's/^/  /'
 
-# ─── Wait for bridge↔bridge TCP handshake to settle ─────────────
+# ─── Wait for bridge↔bridge handshakes to settle ────────────────
 echo ""
-echo "=== waiting 5s for bridge↔bridge TCP handshake"
-sleep 5
+echo "=== waiting 6s for bridge↔bridge handshakes (both sides retry)"
+sleep 6
 
 # ─── D4 drift-mosh-server, federated to D3 over WS ──────────────
 echo ""

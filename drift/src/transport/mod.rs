@@ -274,6 +274,11 @@ pub(crate) struct MetricsInner {
     pub(crate) pongs_sent: AtomicU64,
     pub(crate) pongs_received: AtomicU64,
     pub(crate) amplification_blocked: AtomicU64,
+    /// Federated envelopes dropped because the envelope's
+    /// `source_client_pub` / `source_bridge_pub` didn't match the
+    /// session-authenticated sender. Counts identity-spoofing
+    /// attempts at the source bridge.
+    pub(crate) federation_spoof_drops: AtomicU64,
     pub(crate) batched_sends: AtomicU64,
     pub(crate) handshakes_inflight: std::sync::atomic::AtomicUsize,
     /// Packets dropped because the destination peer wasn't
@@ -322,6 +327,7 @@ pub struct Metrics {
     pub amplification_blocked: u64,
     pub batched_sends: u64,
     pub unknown_peer_drops: u64,
+    pub federation_spoof_drops: u64,
 }
 
 /// One outbound packet for `Transport::send_data_batch_qos`.
@@ -987,6 +993,9 @@ impl Transport {
             amplification_blocked: m.amplification_blocked.load(Ordering::Relaxed),
             batched_sends: m.batched_sends.load(Ordering::Relaxed),
             unknown_peer_drops: m.unknown_peer_drops.load(Ordering::Relaxed),
+            federation_spoof_drops: m
+                .federation_spoof_drops
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -1411,6 +1420,39 @@ impl Transport {
     /// observability and tests.
     pub fn federation_peer_count(&self) -> usize {
         self.inner.federation_table.lock().unwrap().len()
+    }
+
+    /// Returns true if the given bridge pubkey is currently in the
+    /// federation table. For tests + observability — production
+    /// code shouldn't need to introspect routing tables directly.
+    #[doc(hidden)]
+    pub fn federation_table_contains(&self, bridge_pub: &[u8; 32]) -> bool {
+        self.inner
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(bridge_pub)
+    }
+
+    /// Test-only escape hatch: ship arbitrary bytes through an
+    /// established session, tagged as `PacketType::Federated`.
+    /// Normal callers must use `send_federated`, which forces
+    /// `source_client_pub` to the local identity. This method
+    /// exists so adversarial-federation tests can construct
+    /// envelopes with forged fields and verify the protocol's
+    /// defenses (or document the lack of them).
+    ///
+    /// Doc-hidden + `__debug` prefix so it doesn't appear in
+    /// the regular API surface or rust-analyzer autocomplete.
+    #[doc(hidden)]
+    pub async fn __debug_send_federated_envelope(
+        &self,
+        via_bridge_peer: &PeerId,
+        envelope: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .send_typed(via_bridge_peer, PacketType::Federated, envelope)
+            .await
     }
 
     /// Batched variant: build every DATA packet in the batch
@@ -2370,6 +2412,62 @@ impl Inner {
         let env = federated::parse(&payload_bytes)?;
         let our_pub = self.identity.public_bytes();
 
+        // ── SECURITY: authenticate the envelope's `source_*` claims ──
+        //
+        // The outer DRIFT packet's session crypto authenticates
+        // *who handed us this envelope* (header.src_id). The four
+        // pubkeys inside the envelope are application-supplied
+        // bytes; without a check here, any client of an
+        // `accept_any_peer` bridge could ship envelopes claiming
+        // to originate from any pubkey and route them to anyone.
+        //
+        // Threat model: trusted bridges (peers explicitly added
+        // to our federation table via `--federate` or auto-
+        // registered on a prior in-bound envelope) are part of
+        // the TCB and may set source_* freely — they're relaying
+        // envelopes from clients they themselves authenticate.
+        // Everyone else can only originate envelopes that name
+        // themselves as the source.
+        //
+        // Look up the sender's pubkey in the federation_table by
+        // KEY (O(1) hash lookup; pubkeys are keys, peer_ids are
+        // values). If present, sender is a bridge. Otherwise the
+        // sender is a client and must pass the source-identity
+        // check below.
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let sender_is_trusted_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&sender_pub);
+        if !sender_is_trusted_bridge {
+            // Sender is a client (or an unknown bridge — same
+            // trust level). Their envelopes must name themselves
+            // as the source client AND name us as the source
+            // bridge (we're the only bridge they're connected to
+            // from our point of view).
+            if env.source_client_pub != sender_pub
+                || env.source_bridge_pub != our_pub
+            {
+                self.metrics
+                    .federation_spoof_drops
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    sender = ?sender_pub,
+                    claimed_client = ?env.source_client_pub,
+                    claimed_bridge = ?env.source_bridge_pub,
+                    "federated: dropped envelope with forged source fields"
+                );
+                return Err(DriftError::AuthFailed);
+            }
+        }
+
         // (1) Final delivery to us as a client.
         if env.target_client_pub == our_pub {
             // Set peer_id to the *originating client's* id (not
@@ -2441,19 +2539,19 @@ impl Inner {
         if env.target_bridge_pub == our_pub {
             let client_peer_id = derive_peer_id(&env.target_client_pub);
 
-            // Auto-register the source bridge in our federation
-            // table so the *reply path* works without requiring
-            // the operator to configure a symmetric `--federate`
-            // on both sides. Mirrors the source-client auto-
-            // register in case (1): seeing a Federated envelope
-            // from a peer is evidence enough that the peer is a
-            // bridge willing to relay our traffic back. Only do
-            // this when accept_any_peer is set — same gate as the
-            // other auto-register paths.
-            if self.config.accept_any_peer {
-                let mut t = self.federation_table.lock().unwrap();
-                t.entry(env.source_bridge_pub).or_insert(peer_id);
-            }
+            // (Auto-register removed in the same change that
+            //  introduced the source-authentication check above.
+            //  Auto-registering an arbitrary sender as a bridge
+            //  let unrelated clients inject routing entries into
+            //  the federation table — and even with the sender-
+            //  matches-claim restriction, the resulting "self-
+            //  attested" bridge could still spoof source_client_pub
+            //  for envelopes it relayed back, defeating the whole
+            //  point of the source check.
+            //
+            //  Federation requires *symmetric* --federate config on
+            //  both bridges, matching Matrix / XMPP server-to-server
+            //  trust. See drift-config/README.md.)
 
             // Re-build the envelope unchanged; only the outer
             // DRIFT envelope (src, dst, encryption) changes.
