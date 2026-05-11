@@ -232,6 +232,12 @@ pub struct Received {
     /// in that case will be the bridge's id. `None` for normal
     /// (non-federated) packets.
     pub federated_from: Option<[u8; 32]>,
+    /// For federated packets, the 32-byte pubkey of the bridge
+    /// the originating client is connected to. Lets a receiver
+    /// auto-route a reply by calling `add_federated_peer(
+    /// federated_from, my_bridge_handle, federated_via_bridge)`
+    /// without needing the sender's bridge info out-of-band.
+    pub federated_via_bridge: Option<[u8; 32]>,
 }
 
 /// Runtime counters exposed via `Transport::metrics()`.
@@ -1330,9 +1336,19 @@ impl Transport {
             });
         }
         let source_client_pub = self.inner.identity.public_bytes();
+        // The bridge we're going through IS our source bridge,
+        // by definition. Look up its pubkey for the envelope.
+        let source_bridge_pub = {
+            let peers = self.inner.peers.lock_for(via_bridge_peer).await;
+            peers
+                .get(via_bridge_peer)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
         let envelope = federated::build(
             &target_bridge_pub,
             &target_client_pub,
+            &source_bridge_pub,
             &source_client_pub,
             payload,
         );
@@ -1930,9 +1946,19 @@ impl Inner {
             // federated sends; documented limitation.
             let _ = (deadline_ms, coalesce_group);
             let source_client_pub = self.identity.public_bytes();
+            // Source bridge pubkey = the bridge we're routing
+            // through. Look it up from the peer table.
+            let source_bridge_pub = {
+                let peers = self.peers.lock_for(&via_bridge).await;
+                peers
+                    .get(&via_bridge)
+                    .map(|p| p.peer_static_pub)
+                    .ok_or(DriftError::UnknownPeer)?
+            };
             let envelope = federated::build(
                 &target_bridge_pub,
                 &target_client_pub,
+                &source_bridge_pub,
                 &source_client_pub,
                 payload,
             );
@@ -2309,6 +2335,50 @@ impl Inner {
             // remote client, even though the bridge actually
             // handed us the envelope on the wire.
             let source_peer_id = derive_peer_id(&env.source_client_pub);
+
+            // Auto-register the source as a federated peer when
+            // accept_any_peer is set. Mirrors how an inbound
+            // HELLO with accept_any_peer=true auto-adds a direct
+            // peer: the server can reply via send_data(...) to
+            // the same peer_id and the federation short-circuit
+            // routes the response back through the bridge that
+            // delivered the original packet. Without this,
+            // server-style apps (drift-mosh-server, etc.) would
+            // need to manually call add_federated_peer on every
+            // first-contact, which defeats the "federation is
+            // transparent" promise for the recv-and-reply case.
+            //
+            // `peer_id` (the outer-packet src) IS our local
+            // bridge — the one that delivered this envelope —
+            // so it's also the correct `via_bridge` for the
+            // reply path.
+            if self.config.accept_any_peer {
+                let mut peers = self.peers.lock_for(&source_peer_id).await;
+                match peers.get_mut(&source_peer_id) {
+                    Some(existing) if existing.federated_via.is_none() => {
+                        existing.federated_via = Some(peer_id);
+                        existing.federated_target_bridge_pub =
+                            Some(env.source_bridge_pub);
+                    }
+                    None => {
+                        let placeholder: SocketAddr =
+                            "0.0.0.0:0".parse().expect("constant parses");
+                        let mut p = Peer::new(
+                            source_peer_id,
+                            placeholder,
+                            env.source_client_pub,
+                            Direction::Responder,
+                        );
+                        p.federated_via = Some(peer_id);
+                        p.federated_target_bridge_pub =
+                            Some(env.source_bridge_pub);
+                        p.auto_registered = true;
+                        peers.insert(p);
+                    }
+                    _ => {}
+                }
+            }
+
             return Ok(Some(Received {
                 peer_id: source_peer_id,
                 seq: header.seq,
@@ -2316,6 +2386,7 @@ impl Inner {
                 payload: env.payload.to_vec(),
                 ecn_ce,
                 federated_from: Some(env.source_client_pub),
+                federated_via_bridge: Some(env.source_bridge_pub),
             }));
         }
 
@@ -2328,6 +2399,7 @@ impl Inner {
             let re_envelope = federated::build(
                 &env.target_bridge_pub,
                 &env.target_client_pub,
+                &env.source_bridge_pub,
                 &env.source_client_pub,
                 env.payload,
             );
@@ -2355,6 +2427,7 @@ impl Inner {
             let re_envelope = federated::build(
                 &env.target_bridge_pub,
                 &env.target_client_pub,
+                &env.source_bridge_pub,
                 &env.source_client_pub,
                 env.payload,
             );
@@ -2618,6 +2691,7 @@ impl Inner {
             payload,
             ecn_ce,
             federated_from: None,
+            federated_via_bridge: None,
         }))
     }
 
@@ -3540,6 +3614,7 @@ impl Inner {
                     payload,
                     ecn_ce,
                     federated_from: None,
+                    federated_via_bridge: None,
                 }),
                 probe,
                 just_established,

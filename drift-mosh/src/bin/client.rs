@@ -61,6 +61,23 @@ struct Cli {
     /// multiple loopback addresses or pinning a specific NIC.
     #[clap(long, default_value = "0.0.0.0:0")]
     bind: String,
+
+    /// Reach the server via a federated bridge instead of a
+    /// direct UDP/TCP/WS connection. Format:
+    /// `<url>@<bridge-pubkey-hex>`. When set:
+    ///   * `--server-addr` is ignored for connection (we
+    ///     connect to the bridge instead).
+    ///   * `--target-bridge` must also be set — that's the
+    ///     pubkey of the bridge the SERVER is connected to.
+    ///   * `--server-pub` is still required (the server's
+    ///     identity pubkey, used for end-to-end addressing).
+    #[clap(long)]
+    bridge: Option<String>,
+
+    /// Pubkey of the bridge the server is connected to.
+    /// Required when `--bridge` is set; ignored otherwise.
+    #[clap(long)]
+    target_bridge: Option<String>,
 }
 
 struct RawModeGuard;
@@ -119,16 +136,60 @@ async fn run() -> Result<()> {
 
     // `--bind` is an unused legacy flag retained for old scripts.
     let _ = &cli.bind;
-    let (transport, server_addr) =
-        Transport::connect_url(&server_addr_with_scheme, identity, TransportConfig::default())
-            .await
-            .with_context(|| format!("connecting to {}", server_addr_with_scheme))?;
-    let transport = Arc::new(transport);
 
-    let server_peer = transport
-        .add_peer(server_pub, server_addr, Direction::Initiator)
+    // Two paths:
+    //
+    //   * Direct — connect_url to server_addr, add_peer(server_pub).
+    //     Original behavior.
+    //   * Federated — connect_url to bridge, add_peer(bridge_pub),
+    //     warmup, then add_federated_peer(server_pub) so subsequent
+    //     send_data on `server_peer` transparently rides through
+    //     the bridge.
+    let (transport, server_peer) = if let Some(bridge_spec) = cli.bridge.as_deref() {
+        let target_bridge_hex = cli.target_bridge.as_deref().ok_or_else(|| {
+            anyhow!("--bridge requires --target-bridge (the server's bridge pubkey)")
+        })?;
+        let (bridge_url, bridge_pub_hex) = bridge_spec
+            .split_once('@')
+            .ok_or_else(|| anyhow!("--bridge expected <url>@<pubkey-hex>"))?;
+        let bridge_pub = decode_hex32(bridge_pub_hex)
+            .context("--bridge pubkey")?;
+        let target_bridge_pub = decode_hex32(target_bridge_hex)
+            .context("--target-bridge pubkey")?;
+        let (t, bridge_addr) = Transport::connect_url(
+            bridge_url,
+            identity,
+            TransportConfig::default(),
+        )
         .await
-        .context("failed to register server peer (is the address right?)")?;
+        .with_context(|| format!("connecting to bridge {}", bridge_url))?;
+        let t = Arc::new(t);
+        let bridge_handle = t
+            .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
+            .await
+            .context("add_peer(bridge) failed")?;
+        // Warmup byte to kick the HELLO with the local bridge.
+        let _ = t.send_data(&bridge_handle, b".", 0, 0).await;
+        let server_peer = t
+            .add_federated_peer(server_pub, bridge_handle, target_bridge_pub)
+            .await
+            .context("add_federated_peer(server) failed")?;
+        (t, server_peer)
+    } else {
+        let (t, server_addr) = Transport::connect_url(
+            &server_addr_with_scheme,
+            identity,
+            TransportConfig::default(),
+        )
+        .await
+        .with_context(|| format!("connecting to {}", server_addr_with_scheme))?;
+        let t = Arc::new(t);
+        let p = t
+            .add_peer(server_pub, server_addr, Direction::Initiator)
+            .await
+            .context("failed to register server peer (is the address right?)")?;
+        (t, p)
+    };
 
     let mgr = StreamManager::bind(transport.clone()).await;
 
@@ -179,13 +240,24 @@ async fn run() -> Result<()> {
     // Auto-record the server in our local contacts under the
     // petname it advertised (or `peer-<pubkey-prefix>` if it
     // didn't advertise one). Best-effort: contacts I/O failure
-    // never breaks the session.
-    if let Ok(mut book) = drift::contacts::Contacts::load_default() {
-        if book
-            .record(server_pub, server_addr, server_name.as_deref())
-            .is_ok()
-        {
-            let _ = book.save();
+    // never breaks the session. Skipped for federated mode —
+    // contacts store host:port addresses and a federated server
+    // doesn't have one (it's reachable only via its bridge).
+    if cli.bridge.is_none() {
+        if let Ok(mut book) = drift::contacts::Contacts::load_default() {
+            let server_addr: std::net::SocketAddr =
+                server_addr_with_scheme
+                    .splitn(2, "://")
+                    .nth(1)
+                    .unwrap_or(&server_addr_with_scheme)
+                    .parse()
+                    .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+            if book
+                .record(server_pub, server_addr, server_name.as_deref())
+                .is_ok()
+            {
+                let _ = book.save();
+            }
         }
     }
 
@@ -381,6 +453,17 @@ fn resolve_target(server_addr_arg: &str, server_pub_arg: Option<&str>) -> Result
         format!("udp://{}", server_addr_arg)
     };
     Ok((pub_bytes, url))
+}
+
+/// Decode a 64-hex-char string into a 32-byte array.
+fn decode_hex32(s: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(s).context("not valid hex")?;
+    if bytes.len() != 32 {
+        return Err(anyhow!("expected 32 bytes (64 hex chars), got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 fn parse_session_id(opt: Option<&str>) -> Result<[u8; 16]> {
