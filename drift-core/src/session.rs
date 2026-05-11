@@ -199,6 +199,19 @@ pub struct Peer {
     /// updated on path migration. The send path uses this
     /// to pick the right adapter for outgoing traffic.
     pub interface_id: usize,
+    /// Federated routing: when `Some(bridge_peer_id)`, the
+    /// transport's `send_data` reaches this peer indirectly
+    /// by wrapping the payload in a `PacketType::Federated`
+    /// envelope and shipping that to the named bridge. The
+    /// bridge in turn looks the envelope up against its
+    /// federation table and forwards. Mutually exclusive with
+    /// `via_mesh` (federation is *direct* pubkey-routing
+    /// through configured bridges, not beacon-driven mesh).
+    pub federated_via: Option<PeerId>,
+    /// Target bridge's static public key — the `target_bridge_pub`
+    /// field that goes into the federated envelope. Only set
+    /// when `federated_via` is `Some`.
+    pub federated_target_bridge_pub: Option<[u8; 32]>,
 }
 
 /// Client-side state for a 1-RTT resumption attempt currently
@@ -255,6 +268,8 @@ impl Peer {
             unauth_bytes_rx: 0,
             unauth_bytes_tx: 0,
             interface_id: 0,
+            federated_via: None,
+            federated_target_bridge_pub: None,
         }
     }
 

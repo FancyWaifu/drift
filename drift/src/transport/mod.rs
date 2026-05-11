@@ -1235,6 +1235,70 @@ impl Transport {
         t.insert(bridge_pub, bridge_peer_id);
     }
 
+    /// Register a remote client peer reachable via federation.
+    /// After this call, normal `send_data(&peer_id, ...)` to
+    /// the returned id transparently wraps payloads in a
+    /// `PacketType::Federated` envelope and ships them via
+    /// `via_bridge`. The receiver's `Transport::recv()` will
+    /// yield a `Received` whose `peer_id` matches what this
+    /// method returns, so existing tools (drift-mosh,
+    /// drift-wormhole, drift-http, …) that use the send_data /
+    /// recv API work over federation without any changes —
+    /// federation is a routing concern, not an app concern.
+    ///
+    /// Caller contract:
+    /// * `via_bridge` must already be in the peer table and
+    ///   have an Established session (the local bridge link).
+    /// * `target_bridge_pub` is the pubkey of the *remote*
+    ///   bridge the target client is connected to; goes into
+    ///   the envelope's `target_bridge_pub` slot for the local
+    ///   bridge's federation-table lookup.
+    /// * `target_client_pub` is the remote client's pubkey.
+    ///
+    /// Returns the `PeerId` to use in `send_data`. Insertion
+    /// is idempotent: a second call with the same pubkey
+    /// returns the same id without disturbing existing state.
+    pub async fn add_federated_peer(
+        &self,
+        target_client_pub: [u8; 32],
+        via_bridge: PeerId,
+        target_bridge_pub: [u8; 32],
+    ) -> Result<PeerId> {
+        let id = derive_peer_id(&target_client_pub);
+        let placeholder: SocketAddr = "0.0.0.0:0".parse().expect("constant addr parses");
+        let mut peers = self.inner.peers.lock_for(&id).await;
+        match peers.get_mut(&id) {
+            Some(existing) if existing.peer_static_pub != target_client_pub => {
+                self.inner
+                    .metrics
+                    .peer_id_collisions
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(DriftError::PeerIdCollision)
+            }
+            Some(existing) => {
+                existing.federated_via = Some(via_bridge);
+                existing.federated_target_bridge_pub = Some(target_bridge_pub);
+                Ok(id)
+            }
+            None => {
+                // Federated peers don't have a direct DRIFT
+                // session with us — the bridge handles all
+                // crypto-bearing forwarding. We leave handshake
+                // in the default `Pending` state; `send_data`
+                // recognizes `federated_via.is_some()` and
+                // short-circuits to the federated path BEFORE
+                // any handshake-state check, so the placeholder
+                // session state is never read.
+                let mut peer =
+                    Peer::new(id, placeholder, target_client_pub, Direction::Initiator);
+                peer.federated_via = Some(via_bridge);
+                peer.federated_target_bridge_pub = Some(target_bridge_pub);
+                peers.insert(peer);
+                Ok(id)
+            }
+        }
+    }
+
     /// Send a federated payload to `target_client_pub` via the
     /// remote bridge `target_bridge_pub`. The payload is wrapped
     /// in a `PacketType::Federated` envelope and shipped to the
@@ -1827,6 +1891,56 @@ impl Inner {
             });
         }
 
+        // Federated-peer short-circuit: if this peer was added
+        // via `add_federated_peer`, route the payload through
+        // the configured bridge instead of trying to send
+        // directly. The bridge holds the only DRIFT session
+        // (between us and it); send_typed handles the AEAD
+        // for that hop. The bridge will then forward the
+        // envelope to the target client via its federation
+        // table (Matrix-style direct pubkey routing, not the
+        // beacon-driven mesh path).
+        let federated_route = {
+            let peers = self.peers.lock_for(dst).await;
+            peers.get(dst).and_then(|p| {
+                if let (Some(via), Some(target_bridge)) =
+                    (p.federated_via, p.federated_target_bridge_pub)
+                {
+                    Some((via, target_bridge, p.peer_static_pub))
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some((via_bridge, target_bridge_pub, target_client_pub)) = federated_route {
+            // Same payload-size ceiling as send_federated.
+            let max_user_payload =
+                MAX_PAYLOAD.saturating_sub(federated::FED_HEADER_LEN);
+            if payload.len() > max_user_payload {
+                return Err(DriftError::PayloadTooLarge {
+                    got: max_user_payload,
+                    cap: payload.len(),
+                });
+            }
+            // Honor the deadline / coalesce QoS by stamping them
+            // into… nope, federated payloads are opaque to bridges.
+            // Higher-layer QoS would need to ride inside the
+            // payload itself for the receiver to see it. For now
+            // we silently ignore deadline_ms / coalesce_group on
+            // federated sends; documented limitation.
+            let _ = (deadline_ms, coalesce_group);
+            let source_client_pub = self.identity.public_bytes();
+            let envelope = federated::build(
+                &target_bridge_pub,
+                &target_client_pub,
+                &source_client_pub,
+                payload,
+            );
+            return self
+                .send_typed(&via_bridge, PacketType::Federated, &envelope)
+                .await;
+        }
+
         // Auto-rekey: if the peer's tx seq is approaching the
         // wraparound ceiling, rekey transparently before sending so
         // the caller never sees `SessionExhausted`. Cheap O(1)
@@ -2186,8 +2300,17 @@ impl Inner {
 
         // (1) Final delivery to us as a client.
         if env.target_client_pub == our_pub {
+            // Set peer_id to the *originating client's* id (not
+            // the bridge that delivered to us). This is what
+            // makes federation transparent to existing tools:
+            // drift-mosh, drift-wormhole, etc. all use
+            // `pkt.peer_id` as the identity of who sent them
+            // bytes. With federation, that identity is the
+            // remote client, even though the bridge actually
+            // handed us the envelope on the wire.
+            let source_peer_id = derive_peer_id(&env.source_client_pub);
             return Ok(Some(Received {
-                peer_id, // bridge that delivered to us
+                peer_id: source_peer_id,
                 seq: header.seq,
                 supersedes: 0,
                 payload: env.payload.to_vec(),
