@@ -83,6 +83,79 @@ pub fn parse(bytes: &[u8]) -> Result<FederatedEnvelope<'_>, DriftError> {
     })
 }
 
+// ─── FederationDirectory codec ───────────────────────────────────
+//
+// Bridge-to-bridge announcement of connected clients. Wire format
+// inside the AEAD-sealed body of a PacketType::FederationDirectory:
+//
+// ```text
+//   [0]        version  (u8) = 1
+//   [1]        reserved (u8) = 0
+//   [2..4]     count    (u16 BE) — number of pubkey entries
+//   [4..]      entries  ([32 bytes] * count)
+// ```
+//
+// Capped at MAX_DIRECTORY_ENTRIES per packet so a single
+// announcement fits comfortably under MAX_PAYLOAD. Bridges with
+// more clients send multiple packets.
+
+const DIRECTORY_HEADER_LEN: usize = 4;
+const DIRECTORY_VERSION: u8 = 1;
+pub const MAX_DIRECTORY_ENTRIES: usize = 40;
+
+/// Build a FederationDirectory payload from a slice of client
+/// pubkeys. Callers MUST keep `pubs.len() <= MAX_DIRECTORY_ENTRIES`.
+pub fn build_directory(pubs: &[[u8; 32]]) -> Vec<u8> {
+    debug_assert!(
+        pubs.len() <= MAX_DIRECTORY_ENTRIES,
+        "directory chunk too large: {}",
+        pubs.len()
+    );
+    let count = pubs.len() as u16;
+    let mut out = Vec::with_capacity(DIRECTORY_HEADER_LEN + pubs.len() * 32);
+    out.push(DIRECTORY_VERSION);
+    out.push(0); // reserved
+    out.extend_from_slice(&count.to_be_bytes());
+    for p in pubs {
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+/// Parse a FederationDirectory payload into an owned vector of
+/// pubkeys. Returns `DecodeError` on truncation or version
+/// mismatch — a peer running an incompatible version of the
+/// announcement format is silently ignored rather than treated
+/// as malicious.
+pub fn parse_directory(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DriftError> {
+    if bytes.len() < DIRECTORY_HEADER_LEN {
+        return Err(DriftError::DecodeError);
+    }
+    if bytes[0] != DIRECTORY_VERSION {
+        return Err(DriftError::DecodeError);
+    }
+    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    let expected_len = DIRECTORY_HEADER_LEN + count * 32;
+    if bytes.len() != expected_len {
+        return Err(DriftError::DecodeError);
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = DIRECTORY_HEADER_LEN + i * 32;
+        let mut p = [0u8; 32];
+        p.copy_from_slice(&bytes[off..off + 32]);
+        out.push(p);
+    }
+    Ok(out)
+}
+
+/// Sentinel `target_bridge_pub` value meaning "I don't know which
+/// bridge holds the target; consult the directory". Bridges treat
+/// this as a directory-lookup request instead of a federation-
+/// table lookup. Set on Federated envelopes by clients that have
+/// no `via_bridge` for the target.
+pub const UNKNOWN_BRIDGE_PUB: [u8; 32] = [0u8; 32];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +190,34 @@ mod tests {
         let wire = build(&[1; 32], &[2; 32], &[4; 32], &[3; 32], b"");
         let env = parse(&wire).unwrap();
         assert!(env.payload.is_empty());
+    }
+
+    #[test]
+    fn directory_roundtrip() {
+        let pubs = vec![[0xAA; 32], [0xBB; 32], [0xCC; 32]];
+        let wire = build_directory(&pubs);
+        let parsed = parse_directory(&wire).unwrap();
+        assert_eq!(parsed, pubs);
+    }
+
+    #[test]
+    fn directory_empty() {
+        let wire = build_directory(&[]);
+        assert_eq!(parse_directory(&wire).unwrap(), Vec::<[u8; 32]>::new());
+    }
+
+    #[test]
+    fn directory_rejects_wrong_version() {
+        let mut wire = build_directory(&[[1; 32]]);
+        wire[0] = 0xFF;
+        assert!(parse_directory(&wire).is_err());
+    }
+
+    #[test]
+    fn directory_rejects_truncation() {
+        let wire = build_directory(&[[1; 32], [2; 32]]);
+        // Drop the last byte → length mismatch.
+        let short = &wire[..wire.len() - 1];
+        assert!(parse_directory(short).is_err());
     }
 }

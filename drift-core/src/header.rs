@@ -120,6 +120,25 @@ pub enum PacketType {
     ///                                 this payload.
     /// ```
     Federated = 19,
+
+    /// Bridge-to-bridge directory announcement. Sent only between
+    /// bridges in each other's federation tables (the receiver
+    /// drops anything from non-federated senders). Payload format:
+    ///
+    /// ```text
+    /// version:    u8     // = 1
+    /// count:      u16 BE // number of client pubkey entries
+    /// reserved:   u8     // = 0
+    /// pubkeys:    [32 bytes] * count
+    /// ```
+    ///
+    /// Receiving bridge records each pubkey → (sender_peer_id, now)
+    /// in its peer directory with a 60 s TTL. The directory backs
+    /// the routing fallback for Federated envelopes whose
+    /// `target_bridge_pub` is the all-zero sentinel: clients that
+    /// don't know which bridge their target lives on can leave
+    /// that field empty and let any bridge in the chain resolve.
+    FederationDirectory = 20,
 }
 
 impl PacketType {
@@ -141,6 +160,7 @@ impl PacketType {
             17 => Ok(Self::Ping),
             18 => Ok(Self::Pong),
             19 => Ok(Self::Federated),
+            20 => Ok(Self::FederationDirectory),
             _ => Err(DriftError::UnknownType(v)),
         }
     }
@@ -395,6 +415,8 @@ mod tests {
         PacketType::ResumptionTicket,
         PacketType::Ping,
         PacketType::Pong,
+        PacketType::Federated,
+        PacketType::FederationDirectory,
     ];
 
     #[test]

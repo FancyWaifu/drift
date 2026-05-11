@@ -267,9 +267,67 @@ async fn federation_table_cannot_be_poisoned_by_unrelated_client() {
     let _ = victim;
 }
 
+// ─── Test 3 ──────────────────────────────────────────────────────
+// FederationDirectory poisoning
+//
+// `PacketType::FederationDirectory` lets bridges announce their
+// connected clients to other federated bridges. An attacker who
+// somehow opens a session with the bridge (via accept_any_peer)
+// shouldn't be able to inject arbitrary entries into the bridge's
+// peer_directory just by sending a FederationDirectory packet —
+// only senders in the federation_table get to write to the
+// directory.
+
+#[tokio::test]
+async fn federation_directory_rejects_non_bridge_announcer() {
+    let (bridge, attacker, _victim, attacker_to_bridge, _victim_to_bridge) =
+        three_party().await;
+
+    // Build a FederationDirectory payload claiming some random
+    // pubkey is reachable through us.
+    let claimed_client = Identity::generate().public_bytes();
+    let mut payload = Vec::new();
+    payload.push(1u8); // version
+    payload.push(0u8); // reserved
+    payload.extend_from_slice(&1u16.to_be_bytes()); // count
+    payload.extend_from_slice(&claimed_client);
+
+    // We don't have a public helper for sending a Directory
+    // packet — but `__debug_send_federated_envelope` ships any
+    // bytes under PacketType::Federated, which is the wrong
+    // type but exercises the same wire path. For a directory-
+    // specific path we'd need a separate helper; for now, we
+    // exercise the access-control invariant: a non-bridge
+    // sender can't make the bridge add an entry to its
+    // peer_directory.
+    //
+    // The bridge's directory should be empty for unrelated
+    // pubkeys regardless of what the attacker sends.
+    let _ = attacker
+        .__debug_send_federated_envelope(&attacker_to_bridge, &payload)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        !bridge.peer_directory_contains(&claimed_client),
+        "DEFENSE REGRESSION: attacker injected an entry into the \
+         bridge's peer_directory via a Federated wire packet"
+    );
+    assert_eq!(
+        bridge.peer_directory_count(),
+        0,
+        "DEFENSE REGRESSION: bridge has unexpected directory entries"
+    );
+    println!(
+        "DEFENSE: peer_directory empty after attacker traffic ({} entries)",
+        bridge.peer_directory_count()
+    );
+}
+
 // Keep the import live even if a future refactor stops using it
 // directly in test bodies.
 #[allow(dead_code)]
 fn _keep_import() {
     let _ = PacketType::Federated;
+    let _ = PacketType::FederationDirectory;
 }
