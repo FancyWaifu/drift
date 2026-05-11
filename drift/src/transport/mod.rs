@@ -2421,50 +2421,50 @@ impl Inner {
         // `accept_any_peer` bridge could ship envelopes claiming
         // to originate from any pubkey and route them to anyone.
         //
-        // Threat model: trusted bridges (peers explicitly added
-        // to our federation table via `--federate` or auto-
-        // registered on a prior in-bound envelope) are part of
-        // the TCB and may set source_* freely — they're relaying
-        // envelopes from clients they themselves authenticate.
-        // Everyone else can only originate envelopes that name
-        // themselves as the source.
-        //
-        // Look up the sender's pubkey in the federation_table by
-        // KEY (O(1) hash lookup; pubkeys are keys, peer_ids are
-        // values). If present, sender is a bridge. Otherwise the
-        // sender is a client and must pass the source-identity
-        // check below.
-        let sender_pub = {
-            let peers = self.peers.lock_for(&peer_id).await;
-            peers
-                .get(&peer_id)
-                .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
-        };
-        let sender_is_trusted_bridge = self
-            .federation_table
-            .lock()
-            .unwrap()
-            .contains_key(&sender_pub);
-        if !sender_is_trusted_bridge {
-            // Sender is a client (or an unknown bridge — same
-            // trust level). Their envelopes must name themselves
-            // as the source client AND name us as the source
-            // bridge (we're the only bridge they're connected to
-            // from our point of view).
-            if env.source_client_pub != sender_pub
-                || env.source_bridge_pub != our_pub
-            {
-                self.metrics
-                    .federation_spoof_drops
-                    .fetch_add(1, Ordering::Relaxed);
-                debug!(
-                    sender = ?sender_pub,
-                    claimed_client = ?env.source_client_pub,
-                    claimed_bridge = ?env.source_bridge_pub,
-                    "federated: dropped envelope with forged source fields"
-                );
-                return Err(DriftError::AuthFailed);
+        // Threat model: bridges in our federation_table are part
+        // of the TCB and may set source_* freely (that's literally
+        // why they're in the table — to relay client traffic). A
+        // direct client connected to us must name themselves as
+        // the source. The check only applies when we're acting
+        // as a bridge (case 2 or 3 below); when we're the
+        // destination CLIENT (case 1), the sender is necessarily
+        // our bridge (we connected to them, no one else can route
+        // Federated traffic to us), and the bridge's attestation
+        // is the only source-identity proof possible — same trust
+        // model as a client of any Matrix/XMPP homeserver.
+        if env.target_client_pub != our_pub {
+            let sender_pub = {
+                let peers = self.peers.lock_for(&peer_id).await;
+                peers
+                    .get(&peer_id)
+                    .map(|p| p.peer_static_pub)
+                    .ok_or(DriftError::UnknownPeer)?
+            };
+            let sender_is_trusted_bridge = self
+                .federation_table
+                .lock()
+                .unwrap()
+                .contains_key(&sender_pub);
+            if !sender_is_trusted_bridge {
+                // Sender is a client (or an unknown bridge — same
+                // trust level). Their envelopes must name themselves
+                // as the source client AND name us as the source
+                // bridge (we're the only bridge they're connected
+                // to from our point of view).
+                if env.source_client_pub != sender_pub
+                    || env.source_bridge_pub != our_pub
+                {
+                    self.metrics
+                        .federation_spoof_drops
+                        .fetch_add(1, Ordering::Relaxed);
+                    debug!(
+                        sender = ?sender_pub,
+                        claimed_client = ?env.source_client_pub,
+                        claimed_bridge = ?env.source_bridge_pub,
+                        "federated: dropped envelope with forged source fields"
+                    );
+                    return Err(DriftError::AuthFailed);
+                }
             }
         }
 

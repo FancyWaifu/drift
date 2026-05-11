@@ -1,17 +1,17 @@
 #!/bin/bash
-# Federation resilience — what happens when bridges churn under
-# a live session?
+# Federation resilience under bridge churn.
 #
 # Topology: D1 (client) → D2 (bridge) → D3 (bridge) → D4 (server)
-# Federation link: D2 --federate udp://D3:51820@<D3_pub>
+# Federation link: symmetric --federate udp:// on both bridges.
 #
-# Three scenarios:
-#   1. Baseline — federation works end-to-end (sanity)
-#   2. Kill+restart D2 (the "client-side" bridge), then retry
-#   3. Kill+restart D3 (the "server-side" bridge), then retry
-#
-# After each restart we exercise drift-mosh --exec again and
-# report whether the session recovers, hangs, or dies cleanly.
+# Scenarios 1, 2, 3 should pass. Scenario 4 is a known limitation:
+# drift-mosh-server in --bridge mode does a single one-shot
+# handshake with its bridge at startup; if that bridge restarts
+# without the server also restarting, the server's session with
+# the bridge is stale and DRIFT drops every packet from the new
+# bridge instance as "unknown peer". A reconnect loop in
+# drift-mosh-server would close this gap but it's a feature, not
+# a federation-layer bug.
 
 set -u
 D1=192.168.50.52

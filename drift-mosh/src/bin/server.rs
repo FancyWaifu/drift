@@ -241,26 +241,45 @@ async fn main() -> Result<()> {
     }
 
     // Accept stream pairs. Each connecting client opens two
-    // in order (pty, then ctrl). We dispatch to session_worker.
+    // in order (pty, then ctrl) — pty gets the lower stream-id
+    // because the client's outbound id counter increments by 2
+    // per `open()`. We CANNOT rely on `accept()` ordering
+    // matching open() ordering: a stale retransmit from a
+    // previous client invocation (same pubkey, fresh process)
+    // can create an inbound stream entry for the higher id
+    // before the new client's pty OPEN arrives, flipping the
+    // accept order. Identify roles by stream-id, not by accept
+    // index.
     loop {
-        let pty_stream = match mgr.accept().await {
+        let stream_a = match mgr.accept().await {
             Some(s) => s,
             None => {
                 tracing::info!("stream manager closed; exiting accept loop");
                 break;
             }
         };
-        let ctrl_stream = match mgr.accept().await {
+        let stream_b = match mgr.accept().await {
             Some(s) => s,
             None => break,
         };
+        let (pty_stream, ctrl_stream) = if stream_a.id() < stream_b.id() {
+            (stream_a, stream_b)
+        } else {
+            (stream_b, stream_a)
+        };
         let peer_id = pty_stream.peer();
-        tracing::info!(peer = ?peer_id, "new stream pair");
+        tracing::info!(
+            peer = ?peer_id,
+            pty_id = pty_stream.id(),
+            ctrl_id = ctrl_stream.id(),
+            "new stream pair"
+        );
 
         let sessions = sessions.clone();
         let shell = shell.clone();
         let self_name = self_name_arc.clone();
         let transport_for_worker = transport.clone();
+        let mgr_for_worker = mgr.clone();
         tokio::spawn(async move {
             if let Err(e) = session_worker(
                 sessions,
@@ -270,6 +289,7 @@ async fn main() -> Result<()> {
                 &shell,
                 self_name.as_ref().clone(),
                 transport_for_worker,
+                mgr_for_worker,
             )
             .await
             {
@@ -289,6 +309,7 @@ async fn session_worker(
     shell: &str,
     self_name: Option<String>,
     transport: Arc<drift::Transport>,
+    mgr: Arc<StreamManager>,
 ) -> Result<()> {
     // ── Step 1: receive the client's Attach message. ──
     //
@@ -586,6 +607,17 @@ async fn session_worker(
     if let Some(m) = master_back {
         session.pty_master = Some(m);
     }
+
+    // Wipe the StreamManager's per-peer state for this client so
+    // a subsequent attach (with fresh stream-IDs, as any fresh
+    // client process does) doesn't have its OPEN frames silently
+    // dropped by `ensure_inbound_stream`'s "already exists" check.
+    // The Session itself stays in the sessions map under peer_id —
+    // a real reattach (matching session_id) will pick it up; a
+    // fresh-attach (different session_id, e.g. all --exec usage)
+    // will fall through to "starting fresh". Either way, the new
+    // client's streams now land cleanly.
+    mgr.wipe_peer_streams(&peer_id).await;
 
     // Re-insert the session into the map so a reattach can
     // find it.
