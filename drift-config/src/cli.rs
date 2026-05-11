@@ -88,6 +88,14 @@ pub struct PeerAddArgs {
     /// One or more DRIFT URLs (e.g. udp://1.2.3.4:51820).
     #[arg(long = "endpoint", short = 'e')]
     pub endpoints: Vec<String>,
+    /// Pubkey-hex of the bridge this peer is reachable through.
+    /// When set, tools dialing this peer (drift-mosh, drift-http,
+    /// …) auto-route through that bridge using DRIFT federation —
+    /// no need to pass --bridge / --target-bridge on the command
+    /// line. The bridge itself must also have an entry in this
+    /// inventory with `endpoints`.
+    #[arg(long = "via-bridge")]
+    pub via_bridge: Option<String>,
 }
 
 #[derive(Args)]

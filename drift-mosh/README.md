@@ -101,6 +101,32 @@ drift-mosh-client --server-pub <pub> --server-addr ws://host:443
 
 A single drift-mosh-server runs over one transport at a time — sessions are point-to-point, so simultaneous-multi-bind isn't useful here. (drift-http needs that pattern; drift-mosh doesn't.) The transport choice is in the URL the launcher persists, so `drift-mosh user@host` Just Works once the server is configured.
 
+### Zero-config dial — `drift-mosh-client --server-pub <hex>`
+
+If the server's pubkey is registered in your `drift.toml` (the
+shared inventory written by `drift-config`), the client doesn't
+need any other flags. It looks up the pubkey, reads the entry's
+`endpoints` (direct dial) or `via_bridge` (federation route), and
+fills the rest in automatically:
+
+```bash
+# Inventory says mosh-srv is reachable via bridge-d3 (the bridge
+# the server `--bridge`'d to at startup):
+drift-config peer add bridge-d3 --pubkey <BRIDGE_PUB> \
+  --endpoint udp://bridge.example:51820
+drift-config peer add mosh-srv  --pubkey <SERVER_PUB> \
+  --via-bridge <BRIDGE_PUB>
+
+# Client side: identity is everything you need.
+drift-mosh-client --server-pub <SERVER_PUB> --exec 'whoami'
+# → routes through bridge-d3 via federation, runs `whoami`.
+```
+
+When the same target host has both `endpoints` and `via_bridge`,
+the direct dial wins — fewer hops, no bridge operator in the
+middle. `--server-addr` / `--bridge` on the command line still
+override the inventory if you want to force a particular route.
+
 ### Federation — reaching a server through one or two bridges
 
 When client and server can't directly reach each other — different networks, NAT on both sides, firewalls that block everything except outbound HTTPS — DRIFT bridges relay the session. drift-mosh speaks federation natively via two flags:

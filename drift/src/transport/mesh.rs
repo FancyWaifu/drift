@@ -449,7 +449,16 @@ impl Inner {
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
-            rx.open(header.seq, PacketType::Beacon as u8, &aad, body)?
+            let pt = rx.open(header.seq, PacketType::Beacon as u8, &aad, body)?;
+            // Beacons that decrypt are unambiguous liveness signals
+            // — only the peer with the matching session key can
+            // produce them. Without this, peer.last_seen only ticks
+            // on application DATA, leaving idle-but-alive bridge
+            // links indistinguishable from dead ones to higher-
+            // layer watchdogs (e.g. drift-mosh-server's bridge
+            // re-handshake task).
+            peer.last_seen = std::time::Instant::now();
+            pt
         };
 
         if plaintext.len() < 2 {

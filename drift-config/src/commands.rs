@@ -1,7 +1,7 @@
 //! Command implementations. Each is a thin function that takes
 //! the parsed args + resolved file paths and does the I/O.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rand::RngCore;
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,7 @@ pub fn keygen(
     let host = Host {
         pubkey: pubkey_hex.clone(),
         endpoints: args.endpoints.clone(),
+        via_bridge: None,
     };
     doc.hosts.insert(name.clone(), host);
     cfg_io::write(config_path, &doc)?;
@@ -92,6 +93,9 @@ pub fn peer_add(args: &PeerAddArgs, config_path: &Path) -> Result<()> {
     for ep in &args.endpoints {
         validate_endpoint(ep)?;
     }
+    if let Some(b) = &args.via_bridge {
+        validate_pubkey(b).context("via-bridge pubkey")?;
+    }
     let mut doc = cfg_io::read_or_default(config_path)?;
     if doc.hosts.contains_key(&args.name) {
         bail!(
@@ -104,6 +108,7 @@ pub fn peer_add(args: &PeerAddArgs, config_path: &Path) -> Result<()> {
         Host {
             pubkey: args.pubkey.to_lowercase(),
             endpoints: args.endpoints.clone(),
+            via_bridge: args.via_bridge.as_ref().map(|s| s.to_lowercase()),
         },
     );
     cfg_io::write(config_path, &doc)?;
@@ -125,15 +130,21 @@ pub fn peer_ls(config_path: &Path) -> Result<()> {
         } else {
             h.pubkey.as_str()
         };
-        let role_hint = if h.endpoints.is_empty() {
-            "client"
-        } else {
+        let role_hint = if !h.endpoints.is_empty() {
             "listener"
+        } else if h.via_bridge.is_some() {
+            "bridged"
+        } else {
+            "client"
         };
         println!("  {} ({})", name, role_hint);
         println!("    pubkey:  {}…", pub_short);
         for ep in &h.endpoints {
             println!("    via:     {}", ep);
+        }
+        if let Some(b) = &h.via_bridge {
+            let b_short = if b.len() >= 16 { &b[..16] } else { b.as_str() };
+            println!("    bridge:  {}…", b_short);
         }
     }
     Ok(())

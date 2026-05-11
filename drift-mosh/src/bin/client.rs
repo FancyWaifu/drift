@@ -15,7 +15,7 @@
 //!    can save it for next time.
 //! 5. Raw mode + stream loops until the remote side closes.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use drift::identity::Identity;
@@ -41,8 +41,12 @@ struct Cli {
     /// (e.g. `bob-laptop`) or a `host:port` / scheme-prefixed
     /// address. Petnames take priority: if a contact matches,
     /// its pubkey + address are used.
+    ///
+    /// Optional: when omitted, the server's pubkey is looked up
+    /// in drift.toml; the entry's `endpoints` provide the dial
+    /// address, or `via_bridge` provides a federation route.
     #[clap(long)]
-    server_addr: String,
+    server_addr: Option<String>,
 
     /// Hex-encoded 16-byte session id from a previous connect.
     /// Omit for a fresh session. The `drift-mosh` launcher
@@ -128,8 +132,51 @@ async fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let session_id = parse_session_id(cli.session_id.as_deref())?;
+
+    // Phase 1 of target resolution: inventory-driven discovery.
+    //
+    // If the operator passed only `--server-pub` (no
+    // `--server-addr` and no `--bridge`), look up the target in
+    // drift.toml and synthesize whichever flag chain we need.
+    // This is the "zero-config" identity-first promise — the user
+    // gives us a pubkey and the inventory tells us how to route.
+    //
+    //   * `hosts[X].endpoints = [...]`  → direct dial; populate
+    //     `--server-addr` with the first endpoint.
+    //   * `hosts[X].via_bridge = <Y>`   → federation; populate
+    //     `--bridge` with bridge Y's first endpoint plus its
+    //     pubkey, and `--target-bridge` with Y's pubkey.
+    //
+    // Best-effort: any inventory-load error falls through to the
+    // existing resolve_target / explicit-flag path so users who
+    // never set up drift.toml see the same UX as before.
+    if cli.server_addr.is_none() && cli.bridge.is_none() {
+        if let Some(server_pub_hex) = cli.server_pub.as_deref() {
+            match resolve_from_inventory(server_pub_hex) {
+                Ok(InventoryDial::Direct(addr)) => {
+                    cli.server_addr = Some(addr);
+                }
+                Ok(InventoryDial::Bridged {
+                    bridge_spec,
+                    target_bridge_pub_hex,
+                }) => {
+                    cli.bridge = Some(bridge_spec);
+                    cli.target_bridge = Some(target_bridge_pub_hex);
+                }
+                Err(e) => {
+                    return Err(e.context(
+                        "no --server-addr or --bridge given and the inventory lookup didn't resolve a route",
+                    ));
+                }
+            }
+        } else {
+            bail!(
+                "need either --server-addr, --bridge, or --server-pub (with a drift.toml entry)"
+            );
+        }
+    }
 
     // Resolve `--server-addr`: it can be either a petname
     // saved in `$CONFIG_DIR/drift/contacts.toml` (e.g.
@@ -138,8 +185,15 @@ async fn run() -> Result<()> {
     // typed `bob-laptop` and a contact exists, use that
     // contact's pubkey + addr regardless of whether
     // `--server-pub` was passed.
-    let (server_pub, server_addr_with_scheme) =
-        resolve_target(&cli.server_addr, cli.server_pub.as_deref())?;
+    //
+    // In federated mode, `--server-addr` may still be None at
+    // this point — the bridge URL stands in for it. Pass an
+    // empty string so the existing helper short-circuits to the
+    // `--server-pub`-required branch.
+    let (server_pub, server_addr_with_scheme) = resolve_target(
+        cli.server_addr.as_deref().unwrap_or(""),
+        cli.server_pub.as_deref(),
+    )?;
 
     // Identity: either explicit --identity-file, or the
     // persistent default at $CONFIG_DIR/drift-mosh/client.key.
@@ -486,6 +540,106 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Output of the drift.toml-based discovery step. Either we found
+/// a direct endpoint or we found a federation route.
+enum InventoryDial {
+    Direct(String),
+    Bridged {
+        /// `<url>@<pubkey-hex>` as expected by `--bridge`.
+        bridge_spec: String,
+        /// The bridge's pubkey in hex, as expected by `--target-bridge`.
+        target_bridge_pub_hex: String,
+    },
+}
+
+/// Look up `server_pub_hex` in drift.toml's `[hosts.…]` entries.
+/// Returns a `Direct` dial if the host listens (`endpoints`), or a
+/// `Bridged` dial if it's reachable through a `via_bridge`. The
+/// bridge itself must also be in the inventory so we can find its
+/// own endpoint to dial.
+fn resolve_from_inventory(server_pub_hex: &str) -> Result<InventoryDial> {
+    let path = drift_config::io::default_path()
+        .context("resolving the default drift.toml path")?;
+    if !path.exists() {
+        bail!(
+            "no drift.toml at {}; either pass --server-addr explicitly \
+             or run `drift-config init` and `drift-config peer add` first",
+            path.display()
+        );
+    }
+    let doc = drift_config::io::read(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let needle = server_pub_hex.trim().to_lowercase();
+
+    // Find the host with this pubkey. Case-insensitive on the
+    // pubkey field because drift.toml stores it lowercased but
+    // CLI users sometimes paste uppercase from `drift info`.
+    let (host_name, host) = doc
+        .hosts
+        .iter()
+        .find(|(_, h)| h.pubkey.to_lowercase() == needle)
+        .ok_or_else(|| {
+            anyhow!(
+                "no host in {} has pubkey {}; add it with \
+                 `drift-config peer add <name> --pubkey {} \
+                 --endpoint <url>` (or --via-bridge <bridge-pubkey>)",
+                path.display(),
+                needle,
+                needle
+            )
+        })?;
+
+    // Prefer a direct dial when the host advertises endpoints.
+    // Direct beats bridged because it's fewer hops + no bridge
+    // operator in the middle.
+    if let Some(ep) = host.endpoints.first() {
+        return Ok(InventoryDial::Direct(ep.clone()));
+    }
+
+    // Otherwise consult `via_bridge` for a federation route.
+    let bridge_pub_hex = host.via_bridge.as_deref().ok_or_else(|| {
+        anyhow!(
+            "host {:?} in {} has neither `endpoints` nor `via_bridge` — \
+             can't figure out how to reach it. Set one with \
+             `drift-config peer rm {0}` then re-add with \
+             --endpoint or --via-bridge.",
+            host_name,
+            path.display(),
+        )
+    })?;
+    let bridge_pub_hex_lc = bridge_pub_hex.to_lowercase();
+    let (_, bridge_host) = doc
+        .hosts
+        .iter()
+        .find(|(_, h)| h.pubkey.to_lowercase() == bridge_pub_hex_lc)
+        .ok_or_else(|| {
+            anyhow!(
+                "host {:?}'s via_bridge points at pubkey {} but no \
+                 such host is registered in {}. Add it with \
+                 `drift-config peer add <bridge-name> --pubkey {} \
+                 --endpoint <url>`.",
+                host_name,
+                bridge_pub_hex_lc,
+                path.display(),
+                bridge_pub_hex_lc,
+            )
+        })?;
+    let bridge_endpoint = bridge_host.endpoints.first().ok_or_else(|| {
+        anyhow!(
+            "bridge host with pubkey {} has no `endpoints` in {}; \
+             a bridge that doesn't listen can't accept federation \
+             clients.",
+            bridge_pub_hex_lc,
+            path.display(),
+        )
+    })?;
+
+    Ok(InventoryDial::Bridged {
+        bridge_spec: format!("{}@{}", bridge_endpoint, bridge_pub_hex_lc),
+        target_bridge_pub_hex: bridge_pub_hex_lc,
+    })
 }
 
 fn parse_server_pub(hex_str: &str) -> Result<[u8; 32]> {

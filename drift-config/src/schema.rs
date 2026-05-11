@@ -66,6 +66,21 @@ pub struct Host {
     /// Order matters: peers try these in priority order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
+
+    /// Optional pubkey-hex of the bridge this host is reachable
+    /// through. When set, tools dialing this host (`drift-mosh`,
+    /// `drift-http`, etc.) auto-route via that bridge using
+    /// DRIFT federation — operator doesn't need to pass
+    /// --bridge / --target-bridge on the command line. The
+    /// bridge itself must also have a `[hosts.…]` entry with
+    /// `endpoints`, since that's how the dialing tool actually
+    /// reaches it.
+    ///
+    /// Hosts that listen directly (have `endpoints`) shouldn't
+    /// set this — tools prefer direct dial over bridged dial
+    /// when both are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_bridge: Option<String>,
 }
 
 /// drift-vpn overlay: settings that apply to the VPN as a whole
