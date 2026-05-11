@@ -243,19 +243,23 @@ bridge.add_listener("ws://0.0.0.0:9002").await?;
 
 Mesh routing discovers paths via beacons; federation is the explicit-config flavor for the cases where you want bridges in different networks to relay client traffic for each other without burning beacon bandwidth on the long-haul link. Modeled on Matrix and XMPP server-to-server.
 
-Each bridge declares its peer bridges with `--federate <url>@<pub>`. Clients address far-side peers by `(remote_bridge_pub, remote_client_pub)` and the wire envelope is `PacketType::Federated`:
+**Federation trust is symmetric and explicit.** Each bridge declares its peer bridges with `--federate <url>@<pub>`, on both sides. Inbound Federated envelopes from a peer not in the federation table are dropped — without this rule, any client of an `accept_any_peer` bridge could (a) spoof other clients' identities by forging the envelope's `source_client_pub`, and (b) poison the bridge's routing table by claiming arbitrary `source_bridge_pub`. Regression-locked in `drift/tests/adversarial_federation.rs`.
+
+Clients address far-side peers by `(remote_bridge_pub, remote_client_pub)` and the wire envelope is `PacketType::Federated`:
 
 ```bash
-# Bridge A listens for clients on UDP, federates to bridge B over TLS:
+# Bridge A: listens for clients on UDP; federates to B over TLS.
 drift bridge --listen udp://0.0.0.0:51820 \
              --federate tls://bridge-b.example:51821@<B_PUBHEX>
 
-# Bridge B listens for clients on WebSocket and TLS for the federation
-# link from A. No --federate on B — incoming envelopes auto-register
-# A in B's federation table for the reply path.
+# Bridge B: listens for clients on WebSocket + TLS for the federation
+# link from A. Also --federate's back to A.
 drift bridge --listen tls://0.0.0.0:51821 \
-             --listen ws://0.0.0.0:51822
+             --listen ws://0.0.0.0:51822 \
+             --federate udp://bridge-a.example:51820@<A_PUBHEX>
 ```
+
+Symmetric `--federate` on connection-oriented schemes (TCP/TLS/WS) creates a startup race: each side tries to connect before the other is listening. `bridge.rs` handles this by retrying initial-connect failures on a background task with exponential backoff — start order doesn't matter.
 
 A client connected to A reaches a client connected to B with one extra call:
 
@@ -458,6 +462,7 @@ Extensive coverage across 60+ integration test files, drift-core unit tests, and
 - **Onion over Tor**: `drift/tests/onion_self_dial.rs` — gated `#[ignore]`, opt-in via `--features onion`. Hosts an onion service in-process, retrieves its `<base32>.onion` address, dials it back through the live Tor network, runs a full handshake + DATA exchange. Confirmed end-to-end in 117s on a real network.
 - **Multi-bridge Docker mesh**: `docker/two-bridge/` — 12 containers, 90 directed messages, 5 of which cross between two bridges
 - **Federation, heterogeneous transports**: `drift-mosh/tests/mixed_transport_federation_test.sh` — runs a full `drift-mosh --exec` shell command end-to-end across `D1 ──UDP──▶ D2 ──TLS──▶ D3 ──WS──▶ D4` (real Proxmox LXCs). Bytes traverse three different DRIFT transports in one chain; the federation envelope is identical regardless of the underlying wire. Also covered with TCP and WebSocket variants — every connection-oriented bridge link now works via `Transport::connect_federate`.
+- **Federation adversarial**: `drift/tests/adversarial_federation.rs` — pure in-process tests (~0.5 s) that lock in two defenses: (1) the bridge rejects envelopes whose `source_client_pub` doesn't match the session-authenticated sender (identity-spoofing prevention); (2) the bridge refuses to insert routing-table entries for `source_bridge_pub` claims that don't match the sender's own pubkey (table-poisoning prevention). Both assertions cite `Transport::metrics().federation_spoof_drops` so operators can monitor for active spoofing attempts.
 - **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh` / `multi_transport_4way.sh` (4/4 transports including TLS pass)
 
 ```bash

@@ -187,19 +187,28 @@ sudo drift-config keygen boxb --endpoint "tls://0.0.0.0:51821" \
 # On box A:
 sudo drift-config peer add boxb --pubkey <PUB_B> \
   --endpoint "tls://<box-b-host>:51821"
-# On box B (no peer needed — incoming envelopes auto-register A).
+# On box B:
+sudo drift-config peer add boxa --pubkey <PUB_A> \
+  --endpoint "udp://<box-a-host>:51820"
 
-# ─── Start the bridges ────────────────────────────────────────────
+# ─── Start the bridges (symmetric --federate on both sides) ──────
+# Federation trust is symmetric: each bridge declares the other
+# via --federate. Inbound Federated envelopes from a peer not in
+# the federation table are rejected — that's what blocks
+# identity-spoofing by untrusted clients. Initial-connect failure
+# on TCP/TLS/WS retries in the background, so start order doesn't
+# matter.
+#
 # Box A: federates to bridge-B over TLS (the connection-oriented
-#         link survives most middleboxes).
+#        link survives most middleboxes).
 sudo drift bridge --listen udp://0.0.0.0:51820 \
                   --federate tls://<box-b-host>:51821@<PUB_B>
 
-# Box B: just listens — A's --federate connects in, and on the
-#         first incoming Federated envelope B auto-registers A in
-#         its own federation table for the reply path.
+# Box B: also --federate's back to A over UDP (so the trust is
+#        mutual).
 sudo drift bridge --listen tls://0.0.0.0:51821 \
-                  --listen ws://0.0.0.0:51822
+                  --listen ws://0.0.0.0:51822 \
+                  --federate udp://<box-a-host>:51820@<PUB_A>
 ```
 
 Any DRIFT client connected to bridge-A (over UDP) can now reach
