@@ -201,28 +201,46 @@ impl PacketIO for TcpPacketIO {
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        use tokio::io::AsyncReadExt;
         let mut reader = self.reader.lock().await;
-        let mut len_buf = [0u8; 2];
-        reader.read_exact(&mut len_buf).await?;
-        let len = u16::from_be_bytes(len_buf) as usize;
-        if len > buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "TCP frame too large: {} bytes, buffer is {}",
-                    len,
-                    buf.len()
-                ),
-            ));
-        }
-        reader.read_exact(&mut buf[..len]).await?;
+        let len = read_one_tcp_frame(&mut *reader, buf).await?;
         Ok((len, self.peer_addr))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
     }
+}
+
+/// Read one length-prefixed packet from `reader` into `buf`.
+///
+/// Wire: 2-byte big-endian length, then `len` body bytes.
+/// Errors:
+///   * `UnexpectedEof` if the connection closes mid-prefix or mid-body.
+///   * `InvalidData` if the advertised length exceeds `buf.len()`.
+///
+/// Exposed for fuzzing (`fuzz/fuzz_targets/tcp_deframe.rs`) and
+/// for any future adapter that wants to share the framing logic
+/// (e.g. the Tor-circuit adapter at the bottom of this file).
+pub async fn read_one_tcp_frame<R>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+{
+    use tokio::io::AsyncReadExt;
+    let mut len_buf = [0u8; 2];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u16::from_be_bytes(len_buf) as usize;
+    if len > buf.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "TCP frame too large: {} bytes, buffer is {}",
+                len,
+                buf.len()
+            ),
+        ));
+    }
+    reader.read_exact(&mut buf[..len]).await?;
+    Ok(len)
 }
 
 /// In-memory packet I/O via `tokio::sync::mpsc` channels.

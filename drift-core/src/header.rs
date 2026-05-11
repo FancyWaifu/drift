@@ -126,18 +126,19 @@ pub enum PacketType {
     /// drops anything from non-federated senders). Payload format:
     ///
     /// ```text
-    /// version:    u8     // = 1
-    /// count:      u16 BE // number of client pubkey entries
-    /// reserved:   u8     // = 0
-    /// pubkeys:    [32 bytes] * count
+    /// [0]      version  (u8)     // = 1
+    /// [1]      reserved (u8)     // = 0
+    /// [2..4]   count    (u16 BE) // number of client pubkey entries
+    /// [4..]    pubkeys  ([32 bytes] * count)
     /// ```
     ///
     /// Receiving bridge records each pubkey → (sender_peer_id, now)
-    /// in its peer directory with a 60 s TTL. The directory backs
-    /// the routing fallback for Federated envelopes whose
-    /// `target_bridge_pub` is the all-zero sentinel: clients that
-    /// don't know which bridge their target lives on can leave
-    /// that field empty and let any bridge in the chain resolve.
+    /// in its peer directory with a 20 s TTL (~3× the ~7 s announce
+    /// interval). The directory backs the routing fallback for
+    /// Federated envelopes whose `target_bridge_pub` is the
+    /// all-zero sentinel: clients that don't know which bridge
+    /// their target lives on can leave that field empty and let
+    /// any bridge in the chain resolve.
     FederationDirectory = 20,
 }
 
