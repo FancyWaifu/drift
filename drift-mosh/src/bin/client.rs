@@ -78,6 +78,21 @@ struct Cli {
     /// Required when `--bridge` is set; ignored otherwise.
     #[clap(long)]
     target_bridge: Option<String>,
+
+    /// Non-interactive mode: run this shell command on the
+    /// server, print its output, then exit. Skips raw-mode
+    /// terminal handling so it works from scripts / CI / piped
+    /// stdin. The remote shell sees `<cmd>\nexit\n`; we drain
+    /// the pty stream until the shell session ends (or
+    /// `--exec-timeout` seconds elapse with no further output).
+    #[clap(long)]
+    exec: Option<String>,
+
+    /// Maximum quiet period (seconds) after the last byte of
+    /// output before we conclude the `--exec` command is done.
+    /// Only meaningful with `--exec`.
+    #[clap(long, default_value = "3")]
+    exec_timeout: u64,
 }
 
 struct RawModeGuard;
@@ -281,6 +296,71 @@ async fn run() -> Result<()> {
     }
     use std::io::Write;
     std::io::stdout().flush().ok();
+
+    // ─── Non-interactive `--exec` short-circuit ───────────────
+    //
+    // For test harnesses and CI: pump a single command into the
+    // remote pty, drain the output, exit. Skips raw mode / stdin
+    // reader / SIGWINCH wiring entirely. The remote shell sees:
+    //
+    //   <cmd>\n
+    //   exit\n
+    //
+    // which makes /bin/sh run the command and then quit. We
+    // drain pty_stream until the stream closes (server shut
+    // down the pty after the shell exited) or until
+    // `--exec-timeout` seconds pass with no new bytes.
+    if let Some(cmd) = cli.exec.as_deref() {
+        // Tell the server about a sane terminal size so output
+        // wraps cleanly. We never enter raw mode locally, but
+        // the remote shell still respects window-size hints.
+        let _ = ctrl_stream
+            .send(&bincode::serialize(&Ctrl::Resize {
+                rows: 24,
+                cols: 200,
+            })?)
+            .await;
+
+        // Send the command. Two writes (cmd, then `exit`) so the
+        // shell parses them as separate lines without buffering
+        // tricks.
+        let mut to_send = cmd.as_bytes().to_vec();
+        to_send.push(b'\n');
+        pty_stream.send(&to_send).await?;
+        // Brief pause so the shell processes the command before
+        // we send `exit`. Without this, on some shells the two
+        // lines can get clobbered if they arrive in the same
+        // read syscall.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        pty_stream.send(b"exit\n").await?;
+
+        // Drain pty output to stdout until quiet period elapses
+        // or stream closes.
+        use std::io::Write;
+        let quiet_window =
+            std::time::Duration::from_secs(cli.exec_timeout);
+        loop {
+            match tokio::time::timeout(quiet_window, pty_stream.recv()).await {
+                Ok(Some(chunk)) => {
+                    std::io::stdout().write_all(&chunk).ok();
+                    std::io::stdout().flush().ok();
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        // Polite goodbye.
+        if let Ok(bytes) = bincode::serialize(&Ctrl::Bye) {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                ctrl_stream.send(&bytes),
+            )
+            .await;
+        }
+        return Ok(());
+    }
+
+    // ─── Interactive path ─────────────────────────────────────
 
     // Initial window size → server.
     let (cols, rows) = match size() {
