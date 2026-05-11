@@ -134,6 +134,13 @@ pub fn parse_directory(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DriftError> {
     if bytes[0] != DIRECTORY_VERSION {
         return Err(DriftError::DecodeError);
     }
+    // Reserved byte must be 0 — any other value is non-conforming
+    // and reserved for future protocol extensions. Reject rather
+    // than silently accept so build∘parse stays an identity and
+    // future-version peers get a clean version bump signal.
+    if bytes[1] != 0 {
+        return Err(DriftError::DecodeError);
+    }
     let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
     let expected_len = DIRECTORY_HEADER_LEN + count * 32;
     if bytes.len() != expected_len {
@@ -219,5 +226,16 @@ mod tests {
         // Drop the last byte → length mismatch.
         let short = &wire[..wire.len() - 1];
         assert!(parse_directory(short).is_err());
+    }
+
+    /// Regression: fuzzer (`federation_directory_decode`) caught
+    /// the reserved byte being unvalidated — `[1, 86, 0, 0]`
+    /// would parse to an empty Vec while `build_directory` always
+    /// emits reserved=0, breaking `build∘parse` identity. Parser
+    /// now rejects any non-zero reserved.
+    #[test]
+    fn directory_rejects_non_zero_reserved() {
+        let wire = [DIRECTORY_VERSION, 0x56, 0x00, 0x00];
+        assert!(parse_directory(&wire).is_err());
     }
 }

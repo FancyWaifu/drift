@@ -8,11 +8,14 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-drift = { path = ".." }
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+arbitrary = { version = "1", features = ["derive"] }
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["rt", "io-util", "macros", "sync", "time"] }
 
 # Prevent accidentally running the fuzz targets as part of
 # `cargo test` on the parent crate.
+
 [[bin]]
 name = "header_decode"
 path = "fuzz_targets/header_decode.rs"
@@ -30,6 +33,41 @@ bench = false
 [[bin]]
 name = "stream_frame"
 path = "fuzz_targets/stream_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "short_header_decode"
+path = "fuzz_targets/short_header_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "federated_envelope_decode"
+path = "fuzz_targets/federated_envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "federation_directory_decode"
+path = "fuzz_targets/federation_directory_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_deframe"
+path = "fuzz_targets/tcp_deframe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_fsm"
+path = "fuzz_targets/handshake_fsm.rs"
 test = false
 doc = false
 bench = false

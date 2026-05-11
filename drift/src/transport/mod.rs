@@ -25,7 +25,10 @@ const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 pub(crate) mod batch;
 mod cookies;
 mod federated;
-pub use federated::UNKNOWN_BRIDGE_PUB;
+pub use federated::{
+    build as build_federated, build_directory, parse as parse_federated, parse_directory,
+    FederatedEnvelope, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES, UNKNOWN_BRIDGE_PUB,
+};
 #[cfg(unix)]
 mod ecn;
 pub(crate) mod mesh;
@@ -474,10 +477,10 @@ pub(crate) struct Inner {
     /// know which bridge holds the target.
     ///
     /// `client_pubkey → (announcer_bridge_peer_id, last_announced_at)`
-    /// with a 60 s TTL: entries that aren't re-announced within
-    /// that window are evicted, so a client whose bridge stops
-    /// announcing drops out of routing fast rather than stranding
-    /// traffic at a stale next-hop.
+    /// with a 20 s TTL (~3× the ~7 s announce interval): entries
+    /// that aren't re-announced within that window are evicted, so
+    /// a client whose bridge stops announcing drops out of routing
+    /// fast rather than stranding traffic at a stale next-hop.
     ///
     /// Security: only federation peers (entries in
     /// `federation_table`) can write to this table — see
@@ -1495,7 +1498,7 @@ impl Transport {
             .collect();
         // Empty announcements still get sent — they let peers
         // know we have zero connected clients (so they can prune
-        // stale entries from us by waiting out the 60 s TTL).
+        // stale entries from us by waiting out the 20 s TTL).
         // The build_directory call above handles len=0 → one
         // 4-byte payload.
         let chunks = if chunks.is_empty() {
