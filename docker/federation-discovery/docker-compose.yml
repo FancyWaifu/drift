@@ -1,0 +1,93 @@
+# End-to-end federation-discovery test:
+#
+#       client                                      server
+#         │                                            │
+#         │  default_bridge=D2                         │
+#         ▼                                            ▼
+#       D2 (bridge) ─── --federate udp ──── D3 (bridge)
+#                  (announces clients via PacketType::FederationDirectory)
+#
+# Client knows only D2's pubkey + endpoint, not D3 or the server.
+# The server announces itself to D3, D3 announces it to D2, the
+# client dials D2 with target_bridge_pub=ZERO and D2 resolves
+# via its directory. Verifies issues 2 + 3 fixes are in place.
+
+services:
+  bridge-d2:
+    build:
+      context: ../..
+      dockerfile: docker/federation-discovery/Dockerfile
+    container_name: fd-bridge-d2
+    networks:
+      fdnet:
+        ipv4_address: 172.30.0.12
+    environment:
+      RUST_LOG: "info,drift=info"
+    volumes:
+      - ./identities:/identities:ro
+    command: >
+      drift --identity /identities/d2.key bridge
+        --listen udp://0.0.0.0:51820
+        --federate udp://172.30.0.13:51820@${PUB_D3}
+
+  bridge-d3:
+    build:
+      context: ../..
+      dockerfile: docker/federation-discovery/Dockerfile
+    container_name: fd-bridge-d3
+    networks:
+      fdnet:
+        ipv4_address: 172.30.0.13
+    environment:
+      RUST_LOG: "info,drift=info"
+    volumes:
+      - ./identities:/identities:ro
+    command: >
+      drift --identity /identities/d3.key bridge
+        --listen udp://0.0.0.0:51820
+        --federate udp://172.30.0.12:51820@${PUB_D2}
+
+  mosh-server:
+    build:
+      context: ../..
+      dockerfile: docker/federation-discovery/Dockerfile
+    container_name: fd-mosh-server
+    depends_on:
+      - bridge-d3
+    networks:
+      fdnet:
+        ipv4_address: 172.30.0.14
+    environment:
+      RUST_LOG: "info,drift_mosh_server=info"
+    volumes:
+      - ./identities:/identities:ro
+    command: >
+      drift-mosh-server
+        --identity-file /identities/d4.hex
+        --bridge udp://172.30.0.13:51820@${PUB_D3}
+        --shell /bin/sh
+
+  client:
+    build:
+      context: ../..
+      dockerfile: docker/federation-discovery/Dockerfile
+    container_name: fd-client
+    depends_on:
+      - mosh-server
+      - bridge-d2
+    networks:
+      fdnet:
+        ipv4_address: 172.30.0.11
+    volumes:
+      - ./identities:/identities:ro
+      - ./inventory:/etc/drift:ro
+    # The client image just sleeps; the test harness `run.sh`
+    # `docker exec`s into it to invoke drift-mosh-client.
+    command: ["sleep", "infinity"]
+
+networks:
+  fdnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

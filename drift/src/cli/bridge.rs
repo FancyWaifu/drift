@@ -203,21 +203,24 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         });
     }
 
-    // Federation directory announcer: every 10 s, broadcast the
+    // Federation directory announcer: every 7 s, broadcast the
     // pubkeys of every client currently connected to us to all
     // of our federation peers. Receiving bridges record those
-    // pubkeys in their peer directory with a 60 s TTL; clients
+    // pubkeys in their peer directory with a 20 s TTL; clients
     // dialing a target whose bridge they don't know can then
     // send Federated envelopes with `target_bridge_pub = ZERO`
     // and let any transit bridge in the chain resolve via its
     // directory. See drift::UNKNOWN_BRIDGE_PUB and
     // Transport::announce_directory.
     //
-    // 10 s is fast enough that a newly-attached client is
-    // discoverable within seconds; 60 s TTL is long enough to
-    // absorb a missed announcement (one network blip) without
-    // flapping. Operators with tighter discovery requirements
-    // could narrow this later via a config flag.
+    // The receiver treats each announce as the COMPLETE current
+    // set of this bridge's clients, not a delta — so a client
+    // disconnecting from us silently drops out of peers'
+    // directories within one announce interval (≤7 s). Combined
+    // with first-write-wins on cross-announcer conflicts and
+    // send-failure eviction in handle_federated case (3), this
+    // gets the directory back to consistent state fast under
+    // both graceful and ungraceful peer changes.
     {
         let t = transport.clone();
         tokio::spawn(async move {
@@ -225,7 +228,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             // gets a moment to settle in (initial connect_federate
             // calls, peer-table warmup) before we publish state.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(7));
             loop {
                 let pubs = t.established_client_pubkeys().await;
                 t.announce_directory(&pubs).await;
