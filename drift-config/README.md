@@ -230,6 +230,39 @@ real client endpoints.
 `--federate` wiring through `drift.toml`; pass `--federate` to
 `drift bridge` on the command line for now.
 
+### Zero-config client dial
+
+Once the inventory above is in place, DRIFT tools that target a
+host *by pubkey* can read it directly from `drift.toml` — no
+need to pass `--server-addr` / `--bridge` / `--target-bridge` on
+every invocation. Two fields drive this:
+
+- `endpoints = [...]` on the target's host entry → tools dial
+  it directly (the first endpoint wins).
+- `via_bridge = "<bridge-pubkey-hex>"` → tools auto-route through
+  that bridge using DRIFT federation. The bridge itself must
+  also be in the inventory with `endpoints` so the dialing tool
+  can reach it.
+
+```bash
+# Operator records the server's reachability:
+drift-config peer add bridge-b --pubkey <BRIDGE_B_PUB> \
+  --endpoint "tls://0.0.0.0:51821"
+drift-config peer add my-server --pubkey <SERVER_PUB> \
+  --via-bridge <BRIDGE_B_PUB>
+
+# User just hands the pubkey to drift-mosh:
+drift-mosh-client --server-pub <SERVER_PUB> --exec uptime
+# → drift-mosh-client reads /etc/drift/drift.toml, sees my-server
+#   is on bridge-b, dials tls://0.0.0.0:51821, federates to the
+#   server. Works the same way for `drift-mosh user@host` once
+#   the launcher knows the pubkey for `host`.
+```
+
+This is the "identity-first" promise: addresses are pubkeys, the
+inventory tells the network how to deliver. Direct endpoints
+beat bridged routes when both are available.
+
 ---
 
 ## 10-minute quickstart: 3-node VPN

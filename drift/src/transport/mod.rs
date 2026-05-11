@@ -1972,6 +1972,17 @@ impl Inner {
             peer_out_cid.remove(dst);
         }
 
+        // Drop the cached resumption ticket for this peer. Without
+        // this, the next `send_data` would pick `ResumeHello`
+        // (because a ticket is on file) and the remote — which
+        // may have lost all state in the very scenario we're
+        // recovering from — would reject the resumed handshake
+        // and just drop our packets. Force a full HELLO instead.
+        {
+            let mut tickets = self.client_tickets.lock().await;
+            tickets.remove(dst);
+        }
+
         if was_awaiting_data {
             self.metrics
                 .handshakes_inflight

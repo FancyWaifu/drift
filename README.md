@@ -273,6 +273,23 @@ After `add_federated_peer`, normal `send_data(&remote, ...)` is transparently wr
 
 Internally, federation uses `Transport::connect_federate(url, pubkey)` to open an honest outbound connection on the URL's scheme — TCP/TLS/WS work as bridge-to-bridge links, not just UDP. Verified end-to-end across UDP, TCP, TLS, and WebSocket combinations (`drift-mosh/tests/mixed_transport_federation_test.sh`).
 
+### Zero-config client dial — inventory-driven discovery
+
+When the target's pubkey is registered in `drift.toml` (see [`drift-config/README.md`](drift-config/README.md)), DRIFT tools fill in the rest of the routing themselves:
+
+```bash
+# Operator side: register the server's reachability once.
+drift-config peer add bridge-b --pubkey <B_PUB> \
+  --endpoint "tls://bridge-b.example:51821"
+drift-config peer add my-server --pubkey <SERVER_PUB> \
+  --via-bridge <B_PUB>
+
+# User side: dial by pubkey, no routing flags needed.
+drift-mosh-client --server-pub <SERVER_PUB> --exec uptime
+```
+
+The inventory entry's `endpoints` (direct dial) or `via_bridge` (federation route) is consulted automatically; direct wins when both are present. `drift-mosh-server --bridge <url>@<pub>` reconnects on a 2 s watchdog if the bridge it's connected to restarts — so a bridge bouncing doesn't strand the server.
+
 ### Adding a new transport
 
 Drop a new adapter into any file (drift's source tree, your own crate, a downstream consumer's crate — anywhere). The URL dispatcher finds it via `inventory::iter` at runtime; nothing in drift core needs editing.

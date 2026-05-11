@@ -160,6 +160,70 @@ async fn main() -> Result<()> {
         // Warmup byte triggers the HELLO with the bridge.
         // add_peer alone never initiates a session.
         let _ = t.send_data(&bridge_handle, b".", 0, 0).await;
+
+        // Bridge watchdog: keep the link alive with periodic
+        // keepalives, and force-rehandshake when the link goes
+        // silent (bridge restart, network partition, NAT
+        // rebinding). Without this, a bridge that restarts
+        // strands every client connected through it — DRIFT's
+        // session state on our side keeps thinking the bridge
+        // is alive while every outbound DATA gets dropped at
+        // the bridge's fresh-state recv path as UnknownPeer.
+        //
+        // Strategy: ping every 2s; if `peer_metrics().last_seen`
+        // is older than 10s (the bridge sends beacons every
+        // 500ms, so 10s = 20 missed beacons → bridge is gone),
+        // call `restart_handshake()` which resets the peer's
+        // session to Pending, then send a warmup byte to drive
+        // a fresh HELLO at the same addr. The bridge (whatever
+        // instance is running) sees the HELLO and auto-registers
+        // us via `accept_any_peer`.
+        let t_watchdog = t.clone();
+        let bridge_handle_watchdog = bridge_handle;
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(2));
+            // Skip the first tick (which fires immediately) — we
+            // already sent the warmup byte above.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                // Keepalive — drives HELLO retransmit if mid-
+                // handshake, exercises the path otherwise.
+                let _ = t_watchdog
+                    .send_data(&bridge_handle_watchdog, b".", 0, 0)
+                    .await;
+                // Liveness check. `last_seen` is initialized to
+                // peer-creation time, so a fresh handshake that
+                // hasn't completed yet still gives us a window
+                // before the stale threshold kicks in.
+                //
+                // 5s: bridges emit beacons every 500ms, so even a
+                // brief partition surfaces fast and a real outage
+                // is "obvious" by then. False positives (transient
+                // jitter) only cost one HELLO/HELLO_ACK round-trip
+                // to recover — cheap.
+                if let Some(m) =
+                    t_watchdog.peer_metrics(&bridge_handle_watchdog).await
+                {
+                    let elapsed = m.last_seen.elapsed();
+                    if elapsed > std::time::Duration::from_secs(5) {
+                        tracing::warn!(
+                            elapsed_s = elapsed.as_secs(),
+                            "bridge link silent for >5s; restarting handshake"
+                        );
+                        let _ = t_watchdog
+                            .restart_handshake(&bridge_handle_watchdog)
+                            .await;
+                        // Drive the new HELLO immediately.
+                        let _ = t_watchdog
+                            .send_data(&bridge_handle_watchdog, b".", 0, 0)
+                            .await;
+                    }
+                }
+            }
+        });
+
         // bound_url here is the *bridge* URL; clients connect
         // through that bridge, addressed by our pubkey.
         (t, bridge_url.to_string())

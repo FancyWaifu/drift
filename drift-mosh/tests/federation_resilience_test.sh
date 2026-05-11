@@ -4,14 +4,11 @@
 # Topology: D1 (client) → D2 (bridge) → D3 (bridge) → D4 (server)
 # Federation link: symmetric --federate udp:// on both bridges.
 #
-# Scenarios 1, 2, 3 should pass. Scenario 4 is a known limitation:
-# drift-mosh-server in --bridge mode does a single one-shot
-# handshake with its bridge at startup; if that bridge restarts
-# without the server also restarting, the server's session with
-# the bridge is stale and DRIFT drops every packet from the new
-# bridge instance as "unknown peer". A reconnect loop in
-# drift-mosh-server would close this gap but it's a feature, not
-# a federation-layer bug.
+# All four scenarios should pass. Scenarios 1-3 cover the bridge
+# and federation layer's own restart resilience; scenario 4 covers
+# drift-mosh-server's bridge watchdog (a 2 s ticker that checks
+# peer_metrics().last_seen and force-rehandshakes when the link
+# goes silent >5 s).
 
 set -u
 D1=192.0.2.52
@@ -151,7 +148,11 @@ kill_d3
 sleep 2
 echo "  restarting D3 (same identity) but NOT touching D4..."
 start_d3_bridge
-sleep 3
+# drift-mosh-server's bridge watchdog checks every 2s and resets
+# the handshake if the link has been silent >5s. Total recovery
+# budget: ~7s from D3 restart. Give the test 8s headroom.
+echo "  waiting 8s for the server's bridge watchdog to detect + re-handshake"
+sleep 8
 echo "  --- client --exec round-trip after D3-only restart:"
 got4=$(run_client_exec "POST_D3_ONLY" | tail -1)
 echo "  marker hit count: $got4"

@@ -6,6 +6,7 @@ description = "Mobile-shell replacement over DRIFT — survives network changes,
 
 [dependencies]
 drift = { path = "../drift" }
+drift-config = { path = "../drift-config" }
 tokio = { version = "1", features = ["full"] }
 # Cross-platform PTY spawning: fork + exec + window-size
 # handling for macOS, Linux, Windows without a per-OS branch.
