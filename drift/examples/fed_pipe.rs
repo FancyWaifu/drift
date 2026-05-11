@@ -159,11 +159,11 @@ async fn run_send(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Stream the file in MAX_PAYLOAD - 5 chunks. Compute SHA-256
     // alongside.
     // Outer DRIFT data payload ceiling is MAX_PAYLOAD; subtract
-    // the federated envelope header (98 bytes — 3×32-byte
+    // the federated envelope header (130 bytes — 4×32-byte
     // pubkeys + a 2-byte length) and our own chunk header (5
     // bytes — 1-byte tag + 4-byte seq) to get the bytes
     // available per chunk.
-    let chunk_size = MAX_PAYLOAD.saturating_sub(98 + 5).max(1);
+    let chunk_size = MAX_PAYLOAD.saturating_sub(130 + 5).max(1);
 
     let mut file = tokio::fs::File::open(&args.r#in).await?;
     let total_bytes_expected = file.metadata().await?.len();

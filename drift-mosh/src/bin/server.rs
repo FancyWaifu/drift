@@ -42,6 +42,14 @@ struct Cli {
     #[clap(long)]
     bind: Option<String>,
 
+    /// Run as a federated peer of a bridge instead of binding
+    /// a listen URL directly. Format: `<url>@<bridge-pubkey-hex>`.
+    /// When set, `--bind` is ignored. The server connects to
+    /// the bridge and accepts any client that sends a federated
+    /// envelope addressed to its pubkey (via `accept_any_peer`).
+    #[clap(long)]
+    bridge: Option<String>,
+
     #[clap(long)]
     shell: Option<String>,
 
@@ -115,17 +123,52 @@ async fn main() -> Result<()> {
         accept_any_peer: true,
         ..TransportConfig::default()
     };
-    // --bind accepts a scheme prefix (`udp://`, `tcp://`, …) so
-    // the same server can run over any transport DRIFT supports.
-    // A bare `host:port` keeps back-compat with old launcher
-    // scripts. All transport-specific setup (UDP socket vs TCP
-    // accept-loop, future WebSocket upgrade, etc.) lives in
-    // `drift::Transport::bind_url` — this binary doesn't know or
-    // care which scheme is which.
-    let (transport, bound_url) = Transport::bind_url(&bind_addr, identity, tcfg)
-        .await
-        .context("DRIFT transport setup failed")?;
-    let transport = Arc::new(transport);
+    // Two startup paths:
+    //
+    //   * Direct bind — `--bind udp://0.0.0.0:9100`. Server
+    //     listens directly; clients connect to it on its public
+    //     IP+port. Original behavior.
+    //
+    //   * Federated — `--bridge udp://<bridge>:51820@<bridge-pub>`.
+    //     Server doesn't listen at all. It connects outbound to
+    //     the named bridge, completes the handshake, and accepts
+    //     federated traffic. accept_any_peer + the auto-register
+    //     for federated peers on the transport side mean any
+    //     client that sends a Federated envelope addressed to
+    //     this server's pubkey gets accepted as a federated peer
+    //     automatically; reply traffic flows back through the
+    //     same bridge with no per-client configuration.
+    let (transport, bound_url) = if let Some(bridge_spec) = cli.bridge.as_deref() {
+        let (bridge_url, bridge_pub_hex) = bridge_spec
+            .split_once('@')
+            .ok_or_else(|| anyhow!("--bridge expected <url>@<pubkey-hex>"))?;
+        let bridge_pub_bytes = hex::decode(bridge_pub_hex)
+            .context("--bridge pubkey is not valid hex")?;
+        if bridge_pub_bytes.len() != 32 {
+            return Err(anyhow!("--bridge pubkey must be 32 bytes"));
+        }
+        let mut bridge_pub = [0u8; 32];
+        bridge_pub.copy_from_slice(&bridge_pub_bytes);
+
+        let (t, bridge_addr) =
+            Transport::connect_url(bridge_url, identity, tcfg).await?;
+        let t = Arc::new(t);
+        let bridge_handle = t
+            .add_peer(bridge_pub, bridge_addr, drift::Direction::Initiator)
+            .await
+            .context("add_peer(bridge) failed")?;
+        // Warmup byte triggers the HELLO with the bridge.
+        // add_peer alone never initiates a session.
+        let _ = t.send_data(&bridge_handle, b".", 0, 0).await;
+        // bound_url here is the *bridge* URL; clients connect
+        // through that bridge, addressed by our pubkey.
+        (t, bridge_url.to_string())
+    } else {
+        let (t, bound) = Transport::bind_url(&bind_addr, identity, tcfg)
+            .await
+            .context("DRIFT transport setup failed")?;
+        (Arc::new(t), bound)
+    };
     // The bound URL ends in the resolved bind address — strip
     // the `<scheme>://` prefix to get the bare `host:port`
     // form the legacy banner uses.
