@@ -55,6 +55,23 @@ impl Identity {
         }
         Some(*shared.as_bytes())
     }
+
+    /// XEdDSA sign `message` with this identity's static private
+    /// key. Used for federation presence tickets (see
+    /// `drift::transport::federated::build_ticket`). The raw
+    /// private bytes are extracted on the stack, used to sign,
+    /// then zeroed when the temporary goes out of scope.
+    /// `nonce_extra` is 64 bytes of CSPRNG randomness for the
+    /// hedged-deterministic signing — the caller MUST sample
+    /// fresh entropy each call.
+    pub fn xeddsa_sign(&self, message: &[u8], nonce_extra: &[u8; 64]) -> [u8; 64] {
+        let secret_bytes = self.secret.to_bytes();
+        let sig = crate::xeddsa::sign(&secret_bytes, message, nonce_extra);
+        // `to_bytes()` produces an owned [u8; 32] on the stack; let
+        // zeroize wipe it when this Zeroizing wrapper drops.
+        let _ = Zeroizing::new(secret_bytes);
+        sig
+    }
 }
 
 /// Derive a 32-byte session key from static DH + ephemeral DH + nonces.

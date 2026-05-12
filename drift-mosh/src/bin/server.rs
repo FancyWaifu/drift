@@ -224,6 +224,42 @@ async fn main() -> Result<()> {
             }
         });
 
+        // Presence-ticket emitter. Once per 5 minutes, sign a
+        // 10-minute-lifetime XEdDSA ticket attesting "I (this
+        // pubkey) am connected to this bridge" and send it to
+        // the bridge so it can include us in its
+        // FederationDirectory v2 announcements. Without this,
+        // remote bridges receive announcements that fail
+        // ticket verification and our pubkey is silently
+        // omitted from their directories — federation routing
+        // can't find us.
+        let t_presence = t.clone();
+        let presence_bridge = bridge_handle;
+        tokio::spawn(async move {
+            // First emission ASAP so the bridge can announce us
+            // on its next 7s directory tick. Give the handshake a
+            // moment to complete; `register_presence_to` errors
+            // out cleanly if the session isn't Established yet.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                for _ in 0..3 {
+                    match t_presence
+                        .register_presence_to(&presence_bridge, 600_000)
+                        .await
+                    {
+                        Ok(()) => break,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "presence ticket emit failed; retrying");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+                ticker.tick().await;
+            }
+        });
+
         // bound_url here is the *bridge* URL; clients connect
         // through that bridge, addressed by our pubkey.
         (t, bridge_url.to_string())

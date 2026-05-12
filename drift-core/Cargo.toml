@@ -6,6 +6,14 @@ description = "Platform-independent DRIFT protocol primitives"
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+# XEdDSA presence-ticket signing/verification on the existing
+# Curve25519 identity keys. `curve25519-dalek` for Edwards-point
+# and scalar arithmetic, `sha2` for the SHA-512 inside the
+# Signal XEdDSA construction (intentionally per-spec rather
+# than substituting BLAKE2b — keeps the security claim crisp
+# and lets future reviewers cross-check against the spec).
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "digest", "zeroize"] }
+sha2 = "0.10"
 # Wraps derived session keys / rekey outputs in
 # `Zeroizing<[u8; 32]>` so stack copies of key bytes get
 # scrubbed at end of scope. Long-term `Identity` keys zero via

@@ -140,6 +140,25 @@ pub enum PacketType {
     /// their target lives on can leave that field empty and let
     /// any bridge in the chain resolve.
     FederationDirectory = 20,
+
+    /// Client-to-bridge presence-ticket emission. Sent by a
+    /// client over its Established session with a bridge to
+    /// prove the client really is connected here. Payload is
+    /// the 96-byte ticket from `drift::transport::federated`:
+    /// 8-byte u64 BE expiry_ms, 24-byte nonce, 64-byte XEdDSA
+    /// signature. The bridge stores the ticket keyed by the
+    /// client's static pubkey (the session-authenticated
+    /// sender). When the bridge announces its connected clients
+    /// in `FederationDirectory`, it embeds each client's stored
+    /// ticket so third-party receivers can cryptographically
+    /// verify the announcement.
+    ///
+    /// Clients re-emit tickets before their stored ticket
+    /// expires (typical lifetime: 10 minutes). Bridges that
+    /// receive a ticket from a non-client (no session) or
+    /// whose stored copy never gets refreshed simply drop the
+    /// announcement for that pubkey.
+    PresenceTicket = 21,
 }
 
 impl PacketType {
@@ -162,6 +181,7 @@ impl PacketType {
             18 => Ok(Self::Pong),
             19 => Ok(Self::Federated),
             20 => Ok(Self::FederationDirectory),
+            21 => Ok(Self::PresenceTicket),
             _ => Err(DriftError::UnknownType(v)),
         }
     }
@@ -418,6 +438,7 @@ mod tests {
         PacketType::Pong,
         PacketType::Federated,
         PacketType::FederationDirectory,
+        PacketType::PresenceTicket,
     ];
 
     #[test]

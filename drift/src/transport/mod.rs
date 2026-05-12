@@ -26,8 +26,10 @@ pub(crate) mod batch;
 mod cookies;
 mod federated;
 pub use federated::{
-    build as build_federated, build_directory, parse as parse_federated, parse_directory,
-    FederatedEnvelope, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES, UNKNOWN_BRIDGE_PUB,
+    build as build_federated, build_directory, build_ticket, decode_ticket, encode_ticket,
+    parse as parse_federated, parse_directory, ticket_signed_msg, verify_ticket,
+    FederatedEnvelope, PresenceTicket, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES, TICKET_LEN,
+    UNKNOWN_BRIDGE_PUB,
 };
 #[cfg(unix)]
 mod ecn;
@@ -283,6 +285,12 @@ pub(crate) struct MetricsInner {
     /// session-authenticated sender. Counts identity-spoofing
     /// attempts at the source bridge.
     pub(crate) federation_spoof_drops: AtomicU64,
+    /// FederationDirectory entries dropped because their attached
+    /// XEdDSA presence ticket failed verification (expired, wrong
+    /// signature, signed for a different bridge). Counts attempts
+    /// by a federated bridge to announce pubkeys it doesn't
+    /// actually hold a real session with.
+    pub(crate) federation_invalid_tickets_dropped: AtomicU64,
     pub(crate) batched_sends: AtomicU64,
     pub(crate) handshakes_inflight: std::sync::atomic::AtomicUsize,
     /// Packets dropped because the destination peer wasn't
@@ -332,6 +340,7 @@ pub struct Metrics {
     pub batched_sends: u64,
     pub unknown_peer_drops: u64,
     pub federation_spoof_drops: u64,
+    pub federation_invalid_tickets_dropped: u64,
 }
 
 /// One outbound packet for `Transport::send_data_batch_qos`.
@@ -488,6 +497,22 @@ pub(crate) struct Inner {
     pub(crate) peer_directory: Arc<
         StdMutex<StdHashMap<[u8; 32], (PeerId, std::time::Instant)>>,
     >,
+
+    /// Per-client presence tickets received via `PresenceTicket`
+    /// packets. Keyed by the client's static pubkey (the
+    /// session-authenticated sender, NOT anything the packet
+    /// claims). Used by `Inner::announce_directory_entries` to
+    /// build the (pubkey, ticket) pairs that go out in
+    /// `FederationDirectory` announcements.
+    ///
+    /// Set on receive in `handle_presence_ticket`; client refreshes
+    /// its ticket before expiry, replacing the stored entry.
+    /// Entries are dropped passively when the client disconnects
+    /// (no eviction logic — the absence of the client from
+    /// `established_client_pubkeys` excludes them from the
+    /// announcement anyway).
+    pub(crate) presence_tickets:
+        Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
 }
 
 pub struct Transport {
@@ -633,6 +658,7 @@ impl Transport {
             session_reset_tx: Arc::new(StdMutex::new(None)),
             federation_table: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_directory: Arc::new(StdMutex::new(StdHashMap::new())),
+            presence_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
         });
 
         // ECN was set up by bind_with_config before calling
@@ -1021,6 +1047,9 @@ impl Transport {
             unknown_peer_drops: m.unknown_peer_drops.load(Ordering::Relaxed),
             federation_spoof_drops: m
                 .federation_spoof_drops
+                .load(Ordering::Relaxed),
+            federation_invalid_tickets_dropped: m
+                .federation_invalid_tickets_dropped
                 .load(Ordering::Relaxed),
         }
     }
@@ -1480,7 +1509,10 @@ impl Transport {
     /// have been queued; failures to individual peers are logged
     /// and otherwise ignored (one fed peer being unreachable
     /// shouldn't prevent the others from receiving the update).
-    pub async fn announce_directory(&self, client_pubs: &[[u8; 32]]) {
+    pub async fn announce_directory(
+        &self,
+        entries: &[([u8; 32], federated::PresenceTicket)],
+    ) {
         let peers: Vec<PeerId> = self
             .inner
             .federation_table
@@ -1492,7 +1524,7 @@ impl Transport {
         if peers.is_empty() {
             return;
         }
-        let chunks: Vec<Vec<u8>> = client_pubs
+        let chunks: Vec<Vec<u8>> = entries
             .chunks(federated::MAX_DIRECTORY_ENTRIES)
             .map(federated::build_directory)
             .collect();
@@ -1551,6 +1583,98 @@ impl Transport {
             }
         }
         out
+    }
+
+    /// Snapshot the (pubkey, presence-ticket) pairs for every
+    /// Established non-federation peer that has emitted a valid
+    /// presence ticket to us. This is what `drift bridge`
+    /// hands to `announce_directory` — only pubkeys we actually
+    /// have cryptographic attestation for go out in the
+    /// FederationDirectory packet.
+    ///
+    /// Clients that haven't sent us a ticket yet are silently
+    /// omitted (they'll appear once they do). This excludes
+    /// "freeloader" clients that won't sign tickets — but in
+    /// practice every DRIFT client that talks to a bridge calls
+    /// `register_presence_to` for its bridge during startup,
+    /// so the omission is a non-event in the legitimate case.
+    pub async fn established_client_entries(
+        &self,
+    ) -> Vec<([u8; 32], federated::PresenceTicket)> {
+        let fed_pubs: std::collections::HashSet<[u8; 32]> = self
+            .inner
+            .federation_table
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        let mut pubs = Vec::new();
+        let peers = self.inner.peers.lock_all().await;
+        for p in peers.iter() {
+            if matches!(
+                p.handshake,
+                drift_core::session::HandshakeState::Established { .. }
+            ) && !fed_pubs.contains(&p.peer_static_pub)
+            {
+                pubs.push(p.peer_static_pub);
+            }
+        }
+        drop(peers);
+        let tickets = self.inner.presence_tickets.lock().unwrap();
+        pubs.into_iter()
+            .filter_map(|pk| tickets.get(&pk).cloned().map(|t| (pk, t)))
+            .collect()
+    }
+
+    /// Sign and emit a presence ticket to `bridge` so it can
+    /// announce us in its FederationDirectory. Returns once the
+    /// ticket has been queued for send; the bridge stores the
+    /// ticket on receipt and immediately becomes able to attest
+    /// to our presence on its next directory tick.
+    ///
+    /// `lifetime_ms` controls how long the bridge can use the
+    /// ticket before it expires. 10 minutes (600_000 ms) is a
+    /// reasonable default — long enough that minor clock skew
+    /// between client and verifier doesn't matter, short enough
+    /// that a stolen ticket becomes useless quickly.
+    ///
+    /// Callers should re-invoke this periodically (typically at
+    /// lifetime_ms / 2) to refresh the bridge's stored copy.
+    pub async fn register_presence_to(
+        &self,
+        bridge: &PeerId,
+        lifetime_ms: u64,
+    ) -> Result<()> {
+        let bridge_pub = {
+            let peers = self.inner.peers.lock_for(bridge).await;
+            peers
+                .get(bridge)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let expiry_ms = now_ms.saturating_add(lifetime_ms);
+
+        let mut nonce = [0u8; 24];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+        let mut nonce_extra = [0u8; 64];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_extra);
+
+        let signed_msg = federated::ticket_signed_msg(&bridge_pub, expiry_ms, &nonce);
+        let sig = self.inner.identity.xeddsa_sign(&signed_msg, &nonce_extra);
+        let ticket = federated::PresenceTicket {
+            expiry_ms,
+            nonce,
+            sig,
+        };
+        let wire = federated::encode_ticket(&ticket);
+        self.inner
+            .send_typed(bridge, PacketType::PresenceTicket, &wire)
+            .await
     }
 
     /// Number of currently-known entries in the peer directory.
@@ -2519,7 +2643,9 @@ impl Inner {
         // route the wrong type through here.
         if !matches!(
             packet_type,
-            PacketType::Federated | PacketType::FederationDirectory
+            PacketType::Federated
+                | PacketType::FederationDirectory
+                | PacketType::PresenceTicket
         ) {
             return Err(DriftError::DecodeError);
         }
@@ -2932,11 +3058,41 @@ impl Inner {
             return Err(DriftError::AuthFailed);
         }
 
-        let pubs = federated::parse_directory(&payload_bytes)?;
-        let new_set: std::collections::HashSet<[u8; 32]> = pubs
-            .into_iter()
-            .filter(|p| *p != self.identity.public_bytes())
-            .collect();
+        let entries = federated::parse_directory(&payload_bytes)?;
+
+        // ── Per-entry XEdDSA presence-ticket verification ──
+        //
+        // Each entry carries a ticket the client signed for the
+        // announcing bridge (sender_pub). A malicious bridge that
+        // claims a pubkey it doesn't actually have a session with
+        // can't produce a valid ticket — the client's private key
+        // is required. Drop bad entries individually (and bump the
+        // metric) rather than rejecting the whole announcement: an
+        // honest bridge that includes one stale ticket in a chunk
+        // shouldn't have its other clients deregistered.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let our_pub = self.identity.public_bytes();
+        let mut new_set: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        for (client_pub, ticket) in entries {
+            if client_pub == our_pub {
+                continue;
+            }
+            if federated::verify_ticket(&client_pub, &sender_pub, &ticket, now_ms).is_err() {
+                self.metrics
+                    .federation_invalid_tickets_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    announcer = ?sender_pub,
+                    claimed_client = ?client_pub,
+                    "directory: dropped entry with invalid presence ticket"
+                );
+                continue;
+            }
+            new_set.insert(client_pub);
+        }
         let now = std::time::Instant::now();
         let mut dir = self.peer_directory.lock().unwrap();
 
@@ -2987,6 +3143,65 @@ impl Inner {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Receive-side handler for `PacketType::PresenceTicket`.
+    ///
+    /// Verifies the carried ticket against the sender's static
+    /// pubkey and our own (since the ticket must be signed for
+    /// THIS bridge). On success, stores it in `presence_tickets`
+    /// keyed by the sender's pubkey, replacing any older copy.
+    /// Failures (bad sig, expired, ticket signed for a different
+    /// bridge) are dropped silently — emitting a metric on every
+    /// adversarial probe attempt would give a noisy oracle.
+    async fn handle_presence_ticket(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        let peer_id = header.src_id;
+
+        // Decrypt with the PresenceTicket type tag in AAD.
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::PresenceTicket as u8, &aad, body)?
+        };
+
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+
+        let ticket = federated::decode_ticket(&payload_bytes)?;
+        let our_pub = self.identity.public_bytes();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        federated::verify_ticket(&sender_pub, &our_pub, &ticket, now_ms)?;
+
+        self.presence_tickets
+            .lock()
+            .unwrap()
+            .insert(sender_pub, ticket);
         Ok(())
     }
 
@@ -3340,6 +3555,10 @@ impl Inner {
             }
             PacketType::FederationDirectory => {
                 self.handle_federation_directory(&header, data, body).await?;
+                Ok(None)
+            }
+            PacketType::PresenceTicket => {
+                self.handle_presence_ticket(&header, data, body).await?;
                 Ok(None)
             }
         }
