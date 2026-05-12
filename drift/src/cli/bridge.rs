@@ -230,10 +230,11 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(7));
             loop {
-                let pubs = t.established_client_pubkeys().await;
-                t.announce_directory(&pubs).await;
+                let entries = t.established_client_entries().await;
+                let n = entries.len();
+                t.announce_directory(&entries).await;
                 tracing::debug!(
-                    n_clients = pubs.len(),
+                    n_clients = n,
                     "federation directory: announced"
                 );
                 ticker.tick().await;

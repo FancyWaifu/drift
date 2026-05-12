@@ -13,6 +13,7 @@ pub mod pq;
 pub mod session;
 pub mod short_header;
 pub mod time;
+pub mod xeddsa;
 
 pub use crypto::{derive_peer_id, Direction, PeerId, SessionKey, KEY_LEN, PEER_ID_LEN};
 pub use error::{DriftError, Result};

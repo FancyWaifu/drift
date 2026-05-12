@@ -22,26 +22,52 @@ use drift::{Direction, Transport, TransportConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 
-/// Build a FederationDirectory wire payload from a slice of
-/// client pubkeys. Matches the format documented on
-/// `PacketType::FederationDirectory`:
+/// Build a FederationDirectory v2 wire payload from a slice of
+/// client secret seeds + the announcing bridge's pubkey. Each
+/// entry carries a freshly-signed XEdDSA presence ticket so the
+/// receiver's per-entry verification accepts it.
+///
+/// Matches the format documented on `PacketType::FederationDirectory`:
 ///
 /// ```text
-///   [0]    version (u8) = 1
+///   [0]    version (u8) = 2
 ///   [1]    reserved (u8) = 0
 ///   [2..4] count (u16 BE)
-///   [4..]  count * 32-byte pubkeys
+///   [4..]  count * (32-byte pubkey ‖ 96-byte ticket)
 /// ```
-fn build_directory_payload(pubs: &[[u8; 32]]) -> Vec<u8> {
-    let count = pubs.len() as u16;
-    let mut out = Vec::with_capacity(4 + pubs.len() * 32);
-    out.push(1); // version
+fn build_directory_payload(
+    client_seeds: &[[u8; 32]],
+    announcing_bridge_pub: &[u8; 32],
+) -> Vec<u8> {
+    let count = client_seeds.len() as u16;
+    let mut out = Vec::with_capacity(4 + client_seeds.len() * (32 + 96));
+    out.push(2); // version
     out.push(0); // reserved
     out.extend_from_slice(&count.to_be_bytes());
-    for p in pubs {
-        out.extend_from_slice(p);
+    let expiry_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 600_000;
+    for seed in client_seeds {
+        let client_pub =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*seed)).to_bytes();
+        let ticket = drift::transport::build_ticket(
+            seed,
+            announcing_bridge_pub,
+            expiry_ms,
+            [0xAA; 24],
+            &[0xBB; 64],
+        );
+        out.extend_from_slice(&client_pub);
+        out.extend_from_slice(&drift::transport::encode_ticket(&ticket));
     }
     out
+}
+
+/// Helper: deterministic Curve25519 pubkey for a given seed.
+fn pub_for(seed: &[u8; 32]) -> [u8; 32] {
+    x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*seed)).to_bytes()
 }
 
 /// Three-Transport setup:
@@ -60,6 +86,8 @@ async fn three_bridges() -> (
     Transport,
     drift_core::PeerId,
     drift_core::PeerId,
+    [u8; 32], // bridge_b_pub
+    [u8; 32], // bridge_c_pub
 ) {
     let receiver_id = Identity::from_secret_bytes([0x11; 32]);
     let bridge_b_id = Identity::from_secret_bytes([0x22; 32]);
@@ -113,25 +141,37 @@ async fn three_bridges() -> (
     receiver.register_federation_peer(bridge_b_pub, b_peer_id_on_receiver);
     receiver.register_federation_peer(bridge_c_pub, c_peer_id_on_receiver);
 
-    (receiver, bridge_b, bridge_c, b_to_receiver, c_to_receiver)
+    (
+        receiver,
+        bridge_b,
+        bridge_c,
+        b_to_receiver,
+        c_to_receiver,
+        bridge_b_pub,
+        bridge_c_pub,
+    )
 }
 
 // ─── Test 1: first-write-wins ─────────────────────────────────────
 
 #[tokio::test]
 async fn cross_announcer_conflict_keeps_first_writer() {
-    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv) = three_bridges().await;
+    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv, b_pub, c_pub) =
+        three_bridges().await;
 
-    // A client pubkey neither bridge actually hosts — the point
-    // of the test is the routing-table arithmetic, not real
-    // sessions with the claimed client.
-    let contested = Identity::generate().public_bytes();
+    // A deterministic seed for the contested client identity,
+    // so both B and C can mint valid tickets for "themselves
+    // hosting" this client. (In a real deployment the client
+    // would only have signed for ONE bridge; here we let both
+    // forge to exercise the receiver's first-write-wins logic.)
+    let contested_seed = [0x77u8; 32];
+    let contested = pub_for(&contested_seed);
 
     // Bridge B announces it has the contested client.
     bridge_b
         .__debug_send_directory_announcement(
             &b_to_recv,
-            &build_directory_payload(&[contested]),
+            &build_directory_payload(&[contested_seed], &b_pub),
         )
         .await
         .unwrap();
@@ -147,7 +187,7 @@ async fn cross_announcer_conflict_keeps_first_writer() {
     bridge_c
         .__debug_send_directory_announcement(
             &c_to_recv,
-            &build_directory_payload(&[contested]),
+            &build_directory_payload(&[contested_seed], &c_pub),
         )
         .await
         .unwrap();
@@ -174,16 +214,19 @@ async fn cross_announcer_conflict_keeps_first_writer() {
 
 #[tokio::test]
 async fn announce_set_replaces_announcer_entries() {
-    let (receiver, bridge_b, _bridge_c, b_to_recv, _c_to_recv) = three_bridges().await;
+    let (receiver, bridge_b, _bridge_c, b_to_recv, _c_to_recv, b_pub, _c_pub) =
+        three_bridges().await;
 
-    let alice = Identity::generate().public_bytes();
-    let bob = Identity::generate().public_bytes();
+    let alice_seed = [0xA1u8; 32];
+    let bob_seed = [0xB2u8; 32];
+    let alice = pub_for(&alice_seed);
+    let bob = pub_for(&bob_seed);
 
     // Bridge B announces [alice, bob].
     bridge_b
         .__debug_send_directory_announcement(
             &b_to_recv,
-            &build_directory_payload(&[alice, bob]),
+            &build_directory_payload(&[alice_seed, bob_seed], &b_pub),
         )
         .await
         .unwrap();
@@ -198,7 +241,7 @@ async fn announce_set_replaces_announcer_entries() {
     bridge_b
         .__debug_send_directory_announcement(
             &b_to_recv,
-            &build_directory_payload(&[alice]),
+            &build_directory_payload(&[alice_seed], &b_pub),
         )
         .await
         .unwrap();
@@ -219,7 +262,10 @@ async fn announce_set_replaces_announcer_entries() {
     // bridge with zero clients (e.g. just-restarted) signals
     // "drop everything you previously recorded under me".
     bridge_b
-        .__debug_send_directory_announcement(&b_to_recv, &build_directory_payload(&[]))
+        .__debug_send_directory_announcement(
+            &b_to_recv,
+            &build_directory_payload(&[], &b_pub),
+        )
         .await
         .unwrap();
     sleep(Duration::from_millis(300)).await;
@@ -241,15 +287,17 @@ async fn announce_set_replaces_announcer_entries() {
 
 #[tokio::test]
 async fn migration_after_silence_is_allowed() {
-    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv) = three_bridges().await;
+    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv, b_pub, c_pub) =
+        three_bridges().await;
 
-    let migrating = Identity::generate().public_bytes();
+    let migrating_seed = [0xCDu8; 32];
+    let migrating = pub_for(&migrating_seed);
 
     // B announces the client.
     bridge_b
         .__debug_send_directory_announcement(
             &b_to_recv,
-            &build_directory_payload(&[migrating]),
+            &build_directory_payload(&[migrating_seed], &b_pub),
         )
         .await
         .unwrap();
@@ -258,7 +306,10 @@ async fn migration_after_silence_is_allowed() {
 
     // B announces it no longer has the client (it disconnected).
     bridge_b
-        .__debug_send_directory_announcement(&b_to_recv, &build_directory_payload(&[]))
+        .__debug_send_directory_announcement(
+            &b_to_recv,
+            &build_directory_payload(&[], &b_pub),
+        )
         .await
         .unwrap();
     sleep(Duration::from_millis(300)).await;
@@ -273,7 +324,7 @@ async fn migration_after_silence_is_allowed() {
     bridge_c
         .__debug_send_directory_announcement(
             &c_to_recv,
-            &build_directory_payload(&[migrating]),
+            &build_directory_payload(&[migrating_seed], &c_pub),
         )
         .await
         .unwrap();

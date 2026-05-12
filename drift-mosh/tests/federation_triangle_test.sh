@@ -107,7 +107,13 @@ start_s3() {
 
 echo "starting B1, B2, B3 (federated triangle)…"
 start_b1; start_b2; start_b3
-sleep 3
+# Triangle federation: each bridge has 2 federation peers. Worst-
+# case startup is when a bridge's --federate target isn't listening
+# yet on first attempt and the retry backoff (500ms → 1s → 2s …)
+# pushes establishment a few seconds out. 6s gives ample headroom
+# for all 6 bridge-to-bridge handshakes to settle before dials fire
+# — observed 4/6 failures (specifically the B1↔B3 pair) at 3s.
+sleep 6
 echo "starting S1, S2, S3 (one server per bridge)…"
 start_s1; start_s2; start_s3
 sleep 4

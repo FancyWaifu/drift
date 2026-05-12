@@ -83,51 +83,198 @@ pub fn parse(bytes: &[u8]) -> Result<FederatedEnvelope<'_>, DriftError> {
     })
 }
 
-// ─── FederationDirectory codec ───────────────────────────────────
+// ─── Presence tickets (XEdDSA) ───────────────────────────────────
+//
+// A presence ticket is a client's cryptographic attestation that
+// "yes, I really am connected to bridge B, and B may announce me
+// in its FederationDirectory." Without tickets, a malicious
+// federated bridge could lie — claiming pubkeys it doesn't host —
+// and remote receivers would have no way to detect it.
+//
+// The client signs `(bridge_pub || expiry_ms || nonce)` with its
+// X25519 static identity key (via XEdDSA — see
+// `drift_core::xeddsa`). The bridge stores the (expiry, nonce, sig)
+// tuple alongside the client's pubkey. When the bridge announces
+// in FederationDirectory v2, it embeds the tuple per entry.
+// Receivers reconstruct the signed message — using the *announcing
+// bridge's* pubkey as `bridge_pub` — and verify with the announced
+// client's pubkey. A bridge that tries to announce a pubkey it
+// doesn't have a real ticket for produces a signature that fails
+// verification against any honest receiver.
+//
+// Wire (96 bytes — ticket-on-the-wire, client → bridge):
+// ```text
+//   [0..8]    expiry_ms (u64 BE)  — unix-ms after which the ticket is invalid
+//   [8..32]   nonce     ([u8; 24])
+//   [32..96]  sig       ([u8; 64], XEdDSA over the canonical message)
+// ```
+// The signed message is built by `ticket_signed_msg(bridge_pub,
+// expiry_ms, nonce)`; the bridge pubkey is implicit on the wire
+// (every ticket is for the bridge it's sent to / announced from).
+
+/// On-wire length of a presence ticket.
+pub const TICKET_LEN: usize = 8 + 24 + 64;
+const TICKET_NONCE_LEN: usize = 24;
+
+/// A presence ticket as it travels on the wire and as the bridge
+/// stores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresenceTicket {
+    /// Unix milliseconds after which the ticket must be rejected.
+    pub expiry_ms: u64,
+    /// 24 bytes of caller-supplied randomness. Prevents a stolen
+    /// ticket from being replayed across bridges (the nonce is
+    /// part of the signed message; the bridge it was signed for
+    /// is implicit).
+    pub nonce: [u8; TICKET_NONCE_LEN],
+    /// XEdDSA signature over `ticket_signed_msg(bridge_pub,
+    /// expiry_ms, nonce)`.
+    pub sig: [u8; 64],
+}
+
+/// Canonical bytes the client signs. Receivers reconstruct this
+/// exactly to verify — `bridge_pub` is the *announcing* bridge in
+/// the FederationDirectory case, or the local bridge in the
+/// PresenceTicket-from-client case.
+pub fn ticket_signed_msg(
+    bridge_pub: &[u8; 32],
+    expiry_ms: u64,
+    nonce: &[u8; TICKET_NONCE_LEN],
+) -> [u8; 32 + 8 + TICKET_NONCE_LEN] {
+    let mut out = [0u8; 32 + 8 + TICKET_NONCE_LEN];
+    out[..32].copy_from_slice(bridge_pub);
+    out[32..40].copy_from_slice(&expiry_ms.to_be_bytes());
+    out[40..].copy_from_slice(nonce);
+    out
+}
+
+/// Build a fresh ticket. `client_secret` is the X25519 private
+/// identity bytes; `bridge_pub` is the bridge the ticket is for;
+/// `expiry_ms` is when this ticket goes invalid; `nonce_extra` is
+/// 64 bytes of CSPRNG entropy for the XEdDSA hedged-deterministic
+/// signing.
+pub fn build_ticket(
+    client_secret: &[u8; 32],
+    bridge_pub: &[u8; 32],
+    expiry_ms: u64,
+    nonce: [u8; TICKET_NONCE_LEN],
+    nonce_extra: &[u8; 64],
+) -> PresenceTicket {
+    let msg = ticket_signed_msg(bridge_pub, expiry_ms, &nonce);
+    let sig = drift_core::xeddsa::sign(client_secret, &msg, nonce_extra);
+    PresenceTicket {
+        expiry_ms,
+        nonce,
+        sig,
+    }
+}
+
+/// Serialize a ticket onto the wire (96 bytes).
+pub fn encode_ticket(t: &PresenceTicket) -> [u8; TICKET_LEN] {
+    let mut out = [0u8; TICKET_LEN];
+    out[..8].copy_from_slice(&t.expiry_ms.to_be_bytes());
+    out[8..32].copy_from_slice(&t.nonce);
+    out[32..].copy_from_slice(&t.sig);
+    out
+}
+
+/// Parse a 96-byte on-wire ticket.
+pub fn decode_ticket(bytes: &[u8]) -> Result<PresenceTicket, DriftError> {
+    if bytes.len() != TICKET_LEN {
+        return Err(DriftError::DecodeError);
+    }
+    let expiry_ms = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+    let mut nonce = [0u8; TICKET_NONCE_LEN];
+    nonce.copy_from_slice(&bytes[8..32]);
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(&bytes[32..]);
+    Ok(PresenceTicket {
+        expiry_ms,
+        nonce,
+        sig,
+    })
+}
+
+/// Verify a ticket against `client_pub` for the announcing/local
+/// `bridge_pub`. Checks the expiry, then the XEdDSA signature.
+///
+/// `now_ms` is the receiver's wall-clock in unix ms. The ticket
+/// MUST be non-expired AND the signature MUST verify under
+/// `client_pub` over `ticket_signed_msg(bridge_pub, …)`.
+pub fn verify_ticket(
+    client_pub: &[u8; 32],
+    bridge_pub: &[u8; 32],
+    ticket: &PresenceTicket,
+    now_ms: u64,
+) -> Result<(), DriftError> {
+    if ticket.expiry_ms <= now_ms {
+        return Err(DriftError::AuthFailed);
+    }
+    let msg = ticket_signed_msg(bridge_pub, ticket.expiry_ms, &ticket.nonce);
+    drift_core::xeddsa::verify(client_pub, &msg, &ticket.sig)
+}
+
+// ─── FederationDirectory codec (v2) ──────────────────────────────
 //
 // Bridge-to-bridge announcement of connected clients. Wire format
 // inside the AEAD-sealed body of a PacketType::FederationDirectory:
 //
 // ```text
-//   [0]        version  (u8) = 1
+//   [0]        version  (u8) = 2
 //   [1]        reserved (u8) = 0
-//   [2..4]     count    (u16 BE) — number of pubkey entries
-//   [4..]      entries  ([32 bytes] * count)
+//   [2..4]     count    (u16 BE) — number of (pubkey, ticket) entries
+//   [4..]      entries  ((32-byte pubkey ‖ 96-byte ticket) * count)
 // ```
 //
-// Capped at MAX_DIRECTORY_ENTRIES per packet so a single
-// announcement fits comfortably under MAX_PAYLOAD. Bridges with
-// more clients send multiple packets.
+// Each entry is 128 bytes. Capped at MAX_DIRECTORY_ENTRIES per
+// packet so a single announcement fits comfortably under
+// MAX_PAYLOAD (~10 entries × 128 + 4 header = 1284 bytes).
+// Bridges with more clients send multiple packets.
+//
+// v1 (32-byte-per-entry, no tickets) was the announcement format
+// before XEdDSA presence tickets landed. v2 is incompatible with
+// v1 — peers running v1 receive a `DecodeError` and silently
+// drop the announcement, which is the correct behavior for a
+// peer running an outdated DRIFT.
 
 const DIRECTORY_HEADER_LEN: usize = 4;
-const DIRECTORY_VERSION: u8 = 1;
-pub const MAX_DIRECTORY_ENTRIES: usize = 40;
+const DIRECTORY_VERSION: u8 = 2;
+const DIRECTORY_ENTRY_LEN: usize = 32 + TICKET_LEN;
+/// Maximum entries per directory packet. Sized so that
+/// `DIRECTORY_HEADER_LEN + MAX_DIRECTORY_ENTRIES * 128` fits
+/// comfortably under MAX_PAYLOAD.
+pub const MAX_DIRECTORY_ENTRIES: usize = 10;
 
-/// Build a FederationDirectory payload from a slice of client
-/// pubkeys. Callers MUST keep `pubs.len() <= MAX_DIRECTORY_ENTRIES`.
-pub fn build_directory(pubs: &[[u8; 32]]) -> Vec<u8> {
+/// Build a FederationDirectory v2 payload from a slice of
+/// (pubkey, ticket) pairs. Callers MUST keep
+/// `entries.len() <= MAX_DIRECTORY_ENTRIES`.
+pub fn build_directory(entries: &[([u8; 32], PresenceTicket)]) -> Vec<u8> {
     debug_assert!(
-        pubs.len() <= MAX_DIRECTORY_ENTRIES,
+        entries.len() <= MAX_DIRECTORY_ENTRIES,
         "directory chunk too large: {}",
-        pubs.len()
+        entries.len()
     );
-    let count = pubs.len() as u16;
-    let mut out = Vec::with_capacity(DIRECTORY_HEADER_LEN + pubs.len() * 32);
+    let count = entries.len() as u16;
+    let mut out = Vec::with_capacity(DIRECTORY_HEADER_LEN + entries.len() * DIRECTORY_ENTRY_LEN);
     out.push(DIRECTORY_VERSION);
     out.push(0); // reserved
     out.extend_from_slice(&count.to_be_bytes());
-    for p in pubs {
-        out.extend_from_slice(p);
+    for (pubkey, ticket) in entries {
+        out.extend_from_slice(pubkey);
+        out.extend_from_slice(&encode_ticket(ticket));
     }
     out
 }
 
-/// Parse a FederationDirectory payload into an owned vector of
-/// pubkeys. Returns `DecodeError` on truncation or version
-/// mismatch — a peer running an incompatible version of the
-/// announcement format is silently ignored rather than treated
-/// as malicious.
-pub fn parse_directory(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DriftError> {
+/// Parse a FederationDirectory v2 payload into (pubkey, ticket)
+/// pairs. Returns `DecodeError` on truncation, wrong version, or
+/// non-zero reserved.
+///
+/// Does NOT verify ticket signatures — that's the receiver's job
+/// in `handle_federation_directory` (where it can drop bad
+/// entries one at a time without invalidating the whole packet
+/// and can apply per-entry metrics).
+pub fn parse_directory(bytes: &[u8]) -> Result<Vec<([u8; 32], PresenceTicket)>, DriftError> {
     if bytes.len() < DIRECTORY_HEADER_LEN {
         return Err(DriftError::DecodeError);
     }
@@ -142,16 +289,17 @@ pub fn parse_directory(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DriftError> {
         return Err(DriftError::DecodeError);
     }
     let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-    let expected_len = DIRECTORY_HEADER_LEN + count * 32;
+    let expected_len = DIRECTORY_HEADER_LEN + count * DIRECTORY_ENTRY_LEN;
     if bytes.len() != expected_len {
         return Err(DriftError::DecodeError);
     }
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
-        let off = DIRECTORY_HEADER_LEN + i * 32;
+        let off = DIRECTORY_HEADER_LEN + i * DIRECTORY_ENTRY_LEN;
         let mut p = [0u8; 32];
         p.copy_from_slice(&bytes[off..off + 32]);
-        out.push(p);
+        let ticket = decode_ticket(&bytes[off + 32..off + DIRECTORY_ENTRY_LEN])?;
+        out.push((p, ticket));
     }
     Ok(out)
 }
@@ -199,43 +347,136 @@ mod tests {
         assert!(env.payload.is_empty());
     }
 
+    /// Test helper: synthesize a (pubkey, ticket) entry signed by
+    /// `client_secret` for the given `bridge_pub`. Used across the
+    /// directory and ticket-verification tests.
+    fn fake_entry(
+        client_secret: &[u8; 32],
+        bridge_pub: &[u8; 32],
+        expiry_ms: u64,
+    ) -> ([u8; 32], PresenceTicket) {
+        let client_pub =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*client_secret))
+                .to_bytes();
+        let ticket = build_ticket(
+            client_secret,
+            bridge_pub,
+            expiry_ms,
+            [0x11; TICKET_NONCE_LEN],
+            &[0x22; 64],
+        );
+        (client_pub, ticket)
+    }
+
     #[test]
     fn directory_roundtrip() {
-        let pubs = vec![[0xAA; 32], [0xBB; 32], [0xCC; 32]];
-        let wire = build_directory(&pubs);
+        let bridge_pub = [0xDD; 32];
+        let entries = vec![
+            fake_entry(&[0x01; 32], &bridge_pub, 9_999_999_999_999),
+            fake_entry(&[0x02; 32], &bridge_pub, 9_999_999_999_999),
+            fake_entry(&[0x03; 32], &bridge_pub, 9_999_999_999_999),
+        ];
+        let wire = build_directory(&entries);
         let parsed = parse_directory(&wire).unwrap();
-        assert_eq!(parsed, pubs);
+        assert_eq!(parsed, entries);
     }
 
     #[test]
     fn directory_empty() {
         let wire = build_directory(&[]);
-        assert_eq!(parse_directory(&wire).unwrap(), Vec::<[u8; 32]>::new());
+        let parsed = parse_directory(&wire).unwrap();
+        assert!(parsed.is_empty());
     }
 
     #[test]
     fn directory_rejects_wrong_version() {
-        let mut wire = build_directory(&[[1; 32]]);
+        let entries = vec![fake_entry(&[0x07; 32], &[0xDD; 32], 9_999_999_999_999)];
+        let mut wire = build_directory(&entries);
         wire[0] = 0xFF;
         assert!(parse_directory(&wire).is_err());
     }
 
     #[test]
     fn directory_rejects_truncation() {
-        let wire = build_directory(&[[1; 32], [2; 32]]);
-        // Drop the last byte → length mismatch.
+        let entries = vec![
+            fake_entry(&[0x08; 32], &[0xDD; 32], 9_999_999_999_999),
+            fake_entry(&[0x09; 32], &[0xDD; 32], 9_999_999_999_999),
+        ];
+        let wire = build_directory(&entries);
         let short = &wire[..wire.len() - 1];
         assert!(parse_directory(short).is_err());
     }
 
     /// Regression: fuzzer (`federation_directory_decode`) caught
-    /// the reserved byte being unvalidated — `[1, 86, 0, 0]`
-    /// would parse to an empty Vec while `build_directory` always
-    /// emits reserved=0, breaking `build∘parse` identity. Parser
-    /// now rejects any non-zero reserved.
+    /// the reserved byte being unvalidated — `[2, 86, 0, 0]` would
+    /// parse to an empty Vec while `build_directory` always emits
+    /// reserved=0, breaking `build∘parse` identity. Parser now
+    /// rejects any non-zero reserved.
     #[test]
     fn directory_rejects_non_zero_reserved() {
         let wire = [DIRECTORY_VERSION, 0x56, 0x00, 0x00];
         assert!(parse_directory(&wire).is_err());
+    }
+
+    // ─── Presence-ticket tests ───────────────────────────────────
+
+    #[test]
+    fn ticket_codec_roundtrips() {
+        let (_pub, ticket) = fake_entry(&[0x41; 32], &[0xAB; 32], 1_000);
+        let wire = encode_ticket(&ticket);
+        let parsed = decode_ticket(&wire).unwrap();
+        assert_eq!(parsed, ticket);
+    }
+
+    #[test]
+    fn ticket_verify_accepts_legitimate() {
+        let bridge_pub = [0x55; 32];
+        let (client_pub, ticket) = fake_entry(&[0x42; 32], &bridge_pub, 9_999_999_999_999);
+        verify_ticket(&client_pub, &bridge_pub, &ticket, 0).expect("must verify");
+    }
+
+    /// A ticket signed for bridge X MUST NOT verify when presented
+    /// to a third party as a ticket-for-bridge-Y. This is the
+    /// core anti-hijack property — a malicious bridge B_evil can't
+    /// re-use a real ticket signed for B_real.
+    #[test]
+    fn ticket_verify_rejects_wrong_bridge() {
+        let bridge_a = [0x55; 32];
+        let bridge_b = [0x66; 32];
+        let (client_pub, ticket) = fake_entry(&[0x43; 32], &bridge_a, 9_999_999_999_999);
+        assert!(verify_ticket(&client_pub, &bridge_b, &ticket, 0).is_err());
+    }
+
+    /// Expired tickets MUST be rejected even with valid signatures.
+    #[test]
+    fn ticket_verify_rejects_expired() {
+        let bridge_pub = [0x55; 32];
+        let (client_pub, ticket) = fake_entry(&[0x44; 32], &bridge_pub, 1_000);
+        // now_ms = expiry exactly → rejected (strict-less-than).
+        assert!(verify_ticket(&client_pub, &bridge_pub, &ticket, 1_000).is_err());
+        // now_ms > expiry → rejected.
+        assert!(verify_ticket(&client_pub, &bridge_pub, &ticket, 5_000).is_err());
+    }
+
+    /// Tampered signature MUST NOT verify.
+    #[test]
+    fn ticket_verify_rejects_tampered_sig() {
+        let bridge_pub = [0x55; 32];
+        let (client_pub, mut ticket) = fake_entry(&[0x45; 32], &bridge_pub, 9_999_999_999_999);
+        ticket.sig[10] ^= 0x80;
+        assert!(verify_ticket(&client_pub, &bridge_pub, &ticket, 0).is_err());
+    }
+
+    /// Wrong client pubkey MUST NOT verify (a malicious bridge
+    /// can't claim someone else's pubkey).
+    #[test]
+    fn ticket_verify_rejects_wrong_client() {
+        let bridge_pub = [0x55; 32];
+        let (_real_client, ticket) = fake_entry(&[0x46; 32], &bridge_pub, 9_999_999_999_999);
+        let attacker_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(
+            [0x47u8; 32],
+        ))
+        .to_bytes();
+        assert!(verify_ticket(&attacker_pub, &bridge_pub, &ticket, 0).is_err());
     }
 }
