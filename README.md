@@ -50,11 +50,13 @@ End-user binaries shipped from this repo. Each has its own README with install +
 drift-core/      sans-io protocol engine (WASM-safe, no tokio, no I/O)
   crypto.rs          X25519 DH, ChaCha20-Poly1305, SipHash cookies
   identity.rs        Keypairs, session key derivation, rekey KDF
-  header.rs          36-byte long header, 15 packet types
+  header.rs          36-byte long header, 18 packet types
   short_header.rs    7-byte compact header with Connection IDs
   session.rs         Handshake state machine, replay protection, Peer::make_header helper
   fec.rs             XOR forward error correction
   pq.rs              Post-quantum hybrid (X25519 + ML-KEM-768)
+  xeddsa.rs          XEdDSA signatures on the existing X25519 identity
+                       keys — used for federation presence tickets
 
 drift/           native tokio-based stack built on drift-core
   src/
@@ -86,9 +88,11 @@ drift/           native tokio-based stack built on drift-core
       mod.rs         Core engine: send/recv, handshake, rekey, resumption,
                        Transport::add_federated_peer / connect_federate
       mesh.rs        Routing table, beacons, hop-TTL forwarding, self-migration
-      federated.rs   PacketType::Federated envelope codec (130-byte header
-                       carrying target_bridge_pub, target_client_pub,
-                       source_bridge_pub, source_client_pub + opaque payload)
+      federated.rs   PacketType::Federated envelope (130-byte bridge-routing
+                       wrapper) + FederationDirectory v2 codec (128-byte
+                       entries: 32-byte pubkey + 96-byte XEdDSA presence
+                       ticket) + PresenceTicket packet codec + ticket
+                       sign/verify helpers
       cookies.rs     Adaptive DoS challenge-response
       path.rs        PathChallenge/Response, connection migration
       peer_shards.rs 16-shard peer table (lock contention reduction)
@@ -311,13 +315,14 @@ drift-mosh-client --server-pub <ANY_PUB> --exec uptime
 #   federated bridge announced it.
 ```
 
-Bridges (`drift bridge`) announce their connected clients to every federation peer every 7 s via `PacketType::FederationDirectory`. Each announcement is the COMPLETE current set of that bridge's clients (idempotent-set semantics), so a client disconnecting from its bridge drops out of peer directories within one announce interval. Receiving bridges record `client_pubkey → (announcer_bridge, last_announced_at)` with a 20 s TTL. Multiple defenses limit what a malicious federated bridge can do:
+Bridges (`drift bridge`) announce their connected clients to every federation peer every 7 s via `PacketType::FederationDirectory` (v2). Each announcement is the COMPLETE current set of that bridge's clients (idempotent-set semantics), so a client disconnecting from its bridge drops out of peer directories within one announce interval. Each entry carries a 96-byte XEdDSA presence ticket the client signed for the announcing bridge. Receiving bridges record `client_pubkey → (announcer_bridge, last_announced_at)` with a 20 s TTL. Multiple defenses limit what a malicious federated bridge can do:
 
 - **Only federation peers may write.** Random clients of `accept_any_peer` bridges can't inject entries — see `drift/tests/adversarial_federation.rs::federation_directory_rejects_non_bridge_announcer`.
+- **Cryptographic presence proof per entry.** Each v2 directory entry carries an XEdDSA signature the announced client made over `(announcing_bridge_pub ‖ expiry_ms ‖ nonce)` using its X25519 identity key. A federated bridge that doesn't actually have a session with the claimed client can't produce a valid signature — entries that fail verification are dropped (`metrics.federation_invalid_tickets_dropped`). Locked in by `drift/tests/adversarial_presence_tickets.rs`.
 - **First-write-wins on cross-announcer conflicts.** If B already holds the entry for client X, a later announcement from C claiming X is silently dropped — kills race-to-hijack attacks. Locked in by `drift/tests/federation_directory_semantics.rs::cross_announcer_conflict_keeps_first_writer`.
 - **Evict on send failure.** When a forwarding attempt to a directory next-hop errors out, every entry attributed to that next-hop is dropped immediately — so a dead bridge stops attracting traffic without waiting out the TTL.
 
-What's still trusted to the operator's `--federate` choices: federated bridges are trusted to truthfully report their own clients (same model as Matrix S2S — homeservers trust their federation partners to describe their users). Strengthening that to cryptographic proof-of-session would need XEdDSA presence tickets and is on the roadmap.
+What's still trusted to the operator's `--federate` choices: a malicious federated bridge can refuse to forward, delay, or omit clients from its announcements (denial of service against its own users). What it can no longer do is announce pubkeys it doesn't actually host — XEdDSA presence tickets close that gap. Federation security is now at parity with Matrix/XMPP server-to-server: trust your federation partners not to be malicious, but you don't have to trust them not to be sloppy.
 
 ### Adding a new transport
 
@@ -472,7 +477,7 @@ drift relay                               # run a mesh relay node
 | Long | 36 B | 16 B | 52 B | Handshakes, mesh forwarding, deadlines, coalescing |
 | Short | 7 B | 16 B | 23 B | Established direct sessions (56% reduction) |
 
-15 packet types: Hello/HelloAck, Data, Beacon, Challenge, PathChallenge/Response, Close, RekeyRequest/Ack, ResumeHello/Ack/Ticket, Ping/Pong.
+18 packet types: Hello/HelloAck, Data, Beacon, Challenge, PathChallenge/Response, Close, RekeyRequest/Ack, ResumeHello/Ack/Ticket, Ping/Pong, **Federated** (bridge-routing envelope), **FederationDirectory** (bridge-to-bridge client announcements with XEdDSA presence tickets), **PresenceTicket** (client → bridge ticket emission).
 
 ## Adapter availability matrix
 
@@ -510,6 +515,9 @@ Extensive coverage across 60+ integration test files, drift-core unit tests, and
 - **Federation, heterogeneous transports**: `drift-mosh/tests/mixed_transport_federation_test.sh` — runs a full `drift-mosh --exec` shell command end-to-end across `D1 ──UDP──▶ D2 ──TLS──▶ D3 ──WS──▶ D4` (real Proxmox LXCs). Bytes traverse three different DRIFT transports in one chain; the federation envelope is identical regardless of the underlying wire. Also covered with TCP and WebSocket variants — every connection-oriented bridge link now works via `Transport::connect_federate`.
 - **Federation adversarial**: `drift/tests/adversarial_federation.rs` — pure in-process tests (~0.5 s) that lock in three defenses: (1) the bridge rejects envelopes whose `source_client_pub` doesn't match the session-authenticated sender (identity-spoofing prevention); (2) the bridge refuses to insert routing-table entries for `source_bridge_pub` claims that don't match the sender's own pubkey (table-poisoning prevention); (3) only federation peers (entries in our `federation_table`) may write to the peer directory (no random-client directory poisoning).
 - **Federation directory semantics**: `drift/tests/federation_directory_semantics.rs` — three-Transport tests that lock in (1) first-write-wins on cross-announcer conflicts (kills race-to-hijack attacks where a malicious federated bridge tries to steal a pubkey from a legitimate announcer); (2) idempotent-set semantics on announcements (a bridge's announce is the complete current set of its clients, so disconnections propagate to peer directories in one announce interval rather than waiting out the TTL); (3) legitimate client migration is still allowed once the prior announcer cleanly retracts.
+- **Federation presence tickets**: `drift/tests/adversarial_presence_tickets.rs` — five tests covering a malicious federated bridge attempting to announce a victim pubkey with (a) no ticket, (b) a forged ticket signed by the attacker, (c) a real ticket signed for a different bridge, (d) an expired ticket. Plus a sanity-counterpart test confirming legitimate tickets are accepted.
+- **Federation triangle topology**: `drift-mosh/tests/federation_triangle_test.sh` (LXC) and `docker/federation-triangle/` (Docker) — three bridges fully federated in a triangle, every cross-bridge routing direction exercised. Caught the `federated_via` stale-path bug that was fixed in `handle_federated` case 1.
+- **Coverage-guided fuzzing**: `fuzz/` — 7 Tier-1 cargo-fuzz targets covering every wire-format decoder (header, short header, federated envelope, federation directory, dir-message, TCP deframe, stream frame), plus a stateful handshake-FSM target. PR-smoke CI workflow at `.github/workflows/fuzz-smoke.yml`. See `fuzz/README.md`.
 - **Docker discovery end-to-end**: `docker/federation-discovery/run.sh` — builds a 4-container chain (2 bridges + server + client) and verifies a client with only a `default_bridge` in `drift.toml` can dial the server by pubkey alone, with routing resolved entirely through bridge-to-bridge directory announcements.
 - **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh` / `multi_transport_4way.sh` (4/4 transports including TLS pass)
 

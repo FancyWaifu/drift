@@ -21,6 +21,7 @@ the target.
 | `directory_decode` | `DirMessage::decode` — directory-server message (Register / Lookup / Listing). |
 | `tcp_deframe` | `read_one_tcp_frame` — u16-BE-prefixed framing under `TcpPacketIO::recv_from`. |
 | `stream_frame` | `StreamManager::test_handle_frame` — stateful stream-layer dispatch. |
+| `handshake_fsm` | Two `Transport` instances over `MemPacketIO`, driven through randomized event sequences (`SendAtoB`, `SendBtoA`, `RestartA`, `RestartB`, `DrainA`, `DrainB`). Tier-2 — slower per iter; covers handshake / restart / rekey FSM bugs the byte-level targets can't reach. |
 
 ## Running
 
