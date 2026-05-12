@@ -31,6 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # pipe) is in place.
 [target.'cfg(unix)'.dependencies]
 tun = { version = "0.6", features = ["async"] }
+# libc::geteuid is the only thing we touch; rest of the preflight
+# uses /proc and /dev directly.
+libc = "0.2"
 
 [[bin]]
 name = "drift-vpn"

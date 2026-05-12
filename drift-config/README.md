@@ -285,13 +285,18 @@ endpoints = ["udp://bridge-x.example:51820"]
 ```
 
 `drift bridge` instances announce their connected clients to
-every federation peer (`--federate`) every 10 seconds. A
-receiving bridge keeps the directory entries with a 60-second
-TTL — stale entries evict at lookup time, so a client whose
-bridge stops announcing drops out of routing in under a
-minute. Only `--federate`'d bridges may write to the directory;
-arbitrary clients can't poison it. (See `drift/tests/
-adversarial_federation.rs::federation_directory_rejects_non_bridge_announcer`.)
+every federation peer (`--federate`) every 7 seconds. A
+receiving bridge keeps the directory entries with a 20-second
+TTL (~3× the announce interval) — stale entries evict at
+lookup time, so a client whose bridge stops announcing drops
+out of routing within seconds. Only `--federate`'d bridges
+may write to the directory; arbitrary clients can't poison
+it. As of FederationDirectory v2 each announced pubkey is
+backed by a 96-byte XEdDSA presence ticket the client signed
+for the announcing bridge — a malicious federated bridge
+can't announce clients it doesn't actually have a session
+with. (See `drift/tests/adversarial_federation.rs` and
+`drift/tests/adversarial_presence_tickets.rs`.)
 
 ---
 

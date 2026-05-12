@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 mod config;
 mod config_gen;
+#[cfg(unix)]
+mod doctor;
 mod identity;
 mod metrics;
 mod routing;
@@ -67,6 +69,17 @@ enum Cmd {
     Config {
         #[clap(subcommand)]
         cmd: ConfigCmd,
+    },
+
+    /// Preflight diagnostics. Reads the config, checks the host
+    /// (privilege, TUN device, IP forwarding, port availability,
+    /// identity file, peer endpoints), prints a pass/warn/fail
+    /// report. Read-only — does not mutate state, does not need
+    /// the daemon running.
+    Doctor {
+        /// Path to TOML config.
+        #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
+        config: PathBuf,
     },
 }
 
@@ -166,6 +179,22 @@ async fn main() -> Result<()> {
             {
                 let _ = (socket, json);
                 anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
+            }
+        }
+        Cmd::Doctor { config: path } => {
+            #[cfg(unix)]
+            {
+                let all_pass = doctor::run(&path).await?;
+                if !all_pass {
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                anyhow::bail!(
+                    "drift-vpn doctor requires a Unix-like OS (Linux + macOS today)"
+                );
             }
         }
         Cmd::Config { cmd } => match cmd {
