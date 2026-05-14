@@ -21,7 +21,7 @@ the rest of this doc treats both hosts identically.
 ```bash
 TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin / x86_64-unknown-linux-gnu /
                               # aarch64-unknown-linux-gnu
-TAG=drift-vpn-v0.13.0
+TAG=drift-vpn-v0.14.0
 curl -L -o drift-vpn.tar.gz \
   https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-vpn-$TAG-$TARGET.tar.gz
 tar xzf drift-vpn.tar.gz
