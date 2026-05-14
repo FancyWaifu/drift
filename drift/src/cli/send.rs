@@ -77,6 +77,39 @@ pub async fn run(args: &SendArgs, identity_path: &str) -> Result<()> {
             .await?
     };
 
+    // Optionally wait for the session to actually establish before
+    // doing anything else. Without this, `drift send` exits 0 as
+    // soon as the bytes are queued — but on strict-NAT paths the
+    // HELLO_ACK may never come back and the message is silently
+    // lost. With `--await-ack`, we poll until peer_is_established
+    // returns true or `--await-timeout` expires, in which case we
+    // exit nonzero so the operator's wrapper script sees the
+    // failure.
+    if args.await_ack {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(args.await_timeout);
+        // Kick the handshake with a 1-byte probe (it'll be queued
+        // and flushed once Established).
+        let _ = transport
+            .send_data(&added_peer_id, b".", 0, 0)
+            .await;
+        while tokio::time::Instant::now() < deadline {
+            if transport.peer_is_established(&added_peer_id).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !transport.peer_is_established(&added_peer_id).await {
+            bail!(
+                "handshake did not complete within {}s — \
+                 destination unreachable, NAT blocking return path, \
+                 or peer key mismatch",
+                args.await_timeout
+            );
+        }
+        eprintln!("handshake complete");
+    }
+
     let sm = StreamManager::bind(transport.clone()).await;
 
     if let Some(ref msg) = args.message {
