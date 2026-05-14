@@ -10,6 +10,7 @@ pub mod fec;
 pub mod header;
 pub mod identity;
 pub mod pq;
+pub mod rotation;
 pub mod session;
 pub mod short_header;
 pub mod time;
