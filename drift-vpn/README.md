@@ -30,6 +30,7 @@ Validated on real Linux LXCs and macOS (Apple Silicon):
 | v0.11 | perf experiments (io_uring side-thread, single-task collapse) — both regressed against the v0.7 two-task baseline and were reverted; v0.7 is the correctly-tuned model for tokio |
 | v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64/x86_64, Windows x86_64 keygen/show only) |
 | v0.13 | **`drift-vpn doctor`** preflight (privilege, TUN, IP forwarding, identity, port, peers checks) + **`via_bridge` peer mode** (two peers behind unrelated NATs reach each other through a shared federation bridge — no port forwarding on either side, any drift adapter scheme: udp / tcp / tls / ws / …). Config-level error-out on MTU + via_bridge mismatch (the federation envelope eats 130 bytes of payload; tun MTU must be ≤ 1202). |
+| v0.14 | **`drift-vpn install` / `uninstall`** — one-command service install (systemd unit on Linux, launchd plist on macOS), with `--dry-run` to preview, `--start` to boot it, `--no-enable` to skip autostart, and `--service-name` for multi-instance hosts. + **QUICKSTART.md** walking install → keygen → config → preflight → service → verify end-to-end in under 10 minutes. |
 
 What's NOT yet there:
 
@@ -57,6 +58,10 @@ What's NOT yet there:
 **One-line summary**: WireGuard works great until your network blocks UDP. drift-vpn doesn't care what your network blocks — it switches protocols mid-session.
 
 ## Quick start (5 minutes, two Linux hosts)
+
+For a complete walkthrough that covers system-service install, preflight, and
+verification, see **[QUICKSTART.md](QUICKSTART.md)**. The 5-minute path below
+gets a tunnel up in the foreground.
 
 Install Rust (any recent stable), then:
 
@@ -426,6 +431,32 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 **macOS** — full daemon support via utun (Apple Silicon + Intel). Run with sudo so the kernel allocates a `utunN` device. Routes to peer addresses are not auto-installed by the `tun` crate on macOS — add them with `route -n add` after `up` if your config relies on them (Linux's `tun` install is automatic via the assigned netmask).
 
 **Windows** — `keygen` and `show` work today. The `up` daemon is gated until a Wintun port lands. For Windows clients in the meantime, run drift-vpn inside WSL2.
+
+### Run as a system service
+
+Once the binary is on the host and `/etc/drift-vpn/config.toml` is in place, install drift-vpn as a managed service:
+
+```bash
+sudo drift-vpn install --start
+```
+
+This writes a **systemd unit** on Linux (`/etc/systemd/system/drift-vpn.service`) or a **launchd plist** on macOS (`/Library/LaunchDaemons/com.drift.vpn.plist`), reloads the service manager, enables it for boot, and starts it. The systemd unit is sandboxed (CAP_NET_ADMIN ambient, ProtectSystem=strict, PrivateTmp) and `Restart=on-failure` by default.
+
+Useful flags:
+
+- `--dry-run` — print the unit and the commands that would run, exit. No filesystem or systemctl/launchctl side effects. Good for previewing before committing.
+- `--no-enable` — install but don't enable for boot.
+- `--service-name <name>` — custom unit name. Default `drift-vpn` → `drift-vpn.service` on Linux, `com.drift.vpn.plist` on macOS.
+- `--binary <path>` — point at a non-default binary location.
+- `--config <path>` — point at a non-default config.
+
+To remove:
+
+```bash
+sudo drift-vpn uninstall
+```
+
+Idempotent — safe to run a second time. Stops the service, disables it, removes the unit, reloads systemctl/launchctl. Does not touch your config or identity files.
 
 ## Test suite
 

@@ -10,6 +10,8 @@ mod config_gen;
 #[cfg(unix)]
 mod doctor;
 mod identity;
+#[cfg(unix)]
+mod install;
 mod metrics;
 mod routing;
 mod status;
@@ -80,6 +82,54 @@ enum Cmd {
         /// Path to TOML config.
         #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
         config: PathBuf,
+    },
+
+    /// Install drift-vpn as a managed system service: writes a
+    /// systemd unit on Linux or a launchd plist on macOS, reloads
+    /// the service manager, and (by default) enables it for boot.
+    /// Requires root.
+    Install {
+        /// Path to the config file the service will load on
+        /// startup. Doesn't need to exist yet — the service will
+        /// just fail to start until it does.
+        #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
+        config: PathBuf,
+        /// Path to the drift-vpn binary the service will exec.
+        #[clap(short, long, default_value = "/usr/local/bin/drift-vpn")]
+        binary: PathBuf,
+        /// Service unit name. Default is `drift-vpn` →
+        /// `drift-vpn.service` on Linux, `com.drift.vpn.plist` on
+        /// macOS. Set when running multiple drift-vpn daemons on
+        /// one host.
+        #[clap(long, default_value = "drift-vpn")]
+        service_name: String,
+        /// Install but don't enable for boot.
+        #[clap(long)]
+        no_enable: bool,
+        /// Start the service immediately after install.
+        #[clap(long)]
+        start: bool,
+        /// Print the unit that would be written and the commands
+        /// that would run, then exit. Doesn't touch the
+        /// filesystem or invoke systemctl/launchctl. Doesn't
+        /// require root.
+        #[clap(long)]
+        dry_run: bool,
+    },
+
+    /// Stop, disable, and remove the drift-vpn system service
+    /// previously installed by `drift-vpn install`. Requires
+    /// root. Idempotent — safe to run if the service was already
+    /// partially uninstalled.
+    Uninstall {
+        /// Service unit name (must match what was used with
+        /// `install`).
+        #[clap(long, default_value = "drift-vpn")]
+        service_name: String,
+        /// Print the actions that would run, then exit. Doesn't
+        /// touch the filesystem or invoke systemctl/launchctl.
+        #[clap(long)]
+        dry_run: bool,
     },
 }
 
@@ -194,6 +244,56 @@ async fn main() -> Result<()> {
                 let _ = path;
                 anyhow::bail!(
                     "drift-vpn doctor requires a Unix-like OS (Linux + macOS today)"
+                );
+            }
+        }
+        Cmd::Install {
+            config,
+            binary,
+            service_name,
+            no_enable,
+            start,
+            dry_run,
+        } => {
+            #[cfg(unix)]
+            {
+                install::install(install::InstallOpts {
+                    config,
+                    binary,
+                    service_name,
+                    no_enable,
+                    start,
+                    dry_run,
+                })
+                .await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (config, binary, service_name, no_enable, start, dry_run);
+                anyhow::bail!(
+                    "drift-vpn install requires a Unix-like OS (Linux systemd or \
+                     macOS launchd). For Windows, run drift-vpn in WSL2."
+                );
+            }
+        }
+        Cmd::Uninstall {
+            service_name,
+            dry_run,
+        } => {
+            #[cfg(unix)]
+            {
+                install::uninstall(install::UninstallOpts {
+                    service_name,
+                    dry_run,
+                })
+                .await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (service_name, dry_run);
+                anyhow::bail!(
+                    "drift-vpn uninstall requires a Unix-like OS (Linux systemd or \
+                     macOS launchd)."
                 );
             }
         }
