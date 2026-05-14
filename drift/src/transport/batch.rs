@@ -106,19 +106,24 @@ mod linux {
                     });
                 }
                 for i in 0..n {
-                    let msg_hdr = libc::msghdr {
-                        msg_name: &mut addrs[i] as *mut _ as *mut _,
-                        msg_namelen: addr_lens[i],
-                        msg_iov: &mut iovecs[i],
-                        msg_iovlen: 1,
-                        msg_control: std::ptr::null_mut(),
-                        msg_controllen: 0,
-                        msg_flags: 0,
-                    };
-                    msgs.push(libc::mmsghdr {
-                        msg_hdr,
-                        msg_len: 0,
-                    });
+                    // `libc::msghdr` has private padding fields on
+                    // some targets (notably musl on aarch64), which
+                    // means struct-literal initialization is a hard
+                    // compile error there. Zero the struct then
+                    // fill in the public fields — works uniformly.
+                    let mut msg_hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+                    msg_hdr.msg_name = &mut addrs[i] as *mut _ as *mut _;
+                    msg_hdr.msg_namelen = addr_lens[i];
+                    msg_hdr.msg_iov = &mut iovecs[i];
+                    msg_hdr.msg_iovlen = 1;
+                    msg_hdr.msg_control = std::ptr::null_mut();
+                    msg_hdr.msg_controllen = 0;
+                    msg_hdr.msg_flags = 0;
+
+                    let mut mm: libc::mmsghdr = unsafe { std::mem::zeroed() };
+                    mm.msg_hdr = msg_hdr;
+                    mm.msg_len = 0;
+                    msgs.push(mm);
                 }
 
                 let fd = socket.as_raw_fd();
