@@ -170,21 +170,54 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
         }
         let (url, bridge_pub) = crate::config::parse_bridge_spec(spec)
             .context("parsing via_bridge")?;
-        let addr = resolve_endpoint(&url)
-            .await
-            .with_context(|| format!("resolving bridge {}", url))?;
-        let bridge_pid = transport
-            .add_peer(bridge_pub, addr, Direction::Initiator)
-            .await
-            .with_context(|| format!("add_peer(bridge {})", url))?;
-        // Kick HELLO toward the bridge. Federation routing
-        // requires the client↔bridge session to be Established
-        // before any `add_federated_peer` can carry envelopes
-        // over it.
-        let _ = transport.send_data(&bridge_pid, b".", 0, 0).await;
+        let scheme = url.split("://").next().unwrap_or("");
+
+        // Branch on scheme. UDP can reuse the daemon's existing
+        // listen socket (UDP is connectionless), so a bare
+        // `add_peer` is enough — sends to the bridge go out via the
+        // primary interface. For connection-oriented schemes
+        // (tcp, tls, ws, wss, http, https, onion, …) we have to
+        // open a dedicated outbound connection; `connect_federate`
+        // is the right primitive — it makes a connector, attaches
+        // it as an interface, registers the bridge peer, and pins
+        // the peer's interface_id to the new outbound. Whichever
+        // scheme the operator chose, drift's adapter registry
+        // dispatches it — works for every transport this drift
+        // build was compiled with. If the bridge doesn't actually
+        // accept that scheme (its `--listen` set doesn't include
+        // it), the connect will fail at startup with a clear
+        // adapter-level error.
+        let bridge_pid = if scheme == "udp" {
+            let addr = resolve_endpoint(&url)
+                .await
+                .with_context(|| format!("resolving bridge {}", url))?;
+            let pid = transport
+                .add_peer(bridge_pub, addr, Direction::Initiator)
+                .await
+                .with_context(|| format!("add_peer(bridge {})", url))?;
+            // Kick HELLO toward the bridge. UDP `add_peer` alone
+            // doesn't initiate a handshake; `send_data` does. We
+            // need the client↔bridge session Established before
+            // any `add_federated_peer` can carry envelopes.
+            let _ = transport.send_data(&pid, b".", 0, 0).await;
+            pid
+        } else {
+            // connect_federate opens the outbound connection, adds
+            // it as an interface, and pins the bridge peer to that
+            // interface. It also registers the bridge in our
+            // federation_table — semantically a little odd
+            // (drift-vpn isn't a peer bridge, just a client) but
+            // benign: drift-vpn doesn't accept FederationDirectory
+            // packets or relay traffic, so the entry is inert.
+            transport
+                .connect_federate(&url, bridge_pub)
+                .await
+                .with_context(|| format!("connect_federate({})", url))?
+        };
         bridge_handles.insert(spec.to_string(), (bridge_pid, bridge_pub));
         info!(
             bridge = %url,
+            scheme = %scheme,
             bridge_pub = %hex::encode(bridge_pub),
             "bridge registered for via_bridge peer reach"
         );

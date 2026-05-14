@@ -29,7 +29,7 @@ Validated on real Linux LXCs and macOS (Apple Silicon):
 | v0.10 | real-Linux verification + mesh-routed-DATA hop_ttl bug fix |
 | v0.11 | perf experiments (io_uring side-thread, single-task collapse) — both regressed against the v0.7 two-task baseline and were reverted; v0.7 is the correctly-tuned model for tokio |
 | v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64/x86_64, Windows x86_64 keygen/show only) |
-| v0.13 | **`drift-vpn doctor`** preflight (privilege, TUN, IP forwarding, identity, port, peers checks) + **`via_bridge` peer mode** (two peers behind unrelated NATs reach each other through a shared federation bridge — no port forwarding on either side) |
+| v0.13 | **`drift-vpn doctor`** preflight (privilege, TUN, IP forwarding, identity, port, peers checks) + **`via_bridge` peer mode** (two peers behind unrelated NATs reach each other through a shared federation bridge — no port forwarding on either side, any drift adapter scheme: udp / tcp / tls / ws / …). Config-level error-out on MTU + via_bridge mismatch (the federation envelope eats 130 bytes of payload; tun MTU must be ≤ 1202). |
 
 What's NOT yet there:
 
@@ -153,7 +153,7 @@ Per-daemon failover policy, applied to every peer with two or more endpoints. Op
 | `allowed_ips` | yes | CIDR ranges this peer "owns" — outbound IPs in these ranges route to this peer. Reverse-path filtering enforces the same on inbound. |
 | `endpoint` | no | Single-URL form (`"udp://1.2.3.4:51820"`). |
 | `endpoints` | no | Priority-ordered list. UDP first, fall through to TCP / TLS / WS / HTTP / Onion. Empty = mesh-only peer. |
-| `via_bridge` | no | DRIFT federation bridge URL + pubkey to reach this peer through. Format: `"udp://host:port@<bridge-pubkey-hex>"`. Both ends can set the *same* bridge to reach each other without direct endpoints. See "Bridge-fallback" below. v0.13 supports UDP bridges. |
+| `via_bridge` | no | DRIFT federation bridge URL + pubkey to reach this peer through. Format: `"<scheme>://host:port@<bridge-pubkey-hex>"` — any scheme drift's adapter registry knows about (udp, tcp, tls, ws, http, …). UDP reuses the daemon's primary listen socket; connection-oriented schemes get a dedicated outbound interface. The bridge must actually be listening on the chosen scheme. Both ends can set the *same* bridge to reach each other without direct endpoints. See "Bridge-fallback" below. |
 | `target_bridge` | no | Pubkey hex of the federation bridge the *peer* is connected to. Defaults to the pubkey in `via_bridge` (the "both peers share one bridge" case). Set explicitly when the peer's on-ramp differs from yours in a multi-bridge federated mesh. |
 | `keepalive` | no | Periodic NAT-keepalive interval in seconds. |
 
