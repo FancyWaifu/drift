@@ -1,6 +1,6 @@
 [package]
 name = "drift-vpn"
-version = "0.1.0"
+version = "0.14.0"
 edition = "2021"
 description = "Identity-routed multi-transport VPN built on DRIFT"
 
