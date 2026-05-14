@@ -34,7 +34,7 @@ End-user binaries shipped from this repo. Each has its own README with install +
 
 | Tool | What it is | Install |
 |---|---|---|
-| **[drift-vpn](drift-vpn/README.md)** | Identity-routed multi-transport VPN. WireGuard-shaped config, but with cross-scheme runtime failover (UDP→TCP/TLS/WS), hub-and-spoke mesh routing, **bridge-fallback peers (two NAT'd peers find each other through a shared federation bridge, no port forwarding either side)**, `drift-vpn doctor` preflight, **one-command service install (`drift-vpn install --start` writes systemd unit / launchd plist, enables for boot)**, and built-in Prometheus metrics. Linux + macOS daemon. See [QUICKSTART.md](drift-vpn/QUICKSTART.md). | `cargo install --path drift-vpn --bin drift-vpn` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
+| **[drift-vpn](drift-vpn/README.md)** | Identity-routed multi-transport VPN. WireGuard-shaped config, but with cross-scheme runtime failover (UDP→TCP/TLS/WS), hub-and-spoke mesh routing, **bridge-fallback peers (two NAT'd peers find each other through a shared federation bridge, no port forwarding either side)**, `drift-vpn doctor` preflight, **one-command service install (`drift-vpn install --start` writes systemd unit / launchd plist, enables for boot)**, **owner-driven identity rotation (`drift-vpn rotate` / `rotate-verify`)**, and built-in Prometheus metrics. Linux + macOS daemon. See [QUICKSTART.md](drift-vpn/QUICKSTART.md) and [ROTATION.md](drift-vpn/ROTATION.md). | `cargo install --path drift-vpn --bin drift-vpn` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-mosh](drift-mosh/README.md)** | Mobile-shell replacement (mosh-style) — survives wifi-to-cellular, laptop suspend, client crash. UDP / TCP / WebSocket. | `cargo install --path drift-mosh --bin drift-mosh` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-http](drift-http/README.md)** | Apache-style file server + Jellyfin-style proxy + system-wide `drift://` URL handler. Pubkey-addressed; no DDNS, no reverse proxy, no TLS cert. | `cargo install --path drift-http --bin drift-http` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-git](drift-git/README.md)** | `git push drift://<peerhex>@<host>:<port>/<repo>` over DRIFT — git remote helper + serving daemon. No SSH keys, no GitHub. UDP / TCP / TLS / WS. | `cargo install --path drift-git --bins` |
@@ -56,7 +56,11 @@ drift-core/      sans-io protocol engine (WASM-safe, no tokio, no I/O)
   fec.rs             XOR forward error correction
   pq.rs              Post-quantum hybrid (X25519 + ML-KEM-768)
   xeddsa.rs          XEdDSA signatures on the existing X25519 identity
-                       keys — used for federation presence tickets
+                       keys — used for federation presence tickets and
+                       identity-rotation announces
+  rotation.rs        Owner-driven identity rotation: signed RotationAnnounce
+                       (168 bytes) asserting OLD pubkey → NEW pubkey,
+                       authenticated by XEdDSA from the OLD secret
 
 drift/           native tokio-based stack built on drift-core
   src/
@@ -118,8 +122,9 @@ drift-wasm/      browser-side stack, same drift-core compiled to wasm32
 drift-vpn/       Identity-routed multi-transport VPN. WireGuard-shaped TOML config,
                    cross-scheme runtime failover, hub-and-spoke mesh routing,
                    via_bridge fallback, `drift-vpn doctor` preflight, one-command
-                   `install`/`uninstall` (systemd + launchd), `drift-vpn status`,
-                   Prometheus /metrics endpoint. Linux + macOS.
+                   `install`/`uninstall` (systemd + launchd), owner-driven identity
+                   `rotate`/`rotate-verify` via XEdDSA-signed announce,
+                   `drift-vpn status`, Prometheus /metrics endpoint. Linux + macOS.
 drift-mosh/      Mobile-shell replacement built on DRIFT. Multi-transport CLI,
                    restart migration, scrollback reattach, TOFU known-hosts.
 drift-http/      HTTP-over-DRIFT: Apache-style file server, opaque proxy,
