@@ -29,12 +29,13 @@ Validated on real Linux LXCs and macOS (Apple Silicon):
 | v0.10 | real-Linux verification + mesh-routed-DATA hop_ttl bug fix |
 | v0.11 | perf experiments (io_uring side-thread, single-task collapse) — both regressed against the v0.7 two-task baseline and were reverted; v0.7 is the correctly-tuned model for tokio |
 | v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64/x86_64, Windows x86_64 keygen/show only) |
+| v0.13 | **`drift-vpn doctor`** preflight (privilege, TUN, IP forwarding, identity, port, peers checks) + **`via_bridge` peer mode** (two peers behind unrelated NATs reach each other through a shared federation bridge — no port forwarding on either side) |
 
 What's NOT yet there:
 
 - **Windows daemon.** `keygen` and `show` work on Windows today; the `up` daemon needs a Wintun port. WSL2 is the recommended Windows path until then.
 - **No coordination service.** Peers find each other via static config — no Tailscale-style coordinator.
-- **No NAT hole-punching.** Both sides need a reachable endpoint somewhere in their `endpoints` list.
+- **NAT hole-punching is via-bridge only.** v0.13 added `via_bridge` for peers behind unrelated NATs to find each other through a federation bridge. UDP-hole-punching (STUN-style direct path discovery) isn't yet implemented; if both sides have NATs that block inbound, all traffic flows through the bridge.
 - **No identity rotation.** "Lost laptop" story is the same as WireGuard's: update every peer's config.
 - **Userspace, not kernel.** ~1.5 Gbps single-stream TCP on a Ryzen 7 6800H — fine for almost any workload, but ~5× slower than WireGuard's Linux kernel module.
 
@@ -152,9 +153,11 @@ Per-daemon failover policy, applied to every peer with two or more endpoints. Op
 | `allowed_ips` | yes | CIDR ranges this peer "owns" — outbound IPs in these ranges route to this peer. Reverse-path filtering enforces the same on inbound. |
 | `endpoint` | no | Single-URL form (`"udp://1.2.3.4:51820"`). |
 | `endpoints` | no | Priority-ordered list. UDP first, fall through to TCP / TLS / WS / HTTP / Onion. Empty = mesh-only peer. |
+| `via_bridge` | no | DRIFT federation bridge URL + pubkey to reach this peer through. Format: `"udp://host:port@<bridge-pubkey-hex>"`. Both ends can set the *same* bridge to reach each other without direct endpoints. See "Bridge-fallback" below. v0.13 supports UDP bridges. |
+| `target_bridge` | no | Pubkey hex of the federation bridge the *peer* is connected to. Defaults to the pubkey in `via_bridge` (the "both peers share one bridge" case). Set explicitly when the peer's on-ramp differs from yours in a multi-bridge federated mesh. |
 | `keepalive` | no | Periodic NAT-keepalive interval in seconds. |
 
-A peer with no `endpoint`/`endpoints` is a **mesh-only peer**: reachable only via forwarding through another peer that has a direct path. See "Hub-and-spoke" below.
+A peer with no `endpoint`/`endpoints`/`via_bridge` is a **mesh-only peer**: reachable only via forwarding through another peer that has a direct path. See "Hub-and-spoke" below.
 
 ## Deployment scenarios
 
@@ -222,6 +225,53 @@ allowed_ips = ["10.99.0.3/32"]
 **Spoke C**: mirror of Spoke A.
 
 A pings 10.99.0.3 → packet routes to peer C → since C is via_mesh, daemon sends to hub's address with `hop_ttl=8` → hub forwards to C → C responds, packet returns the same way. Zero manual routing.
+
+### Bridge-fallback (two peers behind unrelated NATs)
+
+Hub-and-spoke needs the hub to have a direct path to both spokes. If you have two spokes behind unrelated NATs and *neither* can accept inbound, hub-and-spoke doesn't help — there's no spoke to anoint as the hub.
+
+**Bridge-fallback** flips the model: a third-party DRIFT bridge (run on anyone's hardware — a $5/month VPS, an always-on home router running `drift bridge`, a Raspberry Pi in someone's closet) sits in the public internet. Both spokes connect *outbound* to the bridge — no inbound port forwarding on either side — and reach each other through it via DRIFT's federation routing.
+
+```
+   Spoke A (behind NAT)  ──outbound──▶ DRIFT bridge ◀──outbound── Spoke C (behind NAT)
+                            (public IP, drift bridge running)
+```
+
+**Spoke A**:
+```toml
+[interface]
+address = "10.99.0.1/24"
+listen  = "udp://0.0.0.0:51820"   # we still bind locally, but no one
+                                  # needs to inbound-reach us
+mtu     = 1200                    # leave room for federation header
+
+[[peer]]  # spoke C, reached only through the bridge
+public_key  = "<spoke-C-pubkey>"
+allowed_ips = ["10.99.0.3/32"]
+via_bridge  = "udp://bridge.example:51820@<bridge-pubkey-hex>"
+# no endpoint — bridge is the only reach path
+# target_bridge defaults to the bridge in via_bridge (correct when
+# spoke C uses the same bridge — the common case)
+```
+
+**Spoke C**: mirror of A — same `via_bridge`, peer entry for spoke A.
+
+**Bridge** (any DRIFT instance with `drift bridge --listen ... --accept-any-peer` running and inbound-reachable):
+```sh
+drift --identity bridge.key bridge --listen udp://0.0.0.0:51820
+```
+
+When A sends a packet for `10.99.0.3`:
+1. drift-vpn's tun → drift sender sees the dst belongs to spoke C
+2. Spoke C's peer is federated (`via_bridge` set), so the daemon wraps the IP packet in a DRIFT Federated envelope addressed to spoke C's pubkey + target_bridge
+3. The envelope ships through the A↔bridge UDP session
+4. The bridge unwraps, sees target_client = spoke C's pubkey, forwards through its B↔C session
+5. Spoke C decrypts, hands the inner IP packet to its tun device
+6. Reply takes the same path in reverse
+
+**Why `mtu = 1200`?** The federation envelope adds 130 bytes inside DRIFT's `MAX_PAYLOAD` (1348). 1200 keeps full-MTU tun packets safely under the federated wire-payload cap. The daemon will refuse to send oversize packets with `PayloadTooLarge` if MTU is too aggressive — set 1200 for federated-only peers, leave 1340 if all peers are direct.
+
+**A note on trust**: the bridge sees envelope metadata (who-talks-to-whom, sizes, timing) but never plaintext — the inner payload is AEAD-sealed between the two spokes. A malicious bridge can drop or delay traffic but can't read it. See `SPEC.md §10` and `drift/tests/adversarial_presence_tickets.rs` for the federation threat model.
 
 ## Operations
 

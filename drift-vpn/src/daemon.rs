@@ -151,6 +151,83 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
     // first user packet to a mesh-only peer would just be
     // dropped, indefinitely.
     let mut mesh_only_peers: Vec<PeerId> = Vec::new();
+
+    // v0.13 bridge-fallback: peers with `via_bridge` set are
+    // reached through a federation bridge. Multiple peers can
+    // share a single bridge, so we register the bridge ONCE up
+    // front (per unique URL+pubkey) and reuse its PeerId across
+    // all `add_federated_peer` calls. This avoids redundant
+    // handshakes and keeps the bridge's federated_via routing
+    // table aligned with a single client session.
+    let mut bridge_handles: std::collections::HashMap<String, (PeerId, [u8; 32])> =
+        std::collections::HashMap::new();
+    for peer_cfg in cfg.peers.iter() {
+        let Some(spec) = peer_cfg.via_bridge.as_deref() else {
+            continue;
+        };
+        if bridge_handles.contains_key(spec) {
+            continue;
+        }
+        let (url, bridge_pub) = crate::config::parse_bridge_spec(spec)
+            .context("parsing via_bridge")?;
+        let addr = resolve_endpoint(&url)
+            .await
+            .with_context(|| format!("resolving bridge {}", url))?;
+        let bridge_pid = transport
+            .add_peer(bridge_pub, addr, Direction::Initiator)
+            .await
+            .with_context(|| format!("add_peer(bridge {})", url))?;
+        // Kick HELLO toward the bridge. Federation routing
+        // requires the client↔bridge session to be Established
+        // before any `add_federated_peer` can carry envelopes
+        // over it.
+        let _ = transport.send_data(&bridge_pid, b".", 0, 0).await;
+        bridge_handles.insert(spec.to_string(), (bridge_pid, bridge_pub));
+        info!(
+            bridge = %url,
+            bridge_pub = %hex::encode(bridge_pub),
+            "bridge registered for via_bridge peer reach"
+        );
+    }
+    // Wait for each bridge handshake to actually complete before
+    // registering the federated peers that ride on top of it.
+    // Without this gate, `add_federated_peer` runs while the
+    // client↔bridge session is still Pending — the federated
+    // route is set up correctly but the first send_data through
+    // it errors with UnknownPeer because the bridge can't yet
+    // forward an envelope from a non-authenticated source.
+    //
+    // 5 s ceiling per bridge — LAN handshakes complete in
+    // <100 ms; WAN handshakes through a cookie path take up to
+    // ~1 RTT plus crypto. If a bridge doesn't come up in 5 s
+    // we proceed anyway and the federation supervisor handles
+    // the recovery.
+    for (spec, (bridge_pid, _)) in &bridge_handles {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(5);
+        let mut warned = false;
+        loop {
+            if transport.peer_is_established(bridge_pid).await {
+                debug!(bridge = %spec, "bridge handshake established");
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                if !warned {
+                    warn!(
+                        bridge = %spec,
+                        "bridge handshake didn't complete within 5s — federated peers will retry"
+                    );
+                }
+                break;
+            }
+            // Probe again — first probe was at add_peer time;
+            // retransmit drives recovery if the first HELLO was
+            // lost.
+            let _ = transport.send_data(bridge_pid, b".", 0, 0).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     for (i, peer_cfg) in cfg.peers.iter().enumerate() {
         let peer_pub = peer_cfg
             .pubkey_bytes()
@@ -168,7 +245,55 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
         // Initiator side stays in Established with stale keys.
         // Always-Initiator avoids that deadlock.
         let dir = Direction::Initiator;
-        let chosen_for_supervisor: Option<String> = if endpoints.is_empty() {
+        let chosen_for_supervisor: Option<String> = if let Some(spec) =
+            peer_cfg.via_bridge.as_deref()
+        {
+            // v0.13 bridge-fallback path: peer is reachable through
+            // a federation bridge. The bridge itself was registered
+            // above (deduped per unique spec). Here we register the
+            // *peer* as a federated-route target hanging off that
+            // bridge.
+            //
+            // target_bridge defaults to the via_bridge's pubkey —
+            // the symmetric "two peers share the same bridge" case.
+            // Set `target_bridge` explicitly in a multi-bridge mesh
+            // where the peer's on-ramp bridge differs from ours.
+            let (bridge_handle, default_target_bridge_pub) = bridge_handles
+                .get(spec)
+                .copied()
+                .ok_or_else(|| anyhow!("internal: bridge {} not pre-registered", spec))?;
+            let target_bridge_pub = match peer_cfg.target_bridge.as_deref() {
+                Some(hex_pub) => {
+                    let raw = hex::decode(hex_pub)
+                        .with_context(|| format!("peer #{} target_bridge", i))?;
+                    if raw.len() != 32 {
+                        return Err(anyhow!(
+                            "peer #{} target_bridge must be 32 bytes (64 hex)",
+                            i
+                        ));
+                    }
+                    let mut p = [0u8; 32];
+                    p.copy_from_slice(&raw);
+                    p
+                }
+                None => default_target_bridge_pub,
+            };
+            transport
+                .add_federated_peer(peer_pub, bridge_handle, target_bridge_pub)
+                .await
+                .with_context(|| {
+                    format!("add_federated_peer for peer #{}", i)
+                })?;
+            info!(
+                peer = %hex::encode(peer_pid),
+                via_bridge = %spec,
+                target_bridge = %hex::encode(target_bridge_pub),
+                allowed_ips = ?peer_cfg.allowed_ips,
+                ?dir,
+                "federated peer registered (reached via bridge)"
+            );
+            None
+        } else if endpoints.is_empty() {
             // v0.8 mesh-only peer: no direct endpoint, will be
             // reached via forwarding once another peer (the
             // hub) advertises a route via beacons. We pre-
