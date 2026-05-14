@@ -19,7 +19,7 @@ the rest of this doc treats both hosts identically.
 ### Option A — pre-built release (Linux + macOS)
 
 ```bash
-TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin / x86_64-unknown-linux-gnu /
+TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu /
                               # aarch64-unknown-linux-gnu
 TAG=drift-vpn-v0.14.0
 curl -L -o drift-vpn.tar.gz \
