@@ -263,6 +263,36 @@ impl Config {
         if self.interface.listen.is_empty() {
             return Err(anyhow!("interface.listen must contain at least one URL"));
         }
+
+        // Peers using `via_bridge` ride inside a 130-byte federation
+        // envelope, which eats into DRIFT's MAX_PAYLOAD (1348) and
+        // leaves only `MAX_PAYLOAD - FED_HEADER_LEN` (1218) bytes for
+        // the inner IP packet. A tun MTU above that drops full-MTU
+        // packets at send time with `PayloadTooLarge` — ICMP pings
+        // (small) work but TCP retransmits storm because every
+        // full-MTU segment vanishes. Refuse the config at startup
+        // with a clear error so the operator never sees the runtime
+        // symptom. Leave 16 bytes of headroom for future protocol
+        // overhead.
+        let any_via_bridge = self.peers.iter().any(|p| p.via_bridge.is_some());
+        if any_via_bridge {
+            let max_safe_mtu = (drift::transport::MAX_PAYLOAD
+                .saturating_sub(drift::transport::FED_HEADER_LEN)
+                .saturating_sub(16)) as u32;
+            if self.interface.mtu > max_safe_mtu {
+                return Err(anyhow!(
+                    "interface.mtu = {} is too large when any peer uses via_bridge — \
+                     the federation envelope adds {} bytes inside DRIFT's payload cap, \
+                     leaving {} bytes for the inner IP packet. Set `mtu = {}` (or lower) \
+                     in [interface], or remove via_bridge from peers that don't need it.",
+                    self.interface.mtu,
+                    drift::transport::FED_HEADER_LEN,
+                    max_safe_mtu,
+                    max_safe_mtu
+                ));
+            }
+        }
+
         for (i, p) in self.peers.iter().enumerate() {
             p.pubkey_bytes()
                 .with_context(|| format!("peer #{}", i))?;
@@ -304,19 +334,26 @@ impl Config {
     }
 }
 
-/// Parse a `udp://host:port@<hex32>` bridge spec into its URL
+/// Parse a `<scheme>://host:port@<hex32>` bridge spec into its URL
 /// (with scheme) and the 32-byte bridge pubkey. Used by
 /// `Config::validate` and by the daemon when wiring federation
 /// routing.
+///
+/// Any scheme drift's adapter registry knows about works here —
+/// udp, tcp, tls, ws, http, dns, doh, onion, webrtc. If the bridge
+/// you're configuring doesn't have that scheme's listener enabled
+/// (or this drift-vpn build doesn't include that adapter), the
+/// daemon-side connect will fail at startup with the adapter's
+/// own error; the config-level parser doesn't gate on adapter
+/// availability because that's a runtime decision.
 pub fn parse_bridge_spec(spec: &str) -> Result<(String, [u8; 32])> {
     let (url, hex_pub) = spec
         .rsplit_once('@')
         .ok_or_else(|| anyhow!("expected <url>@<bridge-pubkey-hex>, got {:?}", spec))?;
-    let scheme = url.split("://").next().unwrap_or("");
-    if scheme != "udp" {
+    if !url.contains("://") {
         return Err(anyhow!(
-            "via_bridge scheme {:?} not yet supported (v0.13 supports udp only)",
-            scheme
+            "via_bridge URL must include a scheme (udp://, tcp://, tls://, ws://, …), got {:?}",
+            url
         ));
     }
     let raw = hex::decode(hex_pub)
