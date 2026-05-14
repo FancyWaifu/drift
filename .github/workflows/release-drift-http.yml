@@ -26,10 +26,14 @@ jobs:
             runner: macos-14
           - target: x86_64-apple-darwin
             runner: macos-13
+          # Pin to ubuntu-22.04 (glibc 2.35) so the tarball runs on
+          # Ubuntu 22.04, Debian 12, RHEL 9, and anything newer.
+          # `ubuntu-latest` is 24.04 (glibc 2.39) which breaks older
+          # LTS distros.
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             cross: true
     steps:
       - uses: actions/checkout@v4
