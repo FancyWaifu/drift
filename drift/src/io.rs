@@ -128,7 +128,21 @@ impl PacketIO for UdpPacketIO {
             }
             return Ok(packets.len());
         }
-        crate::transport::batch::send_batch(&self.socket, packets).await
+        #[cfg(unix)]
+        {
+            crate::transport::batch::send_batch(&self.socket, packets).await
+        }
+        #[cfg(not(unix))]
+        {
+            // No sendmmsg on Windows; loop the single-send path.
+            // The 1.5 Gbps userspace ceiling cited in the README
+            // is the Linux+macOS number; Windows is slower here
+            // but functionally identical.
+            for (bytes, dst) in packets {
+                self.socket.send_to(bytes, *dst).await?;
+            }
+            Ok(packets.len())
+        }
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
