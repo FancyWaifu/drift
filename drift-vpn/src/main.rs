@@ -22,7 +22,11 @@ mod status;
 mod daemon;
 
 #[derive(Parser)]
-#[clap(name = "drift-vpn", about = "Identity-routed multi-transport VPN over DRIFT")]
+#[clap(
+    name = "drift-vpn",
+    about = "Identity-routed multi-transport VPN over DRIFT",
+    version
+)]
 struct Cli {
     #[clap(subcommand)]
     cmd: Cmd,

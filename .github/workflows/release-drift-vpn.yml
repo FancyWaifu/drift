@@ -130,10 +130,10 @@ jobs:
           body: |
             Pre-built drift-vpn binaries.
 
-            **Linux** (`x86_64`, `aarch64`): full daemon support — `up`, `keygen`, `show`, `status`. Requires `CAP_NET_ADMIN` and `/dev/net/tun` accessible at runtime. See README for the systemd unit and Proxmox LXC config.
+            **Linux** (`x86_64`, `aarch64`): full daemon support — `up`, `keygen`, `show`, `status`, `doctor`, `install`/`uninstall`. Requires `CAP_NET_ADMIN` and `/dev/net/tun` accessible at runtime. `sudo drift-vpn install --start` writes a sandboxed systemd unit and enables it for boot.
 
-            **macOS** (Apple Silicon + Intel): full daemon support via utun. `sudo drift-vpn up -c <config>` to bring the tunnel online. The daemon's tun device shows up as `utun0`/`utun1`/etc.
+            **macOS** (Apple Silicon + Intel): full daemon support via utun. `sudo drift-vpn up -c <config>` to bring the tunnel online; `sudo drift-vpn install --start` writes a launchd plist at `/Library/LaunchDaemons/com.drift.vpn.plist` and starts it. Logs at `/var/log/drift-vpn.{log,err}`.
 
             **Windows** (`x86_64`): `keygen` and `show` work today. `up` is gated until the Wintun port lands (see roadmap). For Windows clients today, run drift-vpn inside WSL2.
 
-            See each archive's `README.md` for full install + usage.
+            See [QUICKSTART.md](https://github.com/FancyWaifu/drift/blob/main/drift-vpn/QUICKSTART.md) for the full path — install binary → keygen → config → `doctor` → `install --start` → verify, in under 10 minutes. Each archive's `README.md` has the same content.
