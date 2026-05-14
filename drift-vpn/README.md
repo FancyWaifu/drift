@@ -11,7 +11,7 @@ drift-vpn looks like WireGuard from the outside — TOML config, peers identifie
 
 If you already have a working WireGuard deployment, you don't need this. If your network is *hostile* — corporate firewall, censored country, asymmetric NAT, mobile clients behind carrier-grade NAT — drift-vpn is what works when WireGuard doesn't.
 
-## Status: v0.12, production-ready for "tinker and homelab"
+## Status: v0.14, production-ready for "tinker and homelab"
 
 Validated on real Linux LXCs and macOS (Apple Silicon):
 
@@ -398,7 +398,7 @@ Tagged releases (`drift-vpn-vX.Y.Z`) build a five-platform matrix and attach tar
 ```bash
 TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, x86_64-unknown-linux-gnu,
                               # aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
-TAG=drift-vpn-v0.12.0
+TAG=drift-vpn-v0.14.0
 curl -L -o drift-vpn.tar.gz \
   https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-vpn-$TAG-$TARGET.tar.gz
 tar xzf drift-vpn.tar.gz
