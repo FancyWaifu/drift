@@ -74,6 +74,12 @@ Options:
       --target-bridge <PUB>   Pubkey of the bridge the server is connected to.
                               Required when the server is on a different bridge
                               from the client (cross-bridge federation).
+      --host <NAME>           Look the server up by its drift.toml `[hosts.<NAME>]`
+                              entry. Resolves pubkey + route (direct or via_bridge)
+                              from the inventory; lets you replace the
+                              --server-pub / --bridge / --target-bridge triplet
+                              with a single short name. Mutually exclusive with
+                              those flags.
       --exec <CMD>            Non-interactive mode: run CMD in the remote shell,
                               drain its output, exit. Skips raw-mode; useful for
                               scripts and CI.
@@ -101,26 +107,31 @@ drift-mosh-client --server-pub <pub> --server-addr ws://host:443
 
 A single drift-mosh-server runs over one transport at a time — sessions are point-to-point, so simultaneous-multi-bind isn't useful here. (drift-http needs that pattern; drift-mosh doesn't.) The transport choice is in the URL the launcher persists, so `drift-mosh user@host` Just Works once the server is configured.
 
-### Zero-config dial — `drift-mosh-client --server-pub <hex>`
+### Zero-config dial — `drift-mosh-client --host <name>`
 
-If the server's pubkey is registered in your `drift.toml` (the
-shared inventory written by `drift-config`), the client doesn't
-need any other flags. It looks up the pubkey, reads the entry's
-`endpoints` (direct dial) or `via_bridge` (federation route), and
-fills the rest in automatically:
+If the server is registered in your `drift.toml` (the shared
+inventory written by `drift-config`), the client doesn't need any
+flags except the host name. It looks up the entry, pulls the
+pubkey + route (`endpoints` for direct dial, `via_bridge` for
+federation), and fills everything in automatically:
 
 ```bash
-# Inventory says mosh-srv is reachable via bridge-d3 (the bridge
-# the server `--bridge`'d to at startup):
+# One-time inventory setup: bridge the server federates to, then
+# the server itself.
 drift-config peer add bridge-d3 --pubkey <BRIDGE_PUB> \
   --endpoint udp://bridge.example:51820
 drift-config peer add mosh-srv  --pubkey <SERVER_PUB> \
   --via-bridge <BRIDGE_PUB>
 
-# Client side: identity is everything you need.
-drift-mosh-client --server-pub <SERVER_PUB> --exec 'whoami'
+# After that, connect with a short name:
+drift-mosh-client --host mosh-srv --exec 'whoami'
 # → routes through bridge-d3 via federation, runs `whoami`.
 ```
+
+You can also pass `--server-pub <hex>` if you'd rather identify
+the server by pubkey directly — drift-mosh-client falls back to
+the same drift.toml lookup keyed on pubkey. `--host <name>` is
+the shorter form when you've already named the host.
 
 When the same target host has both `endpoints` and `via_bridge`,
 the direct dial wins — fewer hops, no bridge operator in the
