@@ -6,6 +6,7 @@ Cargo.lock
 .DS_Store
 .vscode/
 .idea/
+.claude/
 *.iml
 # Per-run bench artifacts — regenerate with bench/docker/run.sh
 bench/docker/results/
