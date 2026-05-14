@@ -35,12 +35,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pin to ubuntu-22.04 for glibc 2.35. The default
+          # `ubuntu-latest` (24.04 since early 2025) ships glibc
+          # 2.39, which won't run on Ubuntu 22.04, Debian 12,
+          # RHEL 9, or anything older than mid-2024. 22.04 gives
+          # us forward compat on all current LTS distros.
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             ext: ''
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             ext: ''
             archive: tar.gz
             cross: true
@@ -116,6 +121,8 @@ jobs:
   release:
     name: Attach to release
     needs: build
+    # release job just uploads artifacts — runner version doesn't
+    # affect any binary it ships, so ubuntu-latest is fine here.
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/drift-vpn-v')
     permissions:
