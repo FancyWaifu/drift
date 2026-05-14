@@ -80,7 +80,12 @@ pub struct TransportConfig {
     /// When the number of in-flight unauthenticated handshakes (peers
     /// in `AwaitingData`) meets or exceeds this value, the server
     /// adaptively switches to cookie mode for new HELLOs. Default:
-    /// `u32::MAX` (effectively never triggers on its own).
+    /// 1000 — a single client can sustain ~3 KB per half-open peer
+    /// entry, so 1000 inflight = ~3 MB before cookies kick in; beyond
+    /// that the server demands a stateless cookie before allocating
+    /// state, naturally rate-limiting accumulation. Set `u32::MAX`
+    /// to disable adaptive cookies (e.g. for tests where you want
+    /// predictable timing).
     pub cookie_threshold: u32,
     /// Maximum age in seconds the server will accept a cookie
     /// timestamp. Keeps the fast path's replay window bounded and
@@ -145,7 +150,7 @@ impl Default for TransportConfig {
             recv_channel_capacity: 1024,
             accept_any_peer: false,
             cookie_always: false,
-            cookie_threshold: u32::MAX,
+            cookie_threshold: 1000,
             cookie_max_age_secs: 60,
             cookie_rotate_secs: 30,
             awaiting_data_timeout_secs: 30,
@@ -171,7 +176,7 @@ impl TransportConfig {
             recv_channel_capacity: 64,
             accept_any_peer: false,
             cookie_always: false,
-            cookie_threshold: u32::MAX,
+            cookie_threshold: 1000,
             cookie_max_age_secs: 60,
             cookie_rotate_secs: 30,
             awaiting_data_timeout_secs: 30,
@@ -196,7 +201,7 @@ impl TransportConfig {
             recv_channel_capacity: 4096,
             accept_any_peer: false,
             cookie_always: false,
-            cookie_threshold: u32::MAX,
+            cookie_threshold: 1000,
             cookie_max_age_secs: 60,
             cookie_rotate_secs: 30,
             awaiting_data_timeout_secs: 30,
@@ -513,6 +518,51 @@ pub(crate) struct Inner {
     /// announcement anyway).
     pub(crate) presence_tickets:
         Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
+
+    /// Rate-limited "dropped invalid packet" warn site. An attacker
+    /// flooding garbage triggers one of these per packet; without a
+    /// throttle the logs become unusable and CPU is wasted on
+    /// formatting. Allows one emission per second, accumulating a
+    /// "suppressed since last" count in between.
+    pub(crate) drop_warn_throttle: LogThrottle,
+}
+
+/// One-emission-per-window throttle, accumulating a suppressed
+/// count for the next emission. `tick_or_count()` returns
+/// `Some(suppressed_count_since_last_emission)` when the caller
+/// should emit, or `None` when the call should be silently
+/// suppressed.
+pub(crate) struct LogThrottle {
+    last: StdMutex<Option<Instant>>,
+    suppressed: AtomicU64,
+    window: Duration,
+}
+
+impl LogThrottle {
+    fn new(window: Duration) -> Self {
+        Self {
+            last: StdMutex::new(None),
+            suppressed: AtomicU64::new(0),
+            window,
+        }
+    }
+
+    fn tick_or_count(&self) -> Option<u64> {
+        let now = Instant::now();
+        let mut guard = self.last.lock().unwrap();
+        let should_emit = match *guard {
+            None => true,
+            Some(last) => now.duration_since(last) >= self.window,
+        };
+        if should_emit {
+            *guard = Some(now);
+            let n = self.suppressed.swap(0, Ordering::Relaxed);
+            Some(n)
+        } else {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
 }
 
 pub struct Transport {
@@ -659,6 +709,7 @@ impl Transport {
             federation_table: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_directory: Arc::new(StdMutex::new(StdHashMap::new())),
             presence_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
+            drop_warn_throttle: LogThrottle::new(Duration::from_secs(1)),
         });
 
         // ECN was set up by bind_with_config before calling
@@ -3283,7 +3334,27 @@ impl Inner {
             let (n, src, ecn_ce) = match iface.recv_from(&mut buf).await {
                 Ok((n, src)) => (n, src, false),
                 Err(e) => {
-                    warn!(error = %e, "recv_from failed");
+                    // Recv error means the underlying I/O died —
+                    // for connection-oriented adapters (TCP, TLS, WS)
+                    // this is end-of-connection. Drop our reference
+                    // by removing the slot from InterfaceSet so the
+                    // socket actually closes. Universal: works for
+                    // any adapter whose recv_from returns Err on
+                    // connection death.
+                    //
+                    // The primary interface (index 0) is special:
+                    // it backs the whole Transport's send path. If
+                    // it dies the Transport is effectively dead;
+                    // removing the slot would just make subsequent
+                    // sends fail differently. We keep iface_idx==0
+                    // as a soft-fail (log + break) without removal
+                    // so a UDP socket hiccup doesn't permanently
+                    // disable the transport (it gets a fresh recv
+                    // attempt only if the caller decides to restart).
+                    if iface_idx != 0 {
+                        self.ifaces.remove(iface_idx);
+                    }
+                    warn!(error = %e, iface_idx, "recv_from failed; evicting interface");
                     break;
                 }
             };
@@ -3336,7 +3407,14 @@ impl Inner {
                         if matches!(e, DriftError::AuthFailed) {
                             self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                         }
-                        warn!(error = %e, ?src, "dropped invalid short-header packet");
+                        if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
+                            warn!(
+                                error = %e,
+                                ?src,
+                                suppressed,
+                                "dropped invalid short-header packet"
+                            );
+                        }
                     }
                 }
                 continue;
@@ -3374,7 +3452,14 @@ impl Inner {
                         }
                         _ => {}
                     }
-                    warn!(error = %e, ?src, "dropped invalid packet");
+                    if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
+                        warn!(
+                            error = %e,
+                            ?src,
+                            suppressed,
+                            "dropped invalid packet"
+                        );
+                    }
                 }
             }
         }
@@ -4182,14 +4267,34 @@ impl Inner {
             {
                 let mut peers = self.peers.lock_all().await;
                 for peer in peers.iter_mut() {
-                    if !matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
-                        continue;
-                    }
-                    let age = peer
-                        .session_epoch
-                        .map(|e| now.duration_since(e))
-                        .unwrap_or_default();
-                    if age <= cutoff {
+                    // Reap stale peers in EITHER half-open state:
+                    //   * AwaitingData = server saw HELLO, replied
+                    //     HELLO_ACK, client never sent first DATA.
+                    //     Original eviction case.
+                    //   * AwaitingAck = client sent HELLO, server
+                    //     never replied. Common when an outbound
+                    //     federation link (--federate udp://X@P)
+                    //     points at a dead peer; without this the
+                    //     peer entry sits in AwaitingAck for the
+                    //     life of the process, retransmitting HELLO
+                    //     and consuming both memory and a HELLO/s
+                    //     of outbound traffic.
+                    //
+                    // For AwaitingAck we use `last_sent` from the
+                    // AwaitingAck state itself for age, since
+                    // session_epoch isn't set until the session
+                    // reaches Established.
+                    let stale_age = match &peer.handshake {
+                        HandshakeState::AwaitingData { .. } => peer
+                            .session_epoch
+                            .map(|e| now.duration_since(e))
+                            .unwrap_or_default(),
+                        HandshakeState::AwaitingAck { last_sent, .. } => {
+                            now.duration_since(*last_sent)
+                        }
+                        _ => continue,
+                    };
+                    if stale_age <= cutoff {
                         continue;
                     }
                     if peer.auto_registered {

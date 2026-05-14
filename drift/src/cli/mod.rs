@@ -100,6 +100,20 @@ pub struct SendArgs {
     /// Adapter to connect with: 1=UDP (default), 2=TCP, 3=WebSocket
     #[arg(long, default_value = "1")]
     pub adapter: u8,
+    /// Wait for the session to reach Established (handshake complete)
+    /// before exiting. Without this, `drift send` exits as soon as
+    /// the bytes are queued — on strict-NAT paths the HELLO_ACK may
+    /// never reach back and the message is silently lost despite a
+    /// 0 exit code. With `--await-ack`, drift retransmits HELLO
+    /// transparently until handshake completion or `--await-timeout`
+    /// expires.
+    #[arg(long, default_value = "false")]
+    pub await_ack: bool,
+    /// How long to wait for handshake completion when `--await-ack`
+    /// is set. Default 5 seconds — enough for any non-pathological
+    /// WAN, fail-fast for pathological ones.
+    #[arg(long, default_value = "5")]
+    pub await_timeout: u64,
 }
 
 #[derive(clap::Args)]

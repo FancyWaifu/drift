@@ -25,6 +25,7 @@
 //! `TcpPacketIO` for an example.
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -160,6 +161,13 @@ pub struct TcpPacketIO {
     writer: tokio::sync::Mutex<tokio::io::WriteHalf<tokio::net::TcpStream>>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    /// Optional per-IP connection-counter guard. Set by
+    /// `TcpListenerIO::accept` so the slot releases when the
+    /// PacketIO drops; client-side `TcpPacketIO::new` leaves it
+    /// None (outbound connections aren't subject to the listener
+    /// cap because there's no listener counting them).
+    #[allow(dead_code)]
+    _conn_guard: Option<ConnGuard>,
 }
 
 impl TcpPacketIO {
@@ -169,6 +177,25 @@ impl TcpPacketIO {
     /// "destination" for all send_to calls (since TCP is
     /// point-to-point, the destination is always the same).
     pub fn new(stream: tokio::net::TcpStream) -> io::Result<Self> {
+        Self::new_inner(stream, None)
+    }
+
+    /// Variant used by `TcpListenerIO::accept` that attaches a
+    /// per-IP-count guard. When the PacketIO drops (recv loop
+    /// exits + F1's `InterfaceSet::remove` clears the Arc), the
+    /// guard releases the connection slot back to the listener's
+    /// per-IP map.
+    pub(crate) fn new_with_guard(
+        stream: tokio::net::TcpStream,
+        guard: ConnGuard,
+    ) -> io::Result<Self> {
+        Self::new_inner(stream, Some(guard))
+    }
+
+    fn new_inner(
+        stream: tokio::net::TcpStream,
+        guard: Option<ConnGuard>,
+    ) -> io::Result<Self> {
         let peer_addr = stream.peer_addr()?;
         let local_addr = stream.local_addr()?;
         let _ = stream.set_nodelay(true);
@@ -178,6 +205,7 @@ impl TcpPacketIO {
             writer: tokio::sync::Mutex::new(writer),
             peer_addr,
             local_addr,
+            _conn_guard: guard,
         })
     }
 }
@@ -551,7 +579,12 @@ impl PacketIO for WebTransportPacketIO {
 /// automatically because both interfaces feed the same
 /// DRIFT transport.
 pub struct InterfaceSet {
-    interfaces: std::sync::RwLock<Vec<(String, Arc<dyn PacketIO>)>>,
+    /// Slot is `Some(_)` while the underlying `PacketIO` is alive,
+    /// `None` once `remove()` has been called for that index.
+    /// Slots are never reused — index assignment is monotonic —
+    /// so existing peer `interface_id` values remain stable across
+    /// connection deaths.
+    interfaces: std::sync::RwLock<Vec<(String, Option<Arc<dyn PacketIO>>)>>,
 }
 
 impl InterfaceSet {
@@ -559,7 +592,7 @@ impl InterfaceSet {
     /// common case for backward compatibility).
     pub fn single(name: impl Into<String>, io: Arc<dyn PacketIO>) -> Self {
         Self {
-            interfaces: std::sync::RwLock::new(vec![(name.into(), io)]),
+            interfaces: std::sync::RwLock::new(vec![(name.into(), Some(io))]),
         }
     }
 
@@ -570,16 +603,54 @@ impl InterfaceSet {
     pub fn add(&self, name: impl Into<String>, io: Arc<dyn PacketIO>) -> usize {
         let mut ifaces = self.interfaces.write().unwrap();
         let idx = ifaces.len();
-        ifaces.push((name.into(), io));
+        ifaces.push((name.into(), Some(io)));
         idx
     }
 
-    /// Number of interfaces.
+    /// Mark the interface at `idx` as dead and drop its
+    /// `Arc<dyn PacketIO>`. This is the universal fix for the
+    /// per-connection FD leak that affects any connection-oriented
+    /// adapter (TCP, TLS, WS, …): when the recv loop for a
+    /// connection-backed PacketIO exits on error, dropping the Arc
+    /// here lets the underlying socket close. UDP and other
+    /// connectionless adapters can also be removed without harm —
+    /// only the run_recv_loop_for caller decides when removal is
+    /// appropriate.
+    ///
+    /// The slot index stays reserved (set to None) so peers that
+    /// previously routed through this interface get a clean "no
+    /// path" error on their next send rather than silently being
+    /// redirected to a different connection that happened to land
+    /// at the same index later.
+    pub fn remove(&self, idx: usize) {
+        let mut ifaces = self.interfaces.write().unwrap();
+        if let Some(slot) = ifaces.get_mut(idx) {
+            slot.1 = None;
+        }
+    }
+
+    /// Number of slots (including removed ones). The index
+    /// monotonicity invariant — never reuse slot indices —
+    /// means peers reached through any interface, dead or alive,
+    /// retain stable `interface_id` values. Use `live_count()`
+    /// for the number of currently-live interfaces.
     pub fn len(&self) -> usize {
         self.interfaces.read().unwrap().len()
     }
 
-    /// True when no interfaces have been registered.
+    /// Number of live interfaces. Less than or equal to `len()`;
+    /// the difference is the count of slots that `remove()` has
+    /// nullified.
+    pub fn live_count(&self) -> usize {
+        self.interfaces
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, io)| io.is_some())
+            .count()
+    }
+
+    /// True when no interfaces have been registered at all.
     pub fn is_empty(&self) -> bool {
         self.interfaces.read().unwrap().is_empty()
     }
@@ -587,7 +658,9 @@ impl InterfaceSet {
     /// Send a packet via a specific interface by index.
     /// Clones the Arc under the read lock, releases the
     /// lock, then awaits the send — the lock is never
-    /// held across an async boundary.
+    /// held across an async boundary. Returns NotFound if
+    /// the index is out of range OR if the interface has
+    /// been removed (dead connection).
     pub async fn send_via(
         &self,
         interface_id: usize,
@@ -598,9 +671,12 @@ impl InterfaceSet {
             let ifaces = self.interfaces.read().unwrap();
             ifaces
                 .get(interface_id)
-                .map(|(_, io)| io.clone())
+                .and_then(|(_, io)| io.clone())
                 .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "interface index out of range")
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "interface index out of range or removed",
+                    )
                 })?
         };
         io.send_to(buf, dest).await
@@ -613,40 +689,42 @@ impl InterfaceSet {
     }
 
     /// Get a cloned Arc to a specific interface by index.
+    /// Returns None for both out-of-range and removed slots.
     pub fn get(&self, idx: usize) -> Option<Arc<dyn PacketIO>> {
         let ifaces = self.interfaces.read().unwrap();
-        ifaces.get(idx).map(|(_, io)| io.clone())
+        ifaces.get(idx).and_then(|(_, io)| io.clone())
     }
 
-    /// The local address of the first (default) interface.
+    /// The local address of the first live interface.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         let ifaces = self.interfaces.read().unwrap();
         ifaces
-            .first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
-            .1
+            .iter()
+            .find_map(|(_, io)| io.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no live interfaces"))?
             .local_addr()
     }
 
-    /// Raw fd of the first interface (for ECN etc).
+    /// Raw fd of the first live interface (for ECN etc).
     #[cfg(unix)]
     pub fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         let ifaces = self.interfaces.read().unwrap();
-        ifaces.first().and_then(|(_, io)| io.as_raw_fd())
+        ifaces.iter().find_map(|(_, io)| io.clone()).and_then(|io| io.as_raw_fd())
     }
 
-    /// Send via a specific interface, falling back to
-    /// interface 0 if the index is out of range. This is
-    /// the safe version that doesn't error on bad indices
-    /// — it just degrades to the default path.
+    /// Send via a specific interface, falling back to the
+    /// first live interface if the requested index is out of
+    /// range OR removed. This is the safe version that doesn't
+    /// error on bad indices — it just degrades to whatever live
+    /// path is available.
     pub async fn send_for(&self, iface: usize, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
         let io = {
             let ifaces = self.interfaces.read().unwrap();
             ifaces
                 .get(iface)
-                .or_else(|| ifaces.first())
-                .map(|(_, io)| io.clone())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
+                .and_then(|(_, io)| io.clone())
+                .or_else(|| ifaces.iter().find_map(|(_, io)| io.clone()))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no live interfaces"))?
         };
         io.send_to(buf, dest).await
     }
@@ -665,9 +743,9 @@ impl InterfaceSet {
             let ifaces = self.interfaces.read().unwrap();
             ifaces
                 .get(iface)
-                .or_else(|| ifaces.first())
-                .map(|(_, io)| io.clone())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no interfaces"))?
+                .and_then(|(_, io)| io.clone())
+                .or_else(|| ifaces.iter().find_map(|(_, io)| io.clone()))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no live interfaces"))?
         };
         io.send_to_batch(packets).await
     }
@@ -840,14 +918,69 @@ impl Listener for UdpListenerIO {
 /// TCP listener — wraps `tokio::net::TcpListener`. Each
 /// `accept()` returns a fresh `TcpPacketIO` for the next
 /// inbound client. Multi-shot.
+///
+/// Per-source-IP connection cap: a single attacker can otherwise
+/// rapidly open up to `ulimit -n` connections against the bridge,
+/// each consuming an FD slot. We cap concurrent in-flight
+/// accepted connections per source IP at `MAX_TCP_CONNS_PER_IP`
+/// (default 32, configurable via `set_per_ip_cap`). Excess
+/// connections are accepted-then-immediately-dropped, which closes
+/// the socket cleanly with a `FIN` from our side — the attacker's
+/// kernel sees the close, no spinning retry. The decrement on
+/// each per-IP counter happens via the `ConnGuard` returned to
+/// the accepted PacketIO; once that Arc drops (recv loop exits +
+/// `InterfaceSet::remove` clears it via the F1 fix), the guard
+/// releases the slot.
 pub struct TcpListenerIO {
     listener: tokio::net::TcpListener,
+    per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
+    cap_per_ip: usize,
 }
+
+/// RAII guard that decrements a per-IP connection counter when
+/// dropped. Held inside `TcpPacketIO` so the slot is released as
+/// soon as the PacketIO Arc count hits zero — which happens when
+/// the recv loop exits AND `InterfaceSet::remove()` drops the
+/// transport-side reference.
+pub(crate) struct ConnGuard {
+    per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
+    ip: std::net::IpAddr,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.per_ip.lock() {
+            if let Some(c) = map.get_mut(&self.ip) {
+                if *c > 0 {
+                    *c -= 1;
+                }
+                if *c == 0 {
+                    map.remove(&self.ip);
+                }
+            }
+        }
+    }
+}
+
+const DEFAULT_TCP_CONNS_PER_IP: usize = 32;
 
 impl TcpListenerIO {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        Ok(Self { listener })
+        Ok(Self {
+            listener,
+            per_ip: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cap_per_ip: DEFAULT_TCP_CONNS_PER_IP,
+        })
+    }
+
+    /// Adjust the per-source-IP concurrent-connection cap. The
+    /// default (32) is a reasonable balance for federation
+    /// bridges that may legitimately have a handful of clients
+    /// from the same NAT but should never accept hundreds from
+    /// a single IP. Set very high (e.g. usize::MAX) to disable.
+    pub fn set_per_ip_cap(&mut self, cap: usize) {
+        self.cap_per_ip = cap;
     }
 }
 
@@ -860,9 +993,41 @@ impl Listener for TcpListenerIO {
         true
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
-        let (stream, _peer) = self.listener.accept().await?;
-        let io = TcpPacketIO::new(stream)?;
-        Ok(Arc::new(io))
+        loop {
+            let (stream, peer) = self.listener.accept().await?;
+            let ip = peer.ip();
+
+            // Try to claim a slot for this source IP. If the cap
+            // is hit, we drop the stream — closing the socket
+            // cleanly — and keep accepting. Single attacker
+            // can't exhaust our FDs.
+            let admitted = {
+                let mut map = self.per_ip.lock().unwrap();
+                let count = map.entry(ip).or_insert(0);
+                if *count >= self.cap_per_ip {
+                    false
+                } else {
+                    *count += 1;
+                    true
+                }
+            };
+            if !admitted {
+                drop(stream);
+                tracing::debug!(
+                    src = %ip,
+                    cap = self.cap_per_ip,
+                    "tcp accept: per-ip cap reached, refusing connection"
+                );
+                continue;
+            }
+
+            let guard = ConnGuard {
+                per_ip: self.per_ip.clone(),
+                ip,
+            };
+            let io = TcpPacketIO::new_with_guard(stream, guard)?;
+            return Ok(Arc::new(io));
+        }
     }
 }
 
