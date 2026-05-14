@@ -2517,9 +2517,49 @@ impl Inner {
         if items.is_empty() {
             return Ok(0);
         }
-        // Build all the wires under per-shard locks.
-        let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(items.len());
+        // First pass: split federated peers out of the batched
+        // path. They take the federation short-circuit in single
+        // `send_data` (envelope-wrap + ship via the bridge's
+        // session) — that logic isn't in `build_data_packet`, so
+        // batched build would skip them and silently drop their
+        // traffic. One syscall per federated packet is acceptable:
+        // federated peers are a minority, and the bridge is the
+        // bottleneck anyway.
+        let mut federated_items: Vec<&BatchItem> = Vec::new();
+        let mut direct_items: Vec<&BatchItem> = Vec::with_capacity(items.len());
         for it in items {
+            let is_federated = {
+                let peers = self.peers.lock_for(&it.peer).await;
+                peers
+                    .get(&it.peer)
+                    .map(|p| p.federated_via.is_some())
+                    .unwrap_or(false)
+            };
+            if is_federated {
+                federated_items.push(it);
+            } else {
+                direct_items.push(it);
+            }
+        }
+
+        let mut sent_fed = 0usize;
+        for it in &federated_items {
+            if self
+                .send_data(&it.peer, &it.payload, it.deadline_ms, it.coalesce_group)
+                .await
+                .is_ok()
+            {
+                sent_fed += 1;
+            }
+        }
+
+        if direct_items.is_empty() {
+            return Ok(sent_fed);
+        }
+
+        // Build all the wires for direct peers under per-shard locks.
+        let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(direct_items.len());
+        for it in &direct_items {
             if it.payload.len() > MAX_PAYLOAD {
                 continue;
             }
@@ -2585,7 +2625,7 @@ impl Inner {
             .bytes_sent
             .fetch_add(bytes_total, Ordering::Relaxed);
         self.metrics.batched_sends.fetch_add(1, Ordering::Relaxed);
-        Ok(sent_total)
+        Ok(sent_total + sent_fed)
     }
 
     /// Populate the CID lookup maps for an established

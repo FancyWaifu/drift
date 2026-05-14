@@ -188,6 +188,27 @@ pub struct Peer {
     /// padding packet so NATs don't time out the path. Default
     /// off.
     pub keepalive: Option<u64>,
+    /// Bridge URL + pubkey to reach this peer through, when
+    /// `endpoint`/`endpoints` aren't set OR when both peers are
+    /// behind NATs that block their direct paths. Format:
+    /// `udp://host:port@<bridge-pubkey-hex>`. Two peers that
+    /// share the same `via_bridge` can find each other through
+    /// the bridge without either configuring direct endpoints
+    /// or opening inbound ports.
+    ///
+    /// v0.13 supports UDP bridges. TCP/WS bridges land later
+    /// (the federation transport already supports them; the
+    /// drift-vpn-side wiring is the only missing piece).
+    #[serde(default)]
+    pub via_bridge: Option<String>,
+    /// Pubkey of the bridge the *peer* is connected to (the
+    /// federation routing target). Optional — defaults to the
+    /// pubkey embedded in `via_bridge`, which is correct when
+    /// both peers share a single bridge. Set explicitly when
+    /// the peer lives behind a different federated bridge in
+    /// a multi-bridge mesh.
+    #[serde(default)]
+    pub target_bridge: Option<String>,
 }
 
 impl Peer {
@@ -257,7 +278,56 @@ impl Config {
             // through another peer that DOES have a direct
             // path. We register them with the transport but
             // don't try to handshake at startup.
+            //
+            // v0.13: `via_bridge` adds a federation-bridge path
+            // for peers behind unrelated NATs. Validate the
+            // spec format here so the daemon-side code can
+            // assume a parseable URL + pubkey.
+            if let Some(spec) = &p.via_bridge {
+                parse_bridge_spec(spec).with_context(|| {
+                    format!("peer #{} via_bridge {:?}", i, spec)
+                })?;
+            }
+            if let Some(tb) = &p.target_bridge {
+                let raw = hex::decode(tb)
+                    .with_context(|| format!("peer #{} target_bridge hex", i))?;
+                if raw.len() != 32 {
+                    return Err(anyhow!(
+                        "peer #{} target_bridge must be 64 hex chars (32 bytes), got {}",
+                        i,
+                        raw.len()
+                    ));
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// Parse a `udp://host:port@<hex32>` bridge spec into its URL
+/// (with scheme) and the 32-byte bridge pubkey. Used by
+/// `Config::validate` and by the daemon when wiring federation
+/// routing.
+pub fn parse_bridge_spec(spec: &str) -> Result<(String, [u8; 32])> {
+    let (url, hex_pub) = spec
+        .rsplit_once('@')
+        .ok_or_else(|| anyhow!("expected <url>@<bridge-pubkey-hex>, got {:?}", spec))?;
+    let scheme = url.split("://").next().unwrap_or("");
+    if scheme != "udp" {
+        return Err(anyhow!(
+            "via_bridge scheme {:?} not yet supported (v0.13 supports udp only)",
+            scheme
+        ));
+    }
+    let raw = hex::decode(hex_pub)
+        .with_context(|| format!("decoding bridge pubkey {:?}", hex_pub))?;
+    if raw.len() != 32 {
+        return Err(anyhow!(
+            "bridge pubkey must be 32 bytes (64 hex chars), got {}",
+            raw.len()
+        ));
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&raw);
+    Ok((url.to_string(), pubkey))
 }
