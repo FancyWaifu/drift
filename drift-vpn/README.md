@@ -30,14 +30,14 @@ Validated on real Linux LXCs and macOS (Apple Silicon):
 | v0.11 | perf experiments (io_uring side-thread, single-task collapse) — both regressed against the v0.7 two-task baseline and were reverted; v0.7 is the correctly-tuned model for tokio |
 | v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64/x86_64, Windows x86_64 keygen/show only) |
 | v0.13 | **`drift-vpn doctor`** preflight (privilege, TUN, IP forwarding, identity, port, peers checks) + **`via_bridge` peer mode** (two peers behind unrelated NATs reach each other through a shared federation bridge — no port forwarding on either side, any drift adapter scheme: udp / tcp / tls / ws / …). Config-level error-out on MTU + via_bridge mismatch (the federation envelope eats 130 bytes of payload; tun MTU must be ≤ 1202). |
-| v0.14 | **`drift-vpn install` / `uninstall`** — one-command service install (systemd unit on Linux, launchd plist on macOS), with `--dry-run` to preview, `--start` to boot it, `--no-enable` to skip autostart, and `--service-name` for multi-instance hosts. + **QUICKSTART.md** walking install → keygen → config → preflight → service → verify end-to-end in under 10 minutes. |
+| v0.14 | **`drift-vpn install` / `uninstall`** — one-command service install (systemd unit on Linux, launchd plist on macOS), with `--dry-run` to preview, `--start` to boot it, `--no-enable` to skip autostart, and `--service-name` for multi-instance hosts. + **`drift-vpn rotate` / `rotate-verify`** — owner-driven identity rotation via signed XEdDSA announce; peers verify and paste the new pubkey instead of receiving it through a back-channel. + **QUICKSTART.md** + **ROTATION.md** docs. + **Windows build fix** (sendmmsg call site cfg-gated) so the five-platform release matrix actually builds. |
 
 What's NOT yet there:
 
 - **Windows daemon.** `keygen` and `show` work on Windows today; the `up` daemon needs a Wintun port. WSL2 is the recommended Windows path until then.
 - **No coordination service.** Peers find each other via static config — no Tailscale-style coordinator.
 - **NAT hole-punching is via-bridge only.** v0.13 added `via_bridge` for peers behind unrelated NATs to find each other through a federation bridge. UDP-hole-punching (STUN-style direct path discovery) isn't yet implemented; if both sides have NATs that block inbound, all traffic flows through the bridge.
-- **No identity rotation.** "Lost laptop" story is the same as WireGuard's: update every peer's config.
+- **Lost-laptop identity rotation** still requires manual config edits on every peer (same as WireGuard/Tailscale today). **Owner-driven rotation** (you still have the old secret — routine key hygiene, hardware swap, planned roll) is automated as of v0.14 via `drift-vpn rotate` + `rotate-verify`; see [ROTATION.md](ROTATION.md).
 - **Userspace, not kernel.** ~1.5 Gbps single-stream TCP on a Ryzen 7 6800H — fine for almost any workload, but ~5× slower than WireGuard's Linux kernel module.
 
 ## How it differs from WireGuard

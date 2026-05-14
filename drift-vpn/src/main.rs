@@ -13,6 +13,7 @@ mod identity;
 #[cfg(unix)]
 mod install;
 mod metrics;
+mod rotate;
 mod routing;
 mod status;
 
@@ -134,6 +135,46 @@ enum Cmd {
         /// touch the filesystem or invoke systemctl/launchctl.
         #[clap(long)]
         dry_run: bool,
+    },
+
+    /// Generate a new identity and a signed rotation announce. The
+    /// announce, signed with the OLD identity, tells peers that the
+    /// OLD pubkey is being retired in favor of a NEW pubkey. Each
+    /// peer pastes the new pubkey into their config after running
+    /// `rotate-verify` on the announce. Phase-1: the announce is
+    /// distributed out-of-band (signal, email, paste); future
+    /// versions will broadcast it over established tunnels.
+    Rotate {
+        /// Path to the EXISTING identity file (will not be
+        /// modified — archive or remove it after rotation
+        /// completes everywhere).
+        #[clap(short, long, default_value = "/etc/drift-vpn/identity.key")]
+        r#in: PathBuf,
+        /// Path to write the NEW identity file. Must not already
+        /// exist. Mode 0600 on Unix.
+        #[clap(short, long)]
+        out: PathBuf,
+        /// Optional path to write the announce blob (hex) to.
+        /// If omitted, the blob is printed to stdout (the human-
+        /// readable rotation summary still goes to stderr).
+        #[clap(long)]
+        announce_out: Option<PathBuf>,
+    },
+
+    /// Verify a rotation announce from a peer and print the new
+    /// pubkey to paste into your drift-vpn config. Rejects
+    /// announces with a bad signature, mismatched expected
+    /// pubkey, or stale timestamp.
+    RotateVerify {
+        /// The announce blob — either the hex string directly, or
+        /// a path to a file containing it.
+        #[clap(long)]
+        announce: String,
+        /// The pubkey hex you currently have configured for this
+        /// peer. The verify rejects the announce if its embedded
+        /// `old_pub` doesn't match.
+        #[clap(long)]
+        expect_old_pub: String,
     },
 }
 
@@ -300,6 +341,28 @@ async fn main() -> Result<()> {
                      macOS launchd)."
                 );
             }
+        }
+        Cmd::Rotate {
+            r#in,
+            out,
+            announce_out,
+        } => {
+            rotate::rotate(rotate::RotateOpts {
+                r#in,
+                out,
+                announce_out,
+            })
+            .await?;
+        }
+        Cmd::RotateVerify {
+            announce,
+            expect_old_pub,
+        } => {
+            rotate::rotate_verify(rotate::RotateVerifyOpts {
+                announce,
+                expect_old_pub,
+            })
+            .await?;
         }
         Cmd::Config { cmd } => match cmd {
             ConfigCmd::Init { config, cidr, mtu } => {
