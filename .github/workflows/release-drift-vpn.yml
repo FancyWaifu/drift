@@ -1,9 +1,12 @@
 name: Release drift-vpn
 
-# Fires on tags like `drift-vpn-v0.12.0`. Builds the drift-vpn
-# binary for Linux (amd64+arm64), macOS (Intel+Apple Silicon),
-# and Windows (amd64). Packages each into a tarball/zip,
-# attaches them to a GitHub release.
+# Fires on tags like `drift-vpn-v0.14.0`. Builds the drift-vpn
+# binary for Linux (amd64+arm64), macOS Apple Silicon, and
+# Windows (amd64). Packages each into a tarball/zip and attaches
+# them to a GitHub release.
+#
+# Intel macOS (x86_64-apple-darwin) is intentionally absent in
+# v0.14 — see the comment by that matrix entry below.
 #
 # Notes:
 #   - Linux daemon: tun crate via /dev/net/tun (CAP_NET_ADMIN
@@ -45,10 +48,13 @@ jobs:
             runner: macos-14
             ext: ''
             archive: tar.gz
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            ext: ''
-            archive: tar.gz
+          # x86_64-apple-darwin (Intel Mac) was dropped from v0.14
+          # — the macos-13 runner pool sat at 25+ minute queues
+          # with no slot assignment on two consecutive release runs.
+          # Intel Macs are increasingly rare (Apple stopped selling
+          # them in 2023); Apple Silicon coverage handles the modern
+          # macOS user base. If demand returns we can re-add with a
+          # `if: ${{ inputs.with_intel_mac }}` gate.
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             ext: '.exe'
@@ -132,7 +138,7 @@ jobs:
 
             **Linux** (`x86_64`, `aarch64`): full daemon support — `up`, `keygen`, `show`, `status`, `doctor`, `install`/`uninstall`. Requires `CAP_NET_ADMIN` and `/dev/net/tun` accessible at runtime. `sudo drift-vpn install --start` writes a sandboxed systemd unit and enables it for boot.
 
-            **macOS** (Apple Silicon + Intel): full daemon support via utun. `sudo drift-vpn up -c <config>` to bring the tunnel online; `sudo drift-vpn install --start` writes a launchd plist at `/Library/LaunchDaemons/com.drift.vpn.plist` and starts it. Logs at `/var/log/drift-vpn.{log,err}`.
+            **macOS** (Apple Silicon): full daemon support via utun. `sudo drift-vpn up -c <config>` to bring the tunnel online; `sudo drift-vpn install --start` writes a launchd plist at `/Library/LaunchDaemons/com.drift.vpn.plist` and starts it. Logs at `/var/log/drift-vpn.{log,err}`. Intel Macs: build from source for now (`cargo build --release -p drift-vpn`); the macos-13 GitHub runner pool became unreliable so we stopped shipping a pre-built x86_64 binary.
 
             **Windows** (`x86_64`): `keygen` and `show` work today. `up` is gated until the Wintun port lands (see roadmap). For Windows clients today, run drift-vpn inside WSL2.
 

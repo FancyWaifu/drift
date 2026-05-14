@@ -28,7 +28,7 @@ Validated on real Linux LXCs and macOS (Apple Silicon):
 | v0.9 | Prometheus `/metrics` HTTP endpoint |
 | v0.10 | real-Linux verification + mesh-routed-DATA hop_ttl bug fix |
 | v0.11 | perf experiments (io_uring side-thread, single-task collapse) — both regressed against the v0.7 two-task baseline and were reverted; v0.7 is the correctly-tuned model for tokio |
-| v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64/x86_64, Windows x86_64 keygen/show only) |
+| v0.12 | **macOS daemon** (utun via the `tun` crate) + cross-platform release builds (Linux amd64/arm64, macOS arm64, Windows x86_64 keygen/show only). Intel macOS (`x86_64-apple-darwin`) was in earlier matrix plans but dropped for v0.14 after the macos-13 GitHub runner pool became unreliable; Intel-Mac users build from source. |
 | v0.13 | **`drift-vpn doctor`** preflight (privilege, TUN, IP forwarding, identity, port, peers checks) + **`via_bridge` peer mode** (two peers behind unrelated NATs reach each other through a shared federation bridge — no port forwarding on either side, any drift adapter scheme: udp / tcp / tls / ws / …). Config-level error-out on MTU + via_bridge mismatch (the federation envelope eats 130 bytes of payload; tun MTU must be ≤ 1202). |
 | v0.14 | **`drift-vpn install` / `uninstall`** — one-command service install (systemd unit on Linux, launchd plist on macOS), with `--dry-run` to preview, `--start` to boot it, `--no-enable` to skip autostart, and `--service-name` for multi-instance hosts. + **`drift-vpn rotate` / `rotate-verify`** — owner-driven identity rotation via signed XEdDSA announce; peers verify and paste the new pubkey instead of receiving it through a back-channel. + **QUICKSTART.md** + **ROTATION.md** docs. + **Windows build fix** (sendmmsg call site cfg-gated) so the five-platform release matrix actually builds. |
 
@@ -396,8 +396,9 @@ drift-vpn/src/
 Tagged releases (`drift-vpn-vX.Y.Z`) build a five-platform matrix and attach tarballs/zips to the GitHub release:
 
 ```bash
-TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, x86_64-unknown-linux-gnu,
+TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu,
                               # aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
+                              # Intel Mac: not pre-built in v0.14 — build from source
 TAG=drift-vpn-v0.14.0
 curl -L -o drift-vpn.tar.gz \
   https://github.com/FancyWaifu/drift/releases/download/$TAG/drift-vpn-$TAG-$TARGET.tar.gz
