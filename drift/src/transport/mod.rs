@@ -3226,6 +3226,33 @@ impl Inner {
         // normally.
         let unknown = env.target_bridge_pub == federated::UNKNOWN_BRIDGE_PUB;
         let (next_hop, resolved_bridge_pub) = if unknown {
+            // First check: do WE host this client locally? A
+            // single-bridge federation with no remote peers has
+            // an empty peer_directory but its presence_tickets
+            // table will still have local-client entries. Without
+            // this check, every UNKNOWN_BRIDGE_PUB envelope for a
+            // local client would miss the directory and trigger
+            // a FindPeer fan-out that no peer can answer.
+            //
+            // When we find a local match, treat it exactly like
+            // case-2 (target_bridge_pub == our_pub): derive the
+            // local client's peer_id from its pubkey and deliver
+            // on the local session.
+            let local_pid = derive_peer_id(&env.target_client_pub);
+            let local_hit = self
+                .peers
+                .lock_for(&local_pid)
+                .await
+                .get(&local_pid)
+                .map(|p| {
+                    matches!(p.handshake, HandshakeState::Established { .. })
+                        && p.peer_static_pub == env.target_client_pub
+                })
+                .unwrap_or(false);
+            if local_hit {
+                (Some(local_pid), our_pub)
+            } else {
+
             // Directory lookup. Evict the entry if it's older
             // than DIRECTORY_TTL — let the announcement layer
             // refresh it. Bridges announce every ~7 s, so 20 s
@@ -3261,6 +3288,7 @@ impl Inner {
             } else {
                 (None, env.target_bridge_pub)
             }
+            } // close `if local_hit { … } else { …` opened above
         } else {
             let nh = self
                 .federation_table
