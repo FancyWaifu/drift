@@ -18,6 +18,15 @@ set -u
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 cd "$HERE"
 
+# Prefer the in-tree release binary over whatever's on PATH so a
+# stale `cargo install` doesn't mask a fresh fix. Build it if
+# absent.
+if [ ! -x ./target/release/drift-mosh-client ]; then
+    echo "building target/release/drift-mosh-client (one-time setup)…"
+    cargo build --release -p drift-mosh --bin drift-mosh-client --quiet 2>&1 | tail -3
+fi
+DRIFT_MOSH_CLIENT="./target/release/drift-mosh-client"
+
 MODE="${1:-all}"
 PASS=0
 FAIL=0
@@ -43,23 +52,25 @@ run_native() {
 
     echo
     echo "── In-process loopback mesh (tcp / ws / webrtc / webtransport / mixed)"
-    # Run once, capture the final test-result line, then decide.
-    # WebRTC test is known-flaky on macOS (pre-existing, bisected)
-    # so we tolerate exactly ONE failure if everything else passed.
+    # Run once, capture the final test-result line. WebRTC test
+    # is `#[cfg_attr(target_os = "macos", ignore = ...)]` — counts
+    # as "ignored", not "failed".
     local last_result
     last_result=$(cargo test --test loopback_full_mesh 2>&1 | grep "^test result" | tail -1)
-    if echo "$last_result" | grep -q "0 failed"; then
-        ok "loopback_full_mesh — all transports converged ($last_result)"
-    elif echo "$last_result" | grep -q "1 failed"; then
-        skip "loopback_full_mesh — 1 failure (probably webrtc on macOS, bisected pre-existing)"
+    # Strip ANSI color codes that some cargo versions add.
+    last_result=$(echo "$last_result" | sed 's/\x1b\[[0-9;]*m//g')
+    local failed_count
+    failed_count=$(echo "$last_result" | grep -oE '[0-9]+ failed' | head -1 | grep -oE '[0-9]+')
+    if [ "${failed_count:-99}" = "0" ]; then
+        ok "loopback_full_mesh — $last_result"
     else
         bad "loopback_full_mesh — $last_result"
     fi
 
     echo
-    echo "── Federation discovery in-process tests (udp loopback, all 7 cases)"
-    if cargo test --test federation_discovery --quiet 2>&1 | tail -3 | grep -q "test result: ok. 7 passed"; then
-        ok "federation_discovery — 7/7 passed (covers Phases A→E v2)"
+    echo "── Federation discovery in-process tests (all cases under udp loopback)"
+    if cargo test --test federation_discovery --quiet 2>&1 | tail -3 | grep -qE "test result: ok\. [0-9]+ passed; 0 failed"; then
+        ok "federation_discovery — all passed (covers Phases A→E v2 + local-hit regression)"
     else
         bad "federation_discovery — see cargo output"
     fi
@@ -78,7 +89,7 @@ run_native() {
     for url in "${schemes[@]}"; do
         local scheme="${url%%://*}"
         local out
-        out=$(drift-mosh-client --server-pub $M_PUB --target-bridge $B_PUB \
+        out=$($DRIFT_MOSH_CLIENT --server-pub $M_PUB --target-bridge $B_PUB \
               --bridge "$url@$B_PUB" \
               --exec "echo OK_$scheme; uname -m" 2>&1 || true)
         if echo "$out" | grep -q "OK_$scheme"; then
@@ -88,18 +99,16 @@ run_native() {
         fi
     done
 
-    # HTTP native connector is new; track separately so a regression
-    # is obvious. Note: as of this writing the HTTP connector
-    # successfully opens the SSE channel but the e2e pty dial
-    # still fails with 'unknown peer' — session-state timing bug.
+    # HTTP native connector — should now work end-to-end after
+    # the base64 STANDARD_NO_PAD fix.
     local out
-    out=$(drift-mosh-client --server-pub $M_PUB --target-bridge $B_PUB \
+    out=$($DRIFT_MOSH_CLIENT --server-pub $M_PUB --target-bridge $B_PUB \
           --bridge http://192.0.2.1:51823@$B_PUB \
           --exec 'echo OK_http; uname -m' 2>&1 || true)
     if echo "$out" | grep -q "OK_http"; then
         ok "live http via router → mosh"
     else
-        skip "live http via router → mosh  (native connector lands SSE but pty open fails — known partial)"
+        bad "live http via router → mosh"
     fi
 }
 
