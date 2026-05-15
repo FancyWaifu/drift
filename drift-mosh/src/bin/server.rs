@@ -189,36 +189,62 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 // Keepalive — drives HELLO retransmit if mid-
-                // handshake, exercises the path otherwise.
+                // handshake, exercises the path otherwise. Each
+                // ping packet bumps the bridge's `last_seen` for
+                // us (it's a DATA packet), which would keep an
+                // overly-strict liveness check happy. We don't
+                // need a separate liveness check though — the
+                // drift transport's session state machine handles
+                // expiry and re-handshake on its own.
                 let _ = t_watchdog
                     .send_data(&bridge_handle_watchdog, b".", 0, 0)
                     .await;
-                // Liveness check. `last_seen` is initialized to
-                // peer-creation time, so a fresh handshake that
-                // hasn't completed yet still gives us a window
-                // before the stale threshold kicks in.
+                // Liveness gate: previously we restarted the
+                // handshake whenever `last_seen` was stale for
+                // >5s. That was overly aggressive — bridges
+                // legitimately have nothing data-plane to send
+                // between client dials (BEACONs and other
+                // control traffic don't bump `last_seen`), so a
+                // healthy bridge with no active clients dialing
+                // through us was indistinguishable from a dead
+                // one. The result was a constant
+                // restart_handshake loop that invalidated the
+                // bridge's cached session for us, and any
+                // inbound client dial during the restart window
+                // failed with "unknown peer".
                 //
-                // 5s: bridges emit beacons every 500ms, so even a
-                // brief partition surfaces fast and a real outage
-                // is "obvious" by then. False positives (transient
-                // jitter) only cost one HELLO/HELLO_ACK round-trip
-                // to recover — cheap.
-                if let Some(m) =
-                    t_watchdog.peer_metrics(&bridge_handle_watchdog).await
-                {
-                    let elapsed = m.last_seen.elapsed();
-                    if elapsed > std::time::Duration::from_secs(5) {
+                // Now: only restart on a much longer threshold
+                // (60s) AND only if the session has actually
+                // gone away — `peer_metrics` returning None.
+                // If the session is still Established but quiet,
+                // that's fine; the keepalive ping above keeps
+                // the path warm.
+                match t_watchdog.peer_metrics(&bridge_handle_watchdog).await {
+                    None => {
                         tracing::warn!(
-                            elapsed_s = elapsed.as_secs(),
-                            "bridge link silent for >5s; restarting handshake"
+                            "bridge peer entry vanished; restarting handshake"
                         );
                         let _ = t_watchdog
                             .restart_handshake(&bridge_handle_watchdog)
                             .await;
-                        // Drive the new HELLO immediately.
                         let _ = t_watchdog
                             .send_data(&bridge_handle_watchdog, b".", 0, 0)
                             .await;
+                    }
+                    Some(m) => {
+                        let elapsed = m.last_seen.elapsed();
+                        if elapsed > std::time::Duration::from_secs(60) {
+                            tracing::warn!(
+                                elapsed_s = elapsed.as_secs(),
+                                "bridge link silent for >60s; restarting handshake"
+                            );
+                            let _ = t_watchdog
+                                .restart_handshake(&bridge_handle_watchdog)
+                                .await;
+                            let _ = t_watchdog
+                                .send_data(&bridge_handle_watchdog, b".", 0, 0)
+                                .await;
+                        }
                     }
                 }
             }
