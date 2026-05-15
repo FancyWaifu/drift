@@ -500,7 +500,144 @@ Client → bridge path for tickets. The client signs a ticket for the bridge it'
 
 Bridges MUST verify the ticket signature against the sender's authenticated pubkey AND against the bridge's own pubkey before storing — a client trying to slip a ticket signed for a different bridge has the entry silently dropped.
 
-### 10.5 `handle_federated` dispatch
+### 10.5 `FindPeer` (`PacketType::FindPeer = 22`)
+
+Reactive peer-lookup query. Sent by a bridge that receives a `Federated` envelope with `target_bridge_pub == UNKNOWN_BRIDGE_PUB` and either misses the local-clients table AND its `peer_directory`, OR (if the entry exists) finds it stale. Asks every federation peer "do you host `target_client_pub`?" Recipients reply with `PeerHere` on a local hit.
+
+Wire format inside the AEAD-sealed body — 81 bytes:
+
+```
+[0..32]    target_client_pub        (the pubkey we're looking for)
+[32..40]   query_id                 (u64 BE — random, used for dedup + reply correlation)
+[40..41]   ttl                      (u8 — hops remaining; decremented at each forwarder, MUST be > 0)
+[41..73]   originator_bridge        (the bridge that started the query)
+[73..81]   originator_query_at_ms   (u64 BE — for deadline enforcement)
+```
+
+Constants (`drift::transport::find_peer`):
+
+| Name | Value |
+|---|---|
+| `MAX_FIND_TTL` | 4 |
+| `MAX_FIND_DEADLINE_MS` | 2000 |
+| `QUERY_DEDUP_TTL_MS` | 10000 |
+| `NEG_CACHE_TTL_MS` | 5000 |
+
+Receiving bridges MUST:
+1. Verify the sender is in `federation_table` (clients can't trigger searches of our local-clients table — information disclosure gate).
+2. Drop on `query_id` already in `recent_queries` (loop prevention + replay dedup).
+3. Drop on `originator_query_at_ms + MAX_FIND_DEADLINE_MS < now`.
+4. On local hit (target is in our `presence_tickets` AND has an Established session), reply with `PeerHere` carrying our bridge's pubkey + the client's presence ticket.
+5. On miss with `ttl > 1`, forward to every federation peer EXCEPT the sender; record `(query_id, sender_peer_id)` in `forwarded_queries` so the eventual `PeerHere` can be routed back upstream.
+6. Otherwise drop silently.
+
+### 10.6 `PeerHere` (`PacketType::PeerHere = 23`)
+
+Reply to `FindPeer`. Carries a chain of `(bridge_pub, ticket)` entries ordered terminal-to-origin: index 0 is the bridge that actually hosts the client (whose ticket is the client-signed XEdDSA `PresenceTicket`); indices 1..N are intermediate forwarders (whose tickets are bridge-self-signed hop attestations — see §10.9).
+
+Wire format — variable length, `41 + path_len * 128` bytes:
+
+```
+[0..32]    target_client_pub
+[32..40]   query_id                 (matches the FindPeer)
+[40..41]   path_len                 (u8 — 1..=MAX_FIND_TTL)
+[41..]     path_entries             (path_len * 128 bytes)
+
+Each path_entry (128 bytes):
+  [0..32]    bridge_pub
+  [32..128]  ticket                 (96 bytes — see §10.2.1)
+```
+
+Receivers MUST:
+1. Source-auth (sender in `federation_table`).
+2. Verify `path[0].ticket` against `(target_client_pub, path[0].bridge_pub, now)` using `verify_ticket` (§10.2).
+3. Verify each `path[1..].ticket` as a hop attestation against `(path[i].bridge_pub, query_id, now)` using `verify_hop_attestation` (§10.9). A malicious bridge cannot forge a path entry for a bridge that didn't participate.
+4. Insert `target_client_pub → (sender_peer_id, now)` into `peer_directory`.
+5. If `query_id` is in our `pending_finds` (we originated): flush queued waiter envelopes through the resolved next-hop.
+6. If `query_id` is in our `forwarded_queries` (we relayed for someone): append our own `(bridge_pub, hop_attestation)` to the path and re-emit upstream. `path.len() < MAX_FIND_TTL` MUST be checked before append.
+
+### 10.7 `PeerGone` (`PacketType::PeerGone = 24`)
+
+Broadcast emitted by a bridge to every federation peer the moment a local client disconnects. Lets receivers evict cached routing immediately instead of waiting for the next idempotent-set FederationDirectory announce (~7s).
+
+Wire format — 72 bytes:
+
+```
+[0..32]   client_pub               (the disconnected client)
+[32..40]  emitted_at_ms            (u64 BE — wall-clock at emission, for tiebreak)
+[40..72]  bridge_pub               (emitting bridge; redundant with transport-level source but
+                                    carried inside the AEAD for forward-compat with future
+                                    multi-hop forwarding)
+```
+
+Reception:
+1. Source-auth (sender in `federation_table`).
+2. Anti-spoof: `bridge_pub` MUST equal the AEAD-authenticated sender's pubkey.
+3. Evict the `peer_directory` entry for `client_pub` ONLY if the cached entry's next-hop pubkey is the emitting bridge. A `PeerGone` from bridge A MUST NOT evict a route through bridge B.
+
+### 10.8 `FindPeerHashed` (`PacketType::FindPeerHashed = 25`)
+
+Privacy-mode variant of `FindPeer`. The originator hashes the target pubkey with a fresh per-query salt; transit bridges that forward the query see only `SHA-256(target_pub || salt)`. Bridges that host local clients scan their presence tickets, hashing each client_pub under the same salt, and reply with `PeerHere` (carrying the real target pubkey) on a match.
+
+Wire format — 97 bytes:
+
+```
+[0..16]    salt                       (16 bytes, per-query random)
+[16..48]   target_hash                (SHA-256(target_pub || salt))
+[48..56]   query_id                   (u64 BE)
+[56..57]   ttl                        (u8 — same semantics as FindPeer)
+[57..89]   originator_bridge          (32 bytes)
+[89..97]   originator_query_at_ms     (u64 BE)
+```
+
+Hashing function:
+
+```text
+target_hash = SHA-256(target_pub(32) || salt(16))
+```
+
+Opt-in via `TransportConfig::find_peer_mode = OriginateHashed`. Receivers process exactly like `FindPeer` but compare hashes instead of pubkeys when scanning local clients.
+
+Privacy property: a malicious forwarder logging every query it sees gets `(salt, hash)` pairs — useless without a candidate target list. A determined adversary with a precomputed table can still identify queries for known pubkeys. Once a bridge finds a match and replies with `PeerHere`, the reply path carries the real target pubkey through transit bridges; the privacy benefit is bounded to the query fan-out phase, not the answer phase.
+
+### 10.9 Hop attestations
+
+Bridge-self-signed XEdDSA attestations used in `PeerHere.path[1..]` (intermediate forwarders). Distinct from presence tickets (§10.2) via a domain-separation tag, so the two cannot be substituted for each other.
+
+#### 10.9.1 Wire format
+
+Same 96-byte shape as a presence ticket — identical bytes on the wire. The signed message differs.
+
+```
+[0..8]    expiry_ms  (u64 BE)
+[8..32]   nonce      (24 bytes)
+[32..96]  sig        (64-byte XEdDSA)
+```
+
+#### 10.9.2 Signed message
+
+The signature covers a canonical 88-byte message:
+
+```text
+signed_msg = "DRIFT-HOP"(9) || bridge_pub(32) || query_id(8 BE) || expiry_ms(8 BE) || nonce(24)
+```
+
+`bridge_pub` is the forwarder signing the attestation. The `"DRIFT-HOP"` prefix is the domain-separation tag preventing presence-ticket / hop-attestation substitution.
+
+#### 10.9.3 Lifetime
+
+Hop attestations SHOULD use a short lifetime — 60s is the reference value. The expiry-binding limits the value of a stolen attestation.
+
+#### 10.9.4 Verification
+
+```text
+verify_hop_attestation(bridge_pub, query_id, ticket, now_ms):
+    require ticket.expiry_ms > now_ms
+    msg = "DRIFT-HOP" || bridge_pub || query_id || ticket.expiry_ms || ticket.nonce
+    return xeddsa.verify(bridge_pub, msg, ticket.sig)
+```
+
+### 10.10 `handle_federated` dispatch
 
 When a receiver decrypts a `Federated` envelope, it dispatches one of three cases:
 
@@ -508,7 +645,7 @@ When a receiver decrypts a `Federated` envelope, it dispatches one of three case
 
 2. **`target_bridge_pub == our_pub`** — forward to a local client whose pubkey matches `target_client_pub`. Bridges MUST NOT auto-register the original sender as a federated peer in this case (closes a routing-table-poisoning hole).
 
-3. **else** — forward via federation. If `target_bridge_pub == UNKNOWN_BRIDGE_PUB`, look up `target_client_pub` in `peer_directory`; otherwise look up `target_bridge_pub` in `federation_table`. Rewrite the envelope's `target_bridge_pub` to the resolved next-hop bridge's pubkey before forwarding. On send failure, evict all directory entries pointing at the failed next-hop.
+3. **else** — forward via federation. If `target_bridge_pub == UNKNOWN_BRIDGE_PUB`, FIRST check if `target_client_pub` is one of our own local clients (Established session + matching pubkey) — on hit, treat as case-2 (rewrite to our pubkey, deliver locally). On miss, look up `target_client_pub` in `peer_directory`. On miss + `find_peer_mode != Disabled`, originate a `FindPeer` (§10.5) or `FindPeerHashed` (§10.8 if `OriginateHashed`) to every federation peer and queue the envelope in `pending_finds`. If `target_bridge_pub != UNKNOWN_BRIDGE_PUB`, look up in `federation_table`. Rewrite the envelope's `target_bridge_pub` to the resolved next-hop bridge's pubkey before forwarding. On send failure, evict all directory entries pointing at the failed next-hop.
 
 The source-authentication check fires before all three dispatch cases: when `target_client_pub != our_pub`, the envelope's `source_*_pub` fields MUST match the authenticated sender unless the sender is in our `federation_table`. Federation peers are trusted to attest source identities on behalf of their own clients; ordinary clients must name themselves.
 
@@ -610,7 +747,7 @@ Federation directory v2 wire-format conformance: `drift::transport::federated::t
 Protocol version is locked by the `PROTOCOL_VERSION = 1` byte in the long header's high nibble. Future incompatible changes increment this; receivers reject mismatching versions.
 
 In-protocol extensions SHOULD use:
-- New `PacketType` values (next free: 22).
+- New `PacketType` values (next free: 26 — 22 through 25 are claimed by federation discovery, §10.5–§10.8).
 - New flag bits in the long header (next free: bit 2-7).
 - The reserved byte at long-header offset 29.
 

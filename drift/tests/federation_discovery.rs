@@ -444,6 +444,82 @@ async fn no_forward_mode_answers_local_but_does_not_transit() {
     );
 }
 
+// ─── Test 1g: local-hit on UNKNOWN_BRIDGE_PUB (regression for 7ee8412) ──
+
+#[tokio::test]
+async fn unknown_bridge_pub_resolves_to_local_client() {
+    // Single bridge with a local client; another client dials
+    // the local one with target_bridge_pub = UNKNOWN_BRIDGE_PUB.
+    // Before commit 7ee8412 this would miss peer_directory (empty
+    // in a one-bridge federation), fire a FindPeer that nobody
+    // could answer, and time out. With the fix, the bridge
+    // checks its local peers FIRST and delivers without
+    // gossiping the target.
+    //
+    // Wire shape: an "outsider client" (built as a peer of the
+    // bridge for warmup but treated as a non-federation client)
+    // ships a Federated envelope at the bridge with UNKNOWN
+    // target_bridge_pub. We assert the local-hit path drains:
+    //   - peer_directory stays empty (no entries needed)
+    //   - pending_finds stays at 0 (no FindPeer ever fires)
+    let bridge = build_transport([0x91; 32]).await;
+    let bridge_pub = Identity::from_secret_bytes([0x91; 32]).public_bytes();
+
+    // Local client of the bridge — registers its presence ticket
+    // so the bridge has session+ticket gates satisfied (same
+    // gates handle_find_peer would check).
+    let local_client_secret = [0x92; 32];
+    let local_client_pub =
+        Identity::from_secret_bytes(local_client_secret).public_bytes();
+    let (_local_client, _local_to_bridge) =
+        client_on_bridge(&bridge, &bridge_pub, local_client_secret).await;
+
+    // "Outsider" — also handshakes with the bridge but stands in
+    // for an arbitrary federation-routable client. Critically,
+    // we don't put outsider in federation_table, so the bridge
+    // treats their source_* claims with the usual client-grade
+    // anti-spoof check. Outsider must claim *itself* as source.
+    let outsider = build_transport([0x93; 32]).await;
+    let outsider_pub = Identity::from_secret_bytes([0x93; 32]).public_bytes();
+    let bridge_addr = bridge.local_addr().unwrap();
+    let outsider_to_bridge = outsider
+        .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    let _ = outsider.send_data(&outsider_to_bridge, b".", 0, 0).await;
+    sleep(Duration::from_millis(200)).await;
+    let _ = tokio::time::timeout(Duration::from_millis(100), bridge.recv()).await;
+
+    // Ship a Federated envelope at the bridge: UNKNOWN target
+    // bridge, target client = local_client_pub. source_* must be
+    // outsider's own pubkey (since it's not a federation peer).
+    let env = build_unknown_target_envelope(
+        &local_client_pub,
+        &bridge_pub,
+        &outsider_pub,
+        b"hello local",
+    );
+    outsider
+        .__debug_send_federated_envelope(&outsider_to_bridge, &env)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(300)).await;
+
+    // No FindPeer should have fired — the local-hit path
+    // bypasses the discovery layer entirely.
+    assert_eq!(
+        bridge.pending_finds_count(),
+        0,
+        "REGRESSION (7ee8412): UNKNOWN_BRIDGE_PUB for a local client must NOT fire FindPeer"
+    );
+    // peer_directory stays empty too — local clients aren't
+    // tracked there (only remote announces are).
+    assert!(
+        !bridge.peer_directory_contains(&local_client_pub),
+        "local-hit path must not pollute peer_directory with local clients"
+    );
+}
+
 // ─── Test 1c: Phase C — proactive multi-hop announce ──────────────
 
 #[tokio::test]
