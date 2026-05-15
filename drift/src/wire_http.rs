@@ -46,7 +46,7 @@
 //! for upstream. Either side can be replaced independently as
 //! long as the wire shape above stays the same.
 
-use crate::io::{Listener, PacketIO, SchemeRegistration};
+use crate::io::{parse_ip_addr, Listener, PacketIO, SchemeRegistration};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use std::collections::HashMap;
@@ -415,26 +415,246 @@ async fn write_413(mut write: tokio::net::tcp::OwnedWriteHalf) -> io::Result<()>
     write.flush().await
 }
 
-// ─── Connector (stub — clients are typically WASM) ────────────────
+// ─── Native HTTP connector ───────────────────────────────────────
 //
-// For native-to-native HTTP/SSE, the connector would mirror the
-// WASM client: open a streaming GET, parse incoming SSE events,
-// fire POSTs for each outbound packet. That's mostly useful for
-// testing; in practice the *purpose* of `http://` is to give
-// browser clients a fallback wire when WS is blocked. So the
-// native connector is left out for now and we error on
-// `connect_url("http://...")`. Tests dial via the WASM client.
+// Mirrors the WASM `connectHttp` client. Opens a streaming GET
+// against /drift-sse, parses the first event for the session id,
+// spawns a background task that pumps subsequent SSE events into
+// an mpsc channel, and exposes the channel via PacketIO::recv_from.
+// Outbound packets become POSTs to /drift-send?sid=<sid>.
+//
+// Native-native HTTP isn't the *intended* path — the listener's
+// main consumer is browser-side WASM — but having a native client
+// closes the testability gap and makes http:// usable as a
+// last-resort fallback for native binaries when every other
+// transport is blocked.
+
+use base64::Engine as _;
+
+/// Internal: spawned task that drains the SSE stream into the
+/// `inbound` channel. Each `data: <base64>\n\n` event becomes one
+/// packet pushed onto the channel.
+async fn sse_pump<S>(
+    mut byte_stream: S,
+    initial_leftover: Vec<u8>,
+    inbound: tokio::sync::mpsc::Sender<Vec<u8>>,
+) where
+    S: futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin + Send,
+{
+    let mut leftover = initial_leftover;
+    use futures_util::StreamExt;
+    while let Some(chunk_res) = byte_stream.next().await {
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        leftover.extend_from_slice(&chunk);
+        // SSE events end with a blank line (\n\n or \r\n\r\n).
+        loop {
+            let Some(boundary) = find_event_boundary(&leftover) else {
+                break;
+            };
+            let event_bytes: Vec<u8> = leftover.drain(..boundary.end).collect();
+            // Each event is "data: <payload>\n" (possibly
+            // multi-line, but our server emits single-line
+            // data: payloads). Strip the prefix and \n.
+            let event_str = match std::str::from_utf8(&event_bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            for line in event_str.lines() {
+                let payload = match line.strip_prefix("data: ") {
+                    Some(p) => p,
+                    None => continue,
+                };
+                // First event is `SID:<hex>` — handled by the
+                // bootstrap path, not here. Subsequent events
+                // are base64-encoded DRIFT packets.
+                if let Some(_sid) = payload.strip_prefix("SID:") {
+                    continue;
+                }
+                let bytes = match base64::engine::general_purpose::STANDARD
+                    .decode(payload.as_bytes())
+                {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if inbound.send(bytes).await.is_err() {
+                    return; // receiver dropped
+                }
+            }
+        }
+    }
+}
+
+struct EventBoundary {
+    end: usize,
+}
+
+/// Locate the end of the next SSE event in `buf`. SSE events
+/// end with a blank line — `\n\n` or `\r\n\r\n`. Returns the
+/// byte offset just past the trailing blank line, or `None` if
+/// no complete event is buffered yet.
+fn find_event_boundary(buf: &[u8]) -> Option<EventBoundary> {
+    // Look for "\n\n" first (most common).
+    for i in 1..buf.len() {
+        if buf[i - 1] == b'\n' && buf[i] == b'\n' {
+            return Some(EventBoundary { end: i + 1 });
+        }
+    }
+    // Fall back to "\r\n\r\n".
+    for i in 3..buf.len() {
+        if &buf[i - 3..=i] == b"\r\n\r\n" {
+            return Some(EventBoundary { end: i + 1 });
+        }
+    }
+    None
+}
+
+/// PacketIO over native HTTP/SSE. Outbound packets become POSTs;
+/// inbound packets are SSE events pumped into an internal mpsc.
+pub struct HttpClientPacketIO {
+    client: reqwest::Client,
+    send_url: String,
+    addr: SocketAddr,
+    inbound_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    _sse_task: tokio::task::JoinHandle<()>,
+}
+
+#[async_trait]
+impl PacketIO for HttpClientPacketIO {
+    async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+        let body = buf.to_vec();
+        let n = body.len();
+        self.client
+            .post(&self.send_url)
+            .body(body)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        Ok(n)
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let mut rx = self.inbound_rx.lock().await;
+        match rx.recv().await {
+            Some(pkt) => {
+                let n = pkt.len().min(buf.len());
+                buf[..n].copy_from_slice(&pkt[..n]);
+                Ok((n, self.addr))
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "SSE stream ended",
+            )),
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.addr)
+    }
+}
 
 fn http_connector_factory(
-    _addr_str: String,
+    addr_str: String,
 ) -> Pin<
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "http:// connector is browser-only; use the WASM `connectHttp` client",
-        ))
+        let addr = parse_ip_addr(&addr_str)?;
+        let base = format!("http://{}", addr);
+        let sse_url = format!("{}/drift-sse", base);
+
+        // reqwest with no timeout for the SSE response — it's a
+        // long-poll. The connect timeout still bounds initial
+        // setup.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(io::Error::other)?;
+
+        // Open the streaming GET. The first event we'll see is
+        // `SID:<hex>`; consume the response until that arrives,
+        // then hand the rest of the stream to the pump task.
+        let mut resp = client
+            .get(&sse_url)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if !resp.status().is_success() {
+            return Err(io::Error::other(format!(
+                "SSE GET failed: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        // Read chunks until we see the SID handshake event.
+        use futures_util::StreamExt;
+        let mut accum = Vec::<u8>::new();
+        let mut sid: Option<String> = None;
+        let mut byte_stream = resp.bytes_stream();
+        // After SID parse, hand `byte_stream` + any leftover
+        // bytes to the pump task — `resp` is consumed.
+        while sid.is_none() {
+            let chunk = match byte_stream.next().await {
+                Some(Ok(c)) => c,
+                Some(Err(e)) => return Err(io::Error::other(e)),
+                None => {
+                    return Err(io::Error::other(
+                        "SSE stream ended before SID handshake",
+                    ));
+                }
+            };
+            accum.extend_from_slice(&chunk);
+            // Look for the first `\n\n`-terminated event and try
+            // to parse it as SID.
+            if let Some(boundary) = find_event_boundary(&accum) {
+                let event_bytes: Vec<u8> = accum.drain(..boundary.end).collect();
+                let event_str = std::str::from_utf8(&event_bytes)
+                    .map_err(io::Error::other)?;
+                for line in event_str.lines() {
+                    if let Some(payload) = line.strip_prefix("data: ") {
+                        if let Some(s) = payload.strip_prefix("SID:") {
+                            sid = Some(s.to_string());
+                            break;
+                        }
+                    }
+                }
+                if sid.is_none() {
+                    return Err(io::Error::other(format!(
+                        "first SSE event not SID handshake: {:?}",
+                        event_str.lines().next()
+                    )));
+                }
+            }
+        }
+        let sid = sid.expect("loop exit invariant");
+
+        // Drop the response we already consumed and reissue —
+        // actually no, we need to KEEP this stream open and pump
+        // subsequent events from it. The accum may already hold
+        // a partial next event; feed that to the pump via a
+        // wrapped stream.
+        //
+        // Simpler: pass the existing reqwest::Response by-move
+        // into the pump task. accum is empty (we drained it).
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        // Hand the byte_stream + any leftover-from-SID-parse to
+        // the pump task. Leftover is usually empty (the SID
+        // event arrives in its own chunk) but we feed it
+        // through anyway for correctness — a partial next event
+        // baked into the SID chunk would otherwise be lost.
+        let pump_task = tokio::spawn(sse_pump(byte_stream, accum, inbound_tx));
+
+        let send_url = format!("{}/drift-send?sid={}", base, sid);
+        let io: Arc<dyn PacketIO> = Arc::new(HttpClientPacketIO {
+            client,
+            send_url,
+            addr,
+            inbound_rx: tokio::sync::Mutex::new(inbound_rx),
+            _sse_task: pump_task,
+        });
+        Ok((io, addr))
     })
 }
 

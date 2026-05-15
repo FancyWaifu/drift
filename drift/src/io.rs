@@ -1393,7 +1393,7 @@ pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketA
 /// Helper: parse a `host:port` address string for IP-addressed
 /// transports (UDP, TCP, TLS, WS). Non-IP adapters skip this and
 /// parse their own address shape.
-fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
+pub(crate) fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
     addr_str.parse().map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
