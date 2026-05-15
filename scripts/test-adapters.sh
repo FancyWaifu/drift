@@ -155,8 +155,39 @@ run_wasm() {
     fi
 
     echo
-    echo "── Browser-side wire adapters (informational)"
-    skip "WASM ws / ws_stream / http / webrtc / webtransport e2e — requires browser test rig (chromedriver / headless), out of CLI scope. Wire compat with native listeners is documented; see drift-wasm/src/wire_*.rs."
+    echo "── WASM-on-Node → native router bridge (cross-stack)"
+    # The same browser-side WASM adapters work in Node 22+ because
+    # Node has WebSocket + fetch + (experimental) EventSource as
+    # globals — the surface wasm-bindgen's web_sys shim looks for.
+    # That lets us verify WASM ↔ native wire compat without
+    # standing up a browser test harness.
+    if node drift-wasm/test/network-ws-node.js 2>&1 | tail -3 | grep -q "PASS"; then
+        ok "WASM ws://  on Mac → router bridge (native ws listener)"
+    else
+        bad "WASM ws://  on Mac → router bridge"
+    fi
+    if node --experimental-eventsource drift-wasm/test/network-http-node.js 2>&1 | tail -3 | grep -q "PASS"; then
+        ok "WASM http:// on Mac → router bridge (native http listener)"
+    else
+        bad "WASM http:// on Mac → router bridge"
+    fi
+    # Optional: run on the Drift LXCs too, if they're reachable +
+    # have /opt/drift-wasm seeded.
+    for ip in 192.0.2.52 192.0.2.168; do
+        if ssh -o ConnectTimeout=2 root@$ip 'test -f /opt/drift-wasm/test/network-ws-node.js' 2>/dev/null; then
+            if ssh root@$ip 'cd /opt/drift-wasm && node test/network-ws-node.js 2>&1 | tail -3' 2>&1 | grep -q "PASS"; then
+                ok "WASM ws://  on LXC $ip → router bridge"
+            else
+                bad "WASM ws://  on LXC $ip → router bridge"
+            fi
+        else
+            skip "WASM tests on LXC $ip — /opt/drift-wasm not seeded"
+        fi
+    done
+
+    echo
+    echo "── Browser-side WASM adapters (informational)"
+    skip "WASM ws_stream / webrtc / webtransport e2e — need browser test rig (chromedriver / playwright). Wire compat with native listeners is documented; see drift-wasm/src/wire_*.rs."
 }
 
 # ───────────────────────────────────────────────────────────────
