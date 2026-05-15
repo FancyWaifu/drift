@@ -159,10 +159,12 @@ Per-daemon failover policy, applied to every peer with two or more endpoints. Op
 | `endpoint` | no | Single-URL form (`"udp://1.2.3.4:51820"`). |
 | `endpoints` | no | Priority-ordered list. UDP first, fall through to TCP / TLS / WS / HTTP / Onion. Empty = mesh-only peer. |
 | `via_bridge` | no | DRIFT federation bridge URL + pubkey to reach this peer through. Format: `"<scheme>://host:port@<bridge-pubkey-hex>"` — any scheme drift's adapter registry knows about (udp, tcp, tls, ws, http, …). UDP reuses the daemon's primary listen socket; connection-oriented schemes get a dedicated outbound interface. The bridge must actually be listening on the chosen scheme. Both ends can set the *same* bridge to reach each other without direct endpoints. See "Bridge-fallback" below. |
-| `target_bridge` | no | Pubkey hex of the federation bridge the *peer* is connected to. Defaults to the pubkey in `via_bridge` (the "both peers share one bridge" case). Set explicitly when the peer's on-ramp differs from yours in a multi-bridge federated mesh. |
+| `target_bridge` | no | Pubkey hex of the federation bridge the *peer* is connected to. Defaults to the pubkey in `via_bridge` (the "both peers share one bridge" case). Set explicitly when the peer's on-ramp differs from yours in a multi-bridge federated mesh. With federation discovery (Phase A+) you can omit this — the on-ramp bridge resolves the peer's current location via `FindPeer` / proactive `FederationDirectory` cache. |
 | `keepalive` | no | Periodic NAT-keepalive interval in seconds. |
 
 A peer with no `endpoint`/`endpoints`/`via_bridge` is a **mesh-only peer**: reachable only via forwarding through another peer that has a direct path. See "Hub-and-spoke" below.
+
+With **federation discovery** enabled (default in drift v0.15+) the peer's on-ramp bridge can be resolved automatically: a peer with just a `pubkey` and a `via_bridge` pointing at *any* bridge in your federation is reachable as long as some bridge in the federation hosts the peer. Cold-path lookups go through `FindPeer` (1-2 RTT, capped at 4 hops); steady-state lookups hit the bridge's `peer_directory` cache populated by proactive 7-second announcements. See `FEDERATION_DISCOVERY.md` at the workspace root.
 
 ## Deployment scenarios
 

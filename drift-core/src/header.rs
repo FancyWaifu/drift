@@ -159,6 +159,62 @@ pub enum PacketType {
     /// whose stored copy never gets refreshed simply drop the
     /// announcement for that pubkey.
     PresenceTicket = 21,
+
+    /// Bridge-to-bridge reactive peer lookup. Sent when a bridge
+    /// receives a `Federated` envelope with
+    /// `target_bridge_pub == UNKNOWN_BRIDGE_PUB` for a client it
+    /// has no directory entry for. Asks every federation peer
+    /// "do you host this client?" Recipients reply with `PeerHere`
+    /// if they do.
+    ///
+    /// Complements the proactive `FederationDirectory` announce:
+    /// announce is the warm-cache path (~7 s steady state),
+    /// `FindPeer` is the cold-path resolver for clients that
+    /// joined since the last announce. See `FEDERATION_DISCOVERY.md`
+    /// §5.1 for the wire format.
+    FindPeer = 22,
+
+    /// Reply to `FindPeer` — "I host this client (or learned a
+    /// path to them); here is the signed ticket chain." Carries
+    /// the `PresenceTicket` from the terminal bridge so the
+    /// receiver can verify the route without further round-trips.
+    /// See `FEDERATION_DISCOVERY.md` §5.2.
+    PeerHere = 23,
+
+    /// Bridge-to-federation broadcast: "Client X just
+    /// disconnected from me — flush any cache entry pointing
+    /// through me." Sent immediately on local-client session
+    /// teardown so peers don't keep forwarding into a black hole
+    /// for the ~7 s until the next idempotent-set announce.
+    /// See `FEDERATION_DISCOVERY.md` §5.3.
+    PeerGone = 24,
+
+    /// Phase E v2: hashed-target variant of `FindPeer`. The
+    /// originator hashes the target pubkey with a fresh salt
+    /// before sending, so transit bridges that forward the query
+    /// learn only `SHA-256(target || salt)` instead of the raw
+    /// pubkey. Bridges scan their local presence tickets,
+    /// computing the same hash for each client, and reply with
+    /// `PeerHere` (carrying the real target pubkey) on a match.
+    ///
+    /// Privacy property: a malicious forwarder logging every
+    /// query it sees gets hashes, not pubkeys. A determined
+    /// adversary with a candidate target list can still
+    /// precompute hashes for each candidate per query (the
+    /// salt is per-query, not global) — but that requires
+    /// pre-targeting, not bulk surveillance. The asymmetry is
+    /// the win.
+    ///
+    /// Limitation: when a bridge finds a match, its `PeerHere`
+    /// reply carries the real target_pub so the originator can
+    /// route subsequent traffic. Forwarders along the reply
+    /// path therefore learn the target after a successful
+    /// discovery. The privacy benefit is bounded to the query
+    /// fan-out phase, not the answer phase.
+    ///
+    /// Opt-in via `TransportConfig::find_peer_mode = OriginateHashed`.
+    /// See `FEDERATION_DISCOVERY.md` §5.5.
+    FindPeerHashed = 25,
 }
 
 impl PacketType {
@@ -182,6 +238,10 @@ impl PacketType {
             19 => Ok(Self::Federated),
             20 => Ok(Self::FederationDirectory),
             21 => Ok(Self::PresenceTicket),
+            22 => Ok(Self::FindPeer),
+            23 => Ok(Self::PeerHere),
+            24 => Ok(Self::PeerGone),
+            25 => Ok(Self::FindPeerHashed),
             _ => Err(DriftError::UnknownType(v)),
         }
     }
@@ -439,6 +499,10 @@ mod tests {
         PacketType::Federated,
         PacketType::FederationDirectory,
         PacketType::PresenceTicket,
+        PacketType::FindPeer,
+        PacketType::PeerHere,
+        PacketType::PeerGone,
+        PacketType::FindPeerHashed,
     ];
 
     #[test]

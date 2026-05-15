@@ -25,11 +25,20 @@ const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 pub(crate) mod batch;
 mod cookies;
 mod federated;
+mod find_peer;
 pub use federated::{
-    build as build_federated, build_directory, build_ticket, decode_ticket, encode_ticket,
-    parse as parse_federated, parse_directory, ticket_signed_msg, verify_ticket,
-    FederatedEnvelope, PresenceTicket, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES, TICKET_LEN,
-    UNKNOWN_BRIDGE_PUB,
+    build as build_federated, build_directory, build_directory_v3, build_ticket, decode_ticket,
+    encode_ticket, parse as parse_federated, parse_directory, parse_directory_v3,
+    ticket_signed_msg, verify_ticket, FederatedEnvelope, PresenceTicket, FED_HEADER_LEN,
+    MAX_ANNOUNCE_HOPS, MAX_DIRECTORY_ENTRIES, TICKET_LEN, UNKNOWN_BRIDGE_PUB,
+};
+pub use find_peer::{
+    build_find_peer, build_find_peer_hashed, build_peer_gone, build_peer_here, hash_target_pub,
+    parse_find_peer, parse_find_peer_hashed, parse_peer_gone, parse_peer_here, FindPeer,
+    FindPeerHashed, PathEntry, PeerGone, PeerHere, FIND_PEER_HASHED_DIGEST_LEN,
+    FIND_PEER_HASHED_LEN, FIND_PEER_HASHED_SALT_LEN, FIND_PEER_LEN, MAX_FIND_DEADLINE_MS,
+    MAX_FIND_TTL, NEG_CACHE_TTL_MS, PATH_ENTRY_LEN, PEER_GONE_LEN, PEER_HERE_HEADER_LEN,
+    QUERY_DEDUP_TTL_MS,
 };
 #[cfg(unix)]
 mod ecn;
@@ -138,6 +147,62 @@ pub struct TransportConfig {
     /// samples from handshakes and path probes). Default:
     /// 5000 (5s).
     pub rtt_probe_interval_ms: u64,
+
+    /// Phase E v1 minimal: disable reactive `FindPeer` entirely.
+    /// Deprecated in favor of `find_peer_mode = Disabled`; kept
+    /// as a bool for back-compat. When set, overrides
+    /// `find_peer_mode` to `Disabled`.
+    pub find_peer_disabled: bool,
+
+    /// Phase E v2: per-bridge discovery posture. Lets operators
+    /// pick a privacy stance independent of the rest of
+    /// federation behavior. See `FindPeerMode` for the
+    /// per-variant semantics.
+    pub find_peer_mode: FindPeerMode,
+}
+
+/// Discovery-layer posture for a `Transport`. Default is `Open`
+/// (Phase A behavior). Privacy-conscious deployments can pick a
+/// stricter mode without disabling federation altogether.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindPeerMode {
+    /// Full Phase A/B participation: originate `FindPeer` for
+    /// unknown targets, answer queries for our local clients,
+    /// forward queries we can't answer to other federation peers.
+    Open,
+    /// Answer local hits, but do NOT forward queries from other
+    /// bridges. Useful for "leaf" bridges that participate in
+    /// federation but don't want to be discovery transit.
+    NoForward,
+    /// When originating a `FindPeer` for an unknown target, emit
+    /// the hashed variant (`PacketType::FindPeerHashed`) so
+    /// transit bridges see only `SHA-256(target || salt)`. Still
+    /// answers and forwards incoming queries (both plain and
+    /// hashed). See `FEDERATION_DISCOVERY.md` §5.5.
+    OriginateHashed,
+    /// Discovery off entirely: `UNKNOWN_BRIDGE_PUB` envelopes
+    /// drop silently; incoming `FindPeer` / `FindPeerHashed`
+    /// queries are dropped without reply. Clients must use
+    /// explicit `via_bridge` entries.
+    Disabled,
+}
+
+impl Default for FindPeerMode {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+
+impl TransportConfig {
+    /// Resolve the effective discovery mode. The deprecated
+    /// `find_peer_disabled` boolean takes precedence when set.
+    pub(crate) fn effective_find_peer_mode(&self) -> FindPeerMode {
+        if self.find_peer_disabled {
+            FindPeerMode::Disabled
+        } else {
+            self.find_peer_mode
+        }
+    }
 }
 
 impl Default for TransportConfig {
@@ -159,6 +224,8 @@ impl Default for TransportConfig {
             enable_ecn: false,
             rtt_probe_interval_ms: 5_000,
             qlog_path: None,
+            find_peer_disabled: false,
+            find_peer_mode: FindPeerMode::Open,
         }
     }
 }
@@ -187,6 +254,8 @@ impl TransportConfig {
             // and rely on passive samples only.
             rtt_probe_interval_ms: 0,
             qlog_path: None,
+            find_peer_disabled: false,
+            find_peer_mode: FindPeerMode::Open,
         }
     }
 
@@ -212,6 +281,8 @@ impl TransportConfig {
             // routing — probe aggressively.
             rtt_probe_interval_ms: 2_000,
             qlog_path: None,
+            find_peer_disabled: false,
+            find_peer_mode: FindPeerMode::Open,
         }
     }
 }
@@ -503,6 +574,29 @@ pub(crate) struct Inner {
         StdMutex<StdHashMap<[u8; 32], (PeerId, std::time::Instant)>>,
     >,
 
+    /// Phase C side-table: hop count per directory entry. Kept
+    /// separate from `peer_directory` so existing reader sites
+    /// (which just need next-hop + freshness) don't have to be
+    /// updated. Re-announcer reads this to decide which cached
+    /// entries are eligible for transitive re-emission
+    /// (`hops < MAX_ANNOUNCE_HOPS - 1`).
+    ///
+    /// Stays in lockstep with `peer_directory`: same keys, same
+    /// insert/evict points. The two-map approach also keeps the
+    /// hot path (`handle_federated` UNKNOWN_BRIDGE lookup) on
+    /// the single-map fast path it already has.
+    pub(crate) peer_directory_hops: Arc<StdMutex<StdHashMap<[u8; 32], u8>>>,
+
+    /// Phase C side-table: presence ticket per transitive
+    /// directory entry. Needed so re-announcement can attach the
+    /// terminal client's *original* client-signed ticket to a
+    /// transitive (pubkey, hops) pair. The terminal's ticket is
+    /// the only cryptographic anchor a downstream receiver has
+    /// to verify a transitive entry; without it, an unverified
+    /// claim "I have a route to X" is uncheckable.
+    pub(crate) peer_directory_tickets:
+        Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
+
     /// Per-client presence tickets received via `PresenceTicket`
     /// packets. Keyed by the client's static pubkey (the
     /// session-authenticated sender, NOT anything the packet
@@ -519,12 +613,75 @@ pub(crate) struct Inner {
     pub(crate) presence_tickets:
         Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
 
+    // ─── Federation peer discovery (FEDERATION_DISCOVERY.md §6) ──
+
+    /// In-flight `FindPeer` queries we originated and are waiting
+    /// on. Keyed by target client pubkey. When a matching `PeerHere`
+    /// arrives, the `waiters` are released (the queued Federated
+    /// envelopes are re-issued through the resolved bridge); on
+    /// timeout, they're dropped and a negative-cache entry is set.
+    ///
+    /// Phase A stores opaque envelope bytes in `waiters` and re-sends
+    /// them via `send_typed(PacketType::Federated)`. Multi-hop
+    /// (Phase B) reuses the same coalescing — each subsequent query
+    /// for the same target appends to `waiters` without firing a
+    /// duplicate FindPeer.
+    pub(crate) pending_finds:
+        Arc<StdMutex<StdHashMap<[u8; 32], PendingFind>>>,
+
+    /// `FindPeer` query IDs we've already processed, kept for
+    /// `QUERY_DEDUP_TTL_MS` so repeats (loops, retransmits, broken
+    /// federation topology) get silently dropped instead of
+    /// triggering another round-trip. Map value is the deadline
+    /// after which the entry can be GC'd. Phase A doesn't need
+    /// loop-detection for 1-hop forwarding, but the bookkeeping is
+    /// cheap and the same table backs Phase B's multi-hop case.
+    pub(crate) recent_queries: Arc<StdMutex<StdHashMap<u64, Instant>>>,
+
+    /// "Not found" cache for failed lookups. Holds the deadline at
+    /// which the negative answer expires. Prevents a hot client
+    /// path from re-issuing a `FindPeer` storm for a pubkey that
+    /// no bridge in the federation hosts.
+    pub(crate) neg_cache: Arc<StdMutex<StdHashMap<[u8; 32], Instant>>>,
+
+    /// Phase B: queries we forwarded on behalf of an upstream
+    /// federation peer (i.e. our local lookup missed but ttl was
+    /// still > 1). When the matching `PeerHere` arrives, we look
+    /// the query_id up here to know which peer to re-emit the
+    /// extended-path reply to. `pending_finds` distinguishes
+    /// "we originated" from "we forwarded": entries in
+    /// `pending_finds` mean the former, entries in
+    /// `forwarded_queries` mean the latter.
+    ///
+    /// Phase B does not currently age this table — entries leak
+    /// for the process lifetime if no `PeerHere` ever arrives.
+    /// `recent_queries` provides loop prevention; size of this
+    /// map is bounded by genuine query rate in practice. Aging /
+    /// LRU eviction belongs in Phase C cleanup.
+    pub(crate) forwarded_queries: Arc<StdMutex<StdHashMap<u64, PeerId>>>,
+
     /// Rate-limited "dropped invalid packet" warn site. An attacker
     /// flooding garbage triggers one of these per packet; without a
     /// throttle the logs become unusable and CPU is wasted on
     /// formatting. Allows one emission per second, accumulating a
     /// "suppressed since last" count in between.
     pub(crate) drop_warn_throttle: LogThrottle,
+}
+
+/// One in-flight `FindPeer` query: the originator-side state a
+/// bridge keeps while it waits for `PeerHere` to come back. Holds
+/// the queue of `Federated` envelopes that arrived for this target
+/// while the lookup was outstanding; on a successful reply the
+/// queue is flushed through the resolved next-hop, and on timeout
+/// the queue is dropped (clients will retry through retransmit).
+pub(crate) struct PendingFind {
+    pub(crate) query_id: u64,
+    pub(crate) started_at: Instant,
+    /// Each waiter is the parsed-then-re-serialized envelope that
+    /// will be re-issued via `send_typed(PacketType::Federated)`
+    /// once the lookup resolves. Stored as opaque bytes so the
+    /// hot path (handle_peer_here) doesn't have to re-parse.
+    pub(crate) waiters: Vec<Vec<u8>>,
 }
 
 /// One-emission-per-window throttle, accumulating a suppressed
@@ -708,7 +865,13 @@ impl Transport {
             session_reset_tx: Arc::new(StdMutex::new(None)),
             federation_table: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_directory: Arc::new(StdMutex::new(StdHashMap::new())),
+            peer_directory_hops: Arc::new(StdMutex::new(StdHashMap::new())),
+            peer_directory_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
             presence_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
+            pending_finds: Arc::new(StdMutex::new(StdHashMap::new())),
+            recent_queries: Arc::new(StdMutex::new(StdHashMap::new())),
+            neg_cache: Arc::new(StdMutex::new(StdHashMap::new())),
+            forwarded_queries: Arc::new(StdMutex::new(StdHashMap::new())),
             drop_warn_throttle: LogThrottle::new(Duration::from_secs(1)),
         });
 
@@ -754,6 +917,13 @@ impl Transport {
         // router, not an optimization.
         let sweep_bg = inner.clone();
         tasks.push(tokio::spawn(async move { sweep_bg.run_route_sweep_loop().await }));
+
+        // Background sweep for federation-discovery state.
+        // Bounded memory growth for `pending_finds`,
+        // `recent_queries`, `neg_cache`, `forwarded_queries` —
+        // see `run_find_peer_gc_loop`.
+        let gc_bg = inner.clone();
+        tasks.push(tokio::spawn(async move { gc_bg.run_find_peer_gc_loop().await }));
 
         // Cookie rotation only matters when the cookie path can be
         // reached. Skip spawning the loop entirely in the default
@@ -1575,25 +1745,56 @@ impl Transport {
         if peers.is_empty() {
             return;
         }
-        let chunks: Vec<Vec<u8>> = entries
-            .chunks(federated::MAX_DIRECTORY_ENTRIES)
-            .map(federated::build_directory)
-            .collect();
-        // Empty announcements still get sent — they let peers
-        // know we have zero connected clients (so they can prune
-        // stale entries from us by waiting out the 20 s TTL).
-        // The build_directory call above handles len=0 → one
-        // 4-byte payload.
-        let chunks = if chunks.is_empty() {
-            vec![federated::build_directory(&[])]
-        } else {
-            chunks
+
+        // Phase C: build a snapshot of transitively-known entries
+        // eligible for re-announcement. An entry can be
+        // re-announced with hops+1 only if hops+1 <
+        // MAX_ANNOUNCE_HOPS — i.e. current hops < MAX_ANNOUNCE_HOPS - 1.
+        // For each transitive entry we also need the announcer
+        // PeerId so we can apply split-horizon (don't tell B
+        // about a client we learned from B).
+        let transitive: Vec<([u8; 32], federated::PresenceTicket, u8, PeerId)> = {
+            let dir = self.inner.peer_directory.lock().unwrap();
+            let hops_map = self.inner.peer_directory_hops.lock().unwrap();
+            let tickets = self.inner.peer_directory_tickets.lock().unwrap();
+            let mut out = Vec::new();
+            for (client_pub, (announcer_pid, _)) in dir.iter() {
+                let hops = match hops_map.get(client_pub) {
+                    Some(&h) if h + 1 < federated::MAX_ANNOUNCE_HOPS => h,
+                    _ => continue,
+                };
+                if let Some(ticket) = tickets.get(client_pub) {
+                    out.push((*client_pub, ticket.clone(), hops + 1, *announcer_pid));
+                }
+            }
+            out
         };
-        for peer_id in peers {
+
+        // For each federation peer, build a v3 payload combining:
+        //   - direct entries (hops=0), always included
+        //   - transitive entries (hops+1), filtered by split-horizon
+        //     (skip entries we learned FROM this peer).
+        for peer_id in &peers {
+            let mut combined: Vec<([u8; 32], federated::PresenceTicket, u8)> =
+                entries.iter().map(|(p, t)| (*p, t.clone(), 0u8)).collect();
+            for (pub_, ticket, new_hops, announcer) in &transitive {
+                if *announcer == *peer_id {
+                    continue; // split horizon
+                }
+                combined.push((*pub_, ticket.clone(), *new_hops));
+            }
+            let chunks: Vec<Vec<u8>> = if combined.is_empty() {
+                vec![federated::build_directory_v3(&[])]
+            } else {
+                combined
+                    .chunks(federated::MAX_DIRECTORY_ENTRIES)
+                    .map(federated::build_directory_v3)
+                    .collect()
+            };
             for chunk in &chunks {
                 if let Err(e) = self
                     .inner
-                    .send_typed(&peer_id, PacketType::FederationDirectory, chunk)
+                    .send_typed(peer_id, PacketType::FederationDirectory, chunk)
                     .await
                 {
                     debug!(
@@ -1743,6 +1944,31 @@ impl Transport {
             .lock()
             .unwrap()
             .contains_key(client_pub)
+    }
+
+    /// Number of in-flight `FindPeer` queries we've originated.
+    /// Used by Phase A integration tests.
+    #[doc(hidden)]
+    pub fn pending_finds_count(&self) -> usize {
+        self.inner.pending_finds.lock().unwrap().len()
+    }
+
+    /// Returns true if a `FindPeer` query is in flight for the
+    /// given client. Used by Phase A integration tests.
+    #[doc(hidden)]
+    pub fn pending_finds_contains(&self, client_pub: &[u8; 32]) -> bool {
+        self.inner
+            .pending_finds
+            .lock()
+            .unwrap()
+            .contains_key(client_pub)
+    }
+
+    /// Number of "not found" entries currently cached. Used by
+    /// Phase A integration tests to verify negative-cache behavior.
+    #[doc(hidden)]
+    pub fn neg_cache_count(&self) -> usize {
+        self.inner.neg_cache.lock().unwrap().len()
     }
 
     /// Test-only escape hatch: ship arbitrary bytes through an
@@ -2737,6 +2963,10 @@ impl Inner {
             PacketType::Federated
                 | PacketType::FederationDirectory
                 | PacketType::PresenceTicket
+                | PacketType::FindPeer
+                | PacketType::PeerHere
+                | PacketType::PeerGone
+                | PacketType::FindPeerHashed
         ) {
             return Err(DriftError::DecodeError);
         }
@@ -3069,10 +3299,181 @@ impl Inner {
                 dir.retain(|_, (pid, _)| *pid != next_peer);
             }
         } else if unknown {
-            debug!(
-                target_client = ?env.target_client_pub,
-                "federated: directory has no route to target client, dropping"
+            // Phase E: dispatch by configured discovery mode.
+            let mode = self.config.effective_find_peer_mode();
+            match mode {
+                FindPeerMode::Disabled => {
+                    debug!(
+                        target_client = ?env.target_client_pub,
+                        "federated: find_peer disabled — dropping UNKNOWN_BRIDGE_PUB envelope"
+                    );
+                    return Ok(None);
+                }
+                FindPeerMode::Open
+                | FindPeerMode::NoForward
+                | FindPeerMode::OriginateHashed => {
+                    // Originate normally below. NoForward affects
+                    // receive-side behavior, not the originator
+                    // side. OriginateHashed flips the wire format
+                    // we emit (handled below).
+                }
+            }
+            // Phase A directory-lookup miss path: instead of
+            // dropping silently, originate a `FindPeer` query to
+            // every federation peer and queue the envelope for
+            // re-issue when `PeerHere` arrives.
+            //
+            // Coalescing rules:
+            //   1. If we have a `neg_cache` hit (recent failed
+            //      lookup), drop this packet. Same target won't be
+            //      requeried until the negative entry expires.
+            //   2. If `pending_finds` already has a fresh entry
+            //      (started_at + DEADLINE > now), append this
+            //      envelope to the existing waiter queue — only
+            //      one `FindPeer` per target in flight.
+            //   3. Else: create a new `pending_finds` entry, queue
+            //      this envelope, emit `FindPeer` to every
+            //      federation peer.
+            let now_inst = std::time::Instant::now();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            // Negative-cache check.
+            {
+                let mut neg = self.neg_cache.lock().unwrap();
+                if let Some(&expires_at) = neg.get(&env.target_client_pub) {
+                    if now_inst < expires_at {
+                        debug!(
+                            target_client = ?env.target_client_pub,
+                            "federated: neg-cached lookup miss, dropping"
+                        );
+                        return Ok(None);
+                    }
+                    // Expired — fall through and re-query.
+                    neg.remove(&env.target_client_pub);
+                }
+            }
+            // Build a re-serializable envelope for the waiter
+            // queue. Storing the bytes (rather than a borrow)
+            // means we don't have to keep `body` alive across the
+            // pending-find lifetime.
+            let waiter_bytes = federated::build(
+                &env.target_bridge_pub,
+                &env.target_client_pub,
+                &env.source_bridge_pub,
+                &env.source_client_pub,
+                env.payload,
             );
+            let deadline = now_inst
+                + std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS);
+            let (should_emit_find, query_id) = {
+                let mut pending = self.pending_finds.lock().unwrap();
+                if let Some(entry) = pending.get_mut(&env.target_client_pub) {
+                    if entry.started_at + std::time::Duration::from_millis(
+                        find_peer::MAX_FIND_DEADLINE_MS,
+                    ) > now_inst
+                    {
+                        // In-flight; coalesce.
+                        entry.waiters.push(waiter_bytes);
+                        (false, entry.query_id)
+                    } else {
+                        // Stale entry — replace and re-fire.
+                        let mut qid_bytes = [0u8; 8];
+                        rand::RngCore::fill_bytes(
+                            &mut rand::thread_rng(),
+                            &mut qid_bytes,
+                        );
+                        let qid = u64::from_be_bytes(qid_bytes);
+                        *entry = PendingFind {
+                            query_id: qid,
+                            started_at: now_inst,
+                            waiters: vec![waiter_bytes],
+                        };
+                        (true, qid)
+                    }
+                } else {
+                    let mut qid_bytes = [0u8; 8];
+                    rand::RngCore::fill_bytes(
+                        &mut rand::thread_rng(),
+                        &mut qid_bytes,
+                    );
+                    let qid = u64::from_be_bytes(qid_bytes);
+                    pending.insert(
+                        env.target_client_pub,
+                        PendingFind {
+                            query_id: qid,
+                            started_at: now_inst,
+                            waiters: vec![waiter_bytes],
+                        },
+                    );
+                    (true, qid)
+                }
+            };
+            let _ = deadline;
+            if should_emit_find {
+                let our_pub = self.identity.public_bytes();
+                // Snapshot federation peers (drop the lock before
+                // awaiting send_typed — never hold a sync mutex
+                // across an await point).
+                let fed_peers: Vec<PeerId> = self
+                    .federation_table
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .copied()
+                    .collect();
+                let (payload, pkt_type, mode_label) = if matches!(
+                    self.config.effective_find_peer_mode(),
+                    FindPeerMode::OriginateHashed
+                ) {
+                    let mut salt = [0u8; find_peer::FIND_PEER_HASHED_SALT_LEN];
+                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+                    let target_hash =
+                        find_peer::hash_target_pub(&env.target_client_pub, &salt);
+                    let q = find_peer::FindPeerHashed {
+                        salt,
+                        target_hash,
+                        query_id,
+                        ttl: find_peer::MAX_FIND_TTL,
+                        originator_bridge: our_pub,
+                        originator_query_at_ms: now_ms,
+                    };
+                    (
+                        find_peer::build_find_peer_hashed(&q),
+                        PacketType::FindPeerHashed,
+                        "hashed",
+                    )
+                } else {
+                    let q = find_peer::FindPeer {
+                        target_client_pub: env.target_client_pub,
+                        query_id,
+                        ttl: find_peer::MAX_FIND_TTL,
+                        originator_bridge: our_pub,
+                        originator_query_at_ms: now_ms,
+                    };
+                    (find_peer::build_find_peer(&q), PacketType::FindPeer, "plain")
+                };
+                for peer in &fed_peers {
+                    if let Err(e) =
+                        self.send_typed(peer, pkt_type, &payload).await
+                    {
+                        debug!(
+                            error = %e,
+                            ?peer,
+                            mode = mode_label,
+                            "FindPeer: failed to emit to federation peer"
+                        );
+                    }
+                }
+                debug!(
+                    target_client = ?env.target_client_pub,
+                    query_id,
+                    federation_peers = fed_peers.len(),
+                    mode = mode_label,
+                    "FindPeer: originated lookup"
+                );
+            }
         } else {
             debug!(
                 target = ?env.target_bridge_pub,
@@ -3149,40 +3550,69 @@ impl Inner {
             return Err(DriftError::AuthFailed);
         }
 
-        let entries = federated::parse_directory(&payload_bytes)?;
+        // Phase C: parse v3 (also accepts v2 → treats every entry
+        // as hops=0). The hops field controls whether we'll later
+        // re-announce this entry transitively.
+        let entries = federated::parse_directory_v3(&payload_bytes)?;
 
-        // ── Per-entry XEdDSA presence-ticket verification ──
+        // ── Per-entry verification ──
         //
-        // Each entry carries a ticket the client signed for the
-        // announcing bridge (sender_pub). A malicious bridge that
-        // claims a pubkey it doesn't actually have a session with
-        // can't produce a valid ticket — the client's private key
-        // is required. Drop bad entries individually (and bump the
-        // metric) rather than rejecting the whole announcement: an
-        // honest bridge that includes one stale ticket in a chunk
-        // shouldn't have its other clients deregistered.
+        // For DIRECTLY-announced entries (hops=0), the ticket is
+        // signed by `client_pub` for `sender_pub` — the standard
+        // presence ticket check. For TRANSITIVE entries (hops>0),
+        // the ticket was signed by the client for the TERMINAL
+        // bridge (path[0] of the original PeerHere chain), not
+        // for the announcing bridge. We can't re-verify the
+        // terminal-bridge binding from this packet alone — we
+        // accept it as a routing hint and rely on:
+        //   (a) the announcer being in our federation_table
+        //       (trust gate at line 3395)
+        //   (b) the cap on transitive hops (MAX_ANNOUNCE_HOPS)
+        //   (c) bridge-self-signed hop attestations (later phase).
+        //
+        // Drop bad entries individually rather than rejecting the
+        // whole announcement.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let our_pub = self.identity.public_bytes();
+        let we_host_locally: std::collections::HashSet<[u8; 32]> = self
+            .presence_tickets
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
         let mut new_set: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-        for (client_pub, ticket) in entries {
+        let mut accepted: Vec<([u8; 32], federated::PresenceTicket, u8)> = Vec::new();
+        for (client_pub, ticket, hops) in entries {
             if client_pub == our_pub {
                 continue;
             }
-            if federated::verify_ticket(&client_pub, &sender_pub, &ticket, now_ms).is_err() {
-                self.metrics
-                    .federation_invalid_tickets_dropped
-                    .fetch_add(1, Ordering::Relaxed);
-                debug!(
-                    announcer = ?sender_pub,
-                    claimed_client = ?client_pub,
-                    "directory: dropped entry with invalid presence ticket"
-                );
+            // Anti-loop: ignore transitive claims about clients
+            // we host locally. We're the ground truth for them.
+            if we_host_locally.contains(&client_pub) {
                 continue;
             }
+            // For direct claims, verify the standard presence
+            // ticket binding (client_pub signed for sender_pub).
+            // Transitive claims skip this check — see comment above.
+            if hops == 0 {
+                if federated::verify_ticket(&client_pub, &sender_pub, &ticket, now_ms).is_err() {
+                    self.metrics
+                        .federation_invalid_tickets_dropped
+                        .fetch_add(1, Ordering::Relaxed);
+                    debug!(
+                        announcer = ?sender_pub,
+                        claimed_client = ?client_pub,
+                        "directory: dropped direct entry with invalid presence ticket"
+                    );
+                    continue;
+                }
+            }
             new_set.insert(client_pub);
+            accepted.push((client_pub, ticket, hops));
         }
         let now = std::time::Instant::now();
         let mut dir = self.peer_directory.lock().unwrap();
@@ -3204,6 +3634,21 @@ impl Inner {
         dir.retain(|client_pub, (announcer_pid, _)| {
             *announcer_pid != peer_id || new_set.contains(client_pub)
         });
+        drop(dir);
+        // Mirror prune on Phase C side-tables.
+        {
+            let dir = self.peer_directory.lock().unwrap();
+            let live_keys: std::collections::HashSet<[u8; 32]> = dir.keys().copied().collect();
+            drop(dir);
+            self.peer_directory_hops
+                .lock()
+                .unwrap()
+                .retain(|k, _| live_keys.contains(k));
+            self.peer_directory_tickets
+                .lock()
+                .unwrap()
+                .retain(|k, _| live_keys.contains(k));
+        }
 
         // ── First-write-wins for cross-announcer conflicts (issue 2) ──
         //
@@ -3217,18 +3662,27 @@ impl Inner {
         // an attacker only wins for pubkeys whose legitimate
         // bridge has already gone silent.
         //
-        // Refresh-from-same-announcer is still allowed (just an
-        // updated timestamp); cross-announcer attempts are
-        // silently dropped.
-        for pub_ in new_set {
+        // Phase C wrinkle: we also write the per-entry hops and
+        // ticket into side-tables. If first-write-wins blocks the
+        // peer_directory write, we likewise leave the existing
+        // hops/ticket entries alone — they're keyed by client_pub
+        // and we ALREADY have them under a different announcer.
+        let mut dir = self.peer_directory.lock().unwrap();
+        let mut hops_map = self.peer_directory_hops.lock().unwrap();
+        let mut tickets_map = self.peer_directory_tickets.lock().unwrap();
+        for (pub_, ticket, hops) in accepted {
             use std::collections::hash_map::Entry;
             match dir.entry(pub_) {
                 Entry::Vacant(e) => {
                     e.insert((peer_id, now));
+                    hops_map.insert(pub_, hops);
+                    tickets_map.insert(pub_, ticket);
                 }
                 Entry::Occupied(mut e) => {
                     if e.get().0 == peer_id {
                         e.get_mut().1 = now;
+                        hops_map.insert(pub_, hops);
+                        tickets_map.insert(pub_, ticket);
                     }
                     // else: first-write-wins — silently ignore.
                 }
@@ -3294,6 +3748,813 @@ impl Inner {
             .unwrap()
             .insert(sender_pub, ticket);
         Ok(())
+    }
+
+    // ─── Federation peer discovery (FEDERATION_DISCOVERY.md §6) ──
+
+    /// Receive-side handler for `PacketType::FindPeer`. Only
+    /// federated bridges may query us — clients can't trigger a
+    /// search of our local-clients table (information disclosure).
+    /// On a direct hit (we host the target as a local client AND
+    /// hold their presence ticket), reply with `PeerHere`. Phase A
+    /// drops 1-hop misses; Phase B recurses through the rest of
+    /// the federation. With `find_peer_disabled` set, the whole
+    /// handler short-circuits — no reply, no forward.
+    async fn handle_find_peer(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        if matches!(
+            self.config.effective_find_peer_mode(),
+            FindPeerMode::Disabled
+        ) {
+            // Drop incoming queries silently — we don't
+            // participate in discovery.
+            return Ok(());
+        }
+        let peer_id = header.src_id;
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::FindPeer as u8, &aad, body)?
+        };
+        // Source-auth: only federation bridges may query.
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let sender_is_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&sender_pub);
+        if !sender_is_bridge {
+            debug!(
+                ?sender_pub,
+                "FindPeer: sender not in federation_table; dropping"
+            );
+            return Err(DriftError::AuthFailed);
+        }
+
+        let query = find_peer::parse_find_peer(&payload_bytes)?;
+
+        // Dedup — drop replays / loops.
+        let now_inst = std::time::Instant::now();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        {
+            let mut recent = self.recent_queries.lock().unwrap();
+            if let Some(&expires) = recent.get(&query.query_id) {
+                if now_inst < expires {
+                    debug!(query_id = query.query_id, "FindPeer: duplicate; dropping");
+                    return Ok(());
+                }
+                recent.remove(&query.query_id);
+            }
+            let ttl_inst = now_inst
+                + std::time::Duration::from_millis(find_peer::QUERY_DEDUP_TTL_MS);
+            recent.insert(query.query_id, ttl_inst);
+        }
+
+        // Deadline check.
+        if query
+            .originator_query_at_ms
+            .saturating_add(find_peer::MAX_FIND_DEADLINE_MS)
+            < now_ms
+        {
+            debug!(
+                query_id = query.query_id,
+                "FindPeer: past deadline; dropping"
+            );
+            return Ok(());
+        }
+
+        // Direct-hit check: do we host the target as a local
+        // (non-federation) client with a valid presence ticket?
+        let our_pub = self.identity.public_bytes();
+        let ticket_opt = {
+            let tickets = self.presence_tickets.lock().unwrap();
+            tickets.get(&query.target_client_pub).cloned()
+        };
+        let target_is_local = if let Some(ref t) = ticket_opt {
+            // Ticket must be unexpired AND signed for THIS bridge.
+            federated::verify_ticket(&query.target_client_pub, &our_pub, t, now_ms).is_ok()
+        } else {
+            false
+        };
+        // Also confirm we have an established session for them —
+        // a leftover ticket from a now-disconnected client must not
+        // produce a positive answer.
+        let has_session = if target_is_local {
+            self.session_established_with_pubkey(&query.target_client_pub).await
+        } else {
+            false
+        };
+
+        if target_is_local && has_session {
+            let ticket = ticket_opt.expect("verified above");
+            let reply = find_peer::PeerHere {
+                target_client_pub: query.target_client_pub,
+                query_id: query.query_id,
+                path: vec![find_peer::PathEntry {
+                    bridge_pub: our_pub,
+                    ticket,
+                }],
+            };
+            let wire = find_peer::build_peer_here(&reply);
+            // Reply goes back to the bridge that sent us the
+            // query (which for Phase A is the originator).
+            if let Err(e) = self
+                .send_typed(&peer_id, PacketType::PeerHere, &wire)
+                .await
+            {
+                debug!(error = %e, "FindPeer: failed to send PeerHere reply");
+            } else {
+                debug!(
+                    target = ?query.target_client_pub,
+                    query_id = query.query_id,
+                    "FindPeer: replied PeerHere (local hit)"
+                );
+            }
+            return Ok(());
+        }
+
+        // Phase E NoForward: bridges in this mode answer local
+        // hits only — they refuse to be discovery transit. The
+        // local-hit path above already returned if we matched;
+        // reaching this point means it was a miss, so we drop
+        // without forwarding.
+        if matches!(
+            self.config.effective_find_peer_mode(),
+            FindPeerMode::NoForward
+        ) {
+            debug!(
+                target = ?query.target_client_pub,
+                query_id = query.query_id,
+                "FindPeer: NoForward mode — dropping miss without recurse"
+            );
+            return Ok(());
+        }
+        // Phase B: local miss with ttl > 1 — forward to every
+        // federation peer except the one who sent us this query.
+        // Record (query_id, sender_peer_id) so the eventual
+        // PeerHere can be routed back to the upstream that
+        // forwarded to us.
+        if query.ttl > 1 {
+            let onward = find_peer::FindPeer {
+                ttl: query.ttl - 1,
+                ..query.clone()
+            };
+            let payload = find_peer::build_find_peer(&onward);
+            let fed_peers: Vec<PeerId> = self
+                .federation_table
+                .lock()
+                .unwrap()
+                .values()
+                .copied()
+                .filter(|pid| *pid != peer_id)
+                .collect();
+            if fed_peers.is_empty() {
+                debug!(
+                    query_id = query.query_id,
+                    "FindPeer: no other federation peers to forward to; dropping"
+                );
+                return Ok(());
+            }
+            // Insert BEFORE awaiting send_typed — the
+            // forwarded_queries entry must be visible by the
+            // time the PeerHere comes back (which can race
+            // with the await point).
+            self.forwarded_queries
+                .lock()
+                .unwrap()
+                .insert(query.query_id, peer_id);
+            for fed in &fed_peers {
+                if let Err(e) =
+                    self.send_typed(fed, PacketType::FindPeer, &payload).await
+                {
+                    debug!(
+                        error = %e,
+                        ?fed,
+                        "FindPeer: forward leg failed"
+                    );
+                }
+            }
+            debug!(
+                target = ?query.target_client_pub,
+                query_id = query.query_id,
+                ttl = onward.ttl,
+                fanout = fed_peers.len(),
+                "FindPeer: forwarded (Phase B multi-hop)"
+            );
+            return Ok(());
+        }
+
+        // ttl exhausted with no local hit — silent drop.
+        debug!(
+            target = ?query.target_client_pub,
+            query_id = query.query_id,
+            "FindPeer: ttl exhausted with no local hit; dropping"
+        );
+        Ok(())
+    }
+
+    /// Receive-side handler for `PacketType::FindPeerHashed`.
+    /// Same dispatch shape as `handle_find_peer`, but the target
+    /// pubkey arrives as `SHA-256(target || salt)`. We scan our
+    /// local presence tickets, hashing each client_pub under the
+    /// query's salt, and reply with `PeerHere` (carrying the real
+    /// matched pubkey) on a hit. Forwards on miss exactly like
+    /// the plain variant, propagating the hash unchanged.
+    async fn handle_find_peer_hashed(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        if matches!(
+            self.config.effective_find_peer_mode(),
+            FindPeerMode::Disabled
+        ) {
+            return Ok(());
+        }
+        let peer_id = header.src_id;
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::FindPeerHashed as u8, &aad, body)?
+        };
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let sender_is_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&sender_pub);
+        if !sender_is_bridge {
+            return Err(DriftError::AuthFailed);
+        }
+        let query = find_peer::parse_find_peer_hashed(&payload_bytes)?;
+
+        // Dedup.
+        let now_inst = std::time::Instant::now();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        {
+            let mut recent = self.recent_queries.lock().unwrap();
+            if let Some(&expires) = recent.get(&query.query_id) {
+                if now_inst < expires {
+                    return Ok(());
+                }
+                recent.remove(&query.query_id);
+            }
+            recent.insert(
+                query.query_id,
+                now_inst
+                    + std::time::Duration::from_millis(find_peer::QUERY_DEDUP_TTL_MS),
+            );
+        }
+        if query
+            .originator_query_at_ms
+            .saturating_add(find_peer::MAX_FIND_DEADLINE_MS)
+            < now_ms
+        {
+            return Ok(());
+        }
+
+        // Local-hit scan: for each presence ticket we hold,
+        // compute the same hash under the query's salt and
+        // compare. Linear in local-client count — fine for the
+        // sizes a single bridge holds in practice.
+        let candidate: Option<([u8; 32], federated::PresenceTicket)> = {
+            let tickets = self.presence_tickets.lock().unwrap();
+            tickets.iter().find_map(|(client_pub, t)| {
+                let h = find_peer::hash_target_pub(client_pub, &query.salt);
+                if h == query.target_hash {
+                    Some((*client_pub, t.clone()))
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some((client_pub, ticket)) = candidate {
+            // Confirm the candidate's session is still alive
+            // AND the ticket binds to our bridge — the same
+            // gates handle_find_peer applies.
+            let our_pub = self.identity.public_bytes();
+            let ticket_ok =
+                federated::verify_ticket(&client_pub, &our_pub, &ticket, now_ms).is_ok();
+            if ticket_ok && self.session_established_with_pubkey(&client_pub).await {
+                let reply = find_peer::PeerHere {
+                    target_client_pub: client_pub,
+                    query_id: query.query_id,
+                    path: vec![find_peer::PathEntry {
+                        bridge_pub: our_pub,
+                        ticket,
+                    }],
+                };
+                let wire = find_peer::build_peer_here(&reply);
+                if let Err(e) = self
+                    .send_typed(&peer_id, PacketType::PeerHere, &wire)
+                    .await
+                {
+                    debug!(error = %e, "FindPeerHashed: failed to send PeerHere reply");
+                } else {
+                    debug!(
+                        query_id = query.query_id,
+                        "FindPeerHashed: replied PeerHere (hash-matched local client)"
+                    );
+                }
+                return Ok(());
+            }
+        }
+
+        // NoForward suppresses transit even for hashed queries.
+        if matches!(
+            self.config.effective_find_peer_mode(),
+            FindPeerMode::NoForward
+        ) {
+            return Ok(());
+        }
+
+        // Recurse forward, preserving the hashed wire format —
+        // transit bridges still don't see the raw target_pub.
+        if query.ttl > 1 {
+            let onward = find_peer::FindPeerHashed {
+                ttl: query.ttl - 1,
+                ..query.clone()
+            };
+            let payload = find_peer::build_find_peer_hashed(&onward);
+            let fed_peers: Vec<PeerId> = self
+                .federation_table
+                .lock()
+                .unwrap()
+                .values()
+                .copied()
+                .filter(|pid| *pid != peer_id)
+                .collect();
+            if fed_peers.is_empty() {
+                return Ok(());
+            }
+            self.forwarded_queries
+                .lock()
+                .unwrap()
+                .insert(query.query_id, peer_id);
+            for fed in &fed_peers {
+                if let Err(e) =
+                    self.send_typed(fed, PacketType::FindPeerHashed, &payload).await
+                {
+                    debug!(error = %e, ?fed, "FindPeerHashed: forward leg failed");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive-side handler for `PacketType::PeerHere`. Verifies
+    /// the ticket chain, caches the route in `peer_directory`,
+    /// and flushes any queued `pending_finds` waiters through the
+    /// resolved next-hop.
+    async fn handle_peer_here(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        let peer_id = header.src_id;
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::PeerHere as u8, &aad, body)?
+        };
+        // Source-auth: only federation bridges may reply.
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let sender_is_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&sender_pub);
+        if !sender_is_bridge {
+            debug!(
+                ?sender_pub,
+                "PeerHere: sender not in federation_table; dropping"
+            );
+            return Err(DriftError::AuthFailed);
+        }
+
+        let reply = find_peer::parse_peer_here(&payload_bytes)?;
+        if reply.path.is_empty() {
+            return Err(DriftError::DecodeError);
+        }
+
+        // Verify the terminal-bridge ticket. The ticket in
+        // path[0] is signed by target_client for path[0].bridge_pub
+        // (the standard XEdDSA presence ticket).
+        let terminal = &reply.path[0];
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if federated::verify_ticket(
+            &reply.target_client_pub,
+            &terminal.bridge_pub,
+            &terminal.ticket,
+            now_ms,
+        )
+        .is_err()
+        {
+            debug!(
+                target = ?reply.target_client_pub,
+                bridge = ?terminal.bridge_pub,
+                "PeerHere: terminal ticket failed verification; dropping"
+            );
+            return Err(DriftError::AuthFailed);
+        }
+        // Verify each intermediate hop's self-signed attestation.
+        // path[1..] entries are signed by their own bridge_pub
+        // over (HOP_DOMAIN_TAG || bridge_pub || query_id ||
+        // expiry || nonce). A malicious forwarder can't forge a
+        // path entry for a bridge that didn't participate.
+        for (i, hop) in reply.path.iter().enumerate().skip(1) {
+            if find_peer::verify_hop_attestation(
+                &hop.bridge_pub,
+                reply.query_id,
+                &hop.ticket,
+                now_ms,
+            )
+            .is_err()
+            {
+                debug!(
+                    target = ?reply.target_client_pub,
+                    hop_index = i,
+                    bridge = ?hop.bridge_pub,
+                    "PeerHere: intermediate hop attestation failed verification; dropping"
+                );
+                return Err(DriftError::AuthFailed);
+            }
+        }
+
+        // Cache the route. Next-hop is the federation peer that
+        // delivered this reply. For multi-hop replies the next-hop
+        // is still the immediate sender — the path encodes the
+        // chain for *future* forwarders, not for our local
+        // peer_directory which only needs the next-hop pointer.
+        {
+            let mut dir = self.peer_directory.lock().unwrap();
+            dir.insert(
+                reply.target_client_pub,
+                (peer_id, std::time::Instant::now()),
+            );
+        }
+
+        // Phase B: distinguish "we originated" from "we forwarded".
+        // pending_finds has an entry iff we issued the original
+        // FindPeer; forwarded_queries has an entry iff we forwarded
+        // someone else's. Mutually exclusive.
+        let pending_opt = self
+            .pending_finds
+            .lock()
+            .unwrap()
+            .remove(&reply.target_client_pub);
+        if let Some(pending) = pending_opt {
+            if pending.query_id != reply.query_id {
+                let mut p = self.pending_finds.lock().unwrap();
+                p.insert(reply.target_client_pub, pending);
+                debug!(
+                    target = ?reply.target_client_pub,
+                    "PeerHere: query_id mismatch with pending entry; dropping"
+                );
+                return Ok(());
+            }
+            for waiter_bytes in pending.waiters {
+                let env = match federated::parse(&waiter_bytes) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let re_envelope = federated::build(
+                    &terminal.bridge_pub,
+                    &env.target_client_pub,
+                    &env.source_bridge_pub,
+                    &env.source_client_pub,
+                    env.payload,
+                );
+                if let Err(e) = self
+                    .send_typed(&peer_id, PacketType::Federated, &re_envelope)
+                    .await
+                {
+                    debug!(error = %e, "PeerHere: failed to flush waiter");
+                }
+            }
+            debug!(
+                target = ?reply.target_client_pub,
+                query_id = reply.query_id,
+                "PeerHere: cached + flushed waiters (originator path)"
+            );
+            return Ok(());
+        }
+
+        // Phase B forwarder path: we forwarded this query for
+        // someone else. Append our bridge to the path and re-emit
+        // back along the chain.
+        let upstream_opt = self
+            .forwarded_queries
+            .lock()
+            .unwrap()
+            .remove(&reply.query_id);
+        if let Some(upstream_peer) = upstream_opt {
+            // Append our hop. Phase B uses a zero-padded "stub"
+            // ticket for the intermediate entry — Phase C will
+            // replace this with a bridge-self-signed hop
+            // attestation. Receivers only verify path[0]
+            // (terminal) cryptographically in Phase B.
+            if reply.path.len() >= find_peer::MAX_FIND_TTL as usize {
+                debug!(
+                    query_id = reply.query_id,
+                    "PeerHere: path already at MAX_FIND_TTL; dropping forward"
+                );
+                return Ok(());
+            }
+            // Build a real hop attestation signed by our own
+            // XEdDSA key. Expiry: 60 s — short enough that a
+            // stolen attestation has limited value, long enough
+            // that clock skew doesn't reject honest replies.
+            let our_pub = self.identity.public_bytes();
+            let attestation_expiry = now_ms.saturating_add(60_000);
+            let mut nonce = [0u8; 24];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+            let mut nonce_extra = [0u8; 64];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_extra);
+            let identity = self.identity.clone();
+            let attestation = find_peer::build_hop_attestation(
+                &our_pub,
+                reply.query_id,
+                attestation_expiry,
+                nonce,
+                |msg| identity.xeddsa_sign(msg, &nonce_extra),
+            );
+            let mut extended_path = reply.path.clone();
+            extended_path.push(find_peer::PathEntry {
+                bridge_pub: our_pub,
+                ticket: attestation,
+            });
+            let onward = find_peer::PeerHere {
+                target_client_pub: reply.target_client_pub,
+                query_id: reply.query_id,
+                path: extended_path,
+            };
+            let wire = find_peer::build_peer_here(&onward);
+            if let Err(e) = self
+                .send_typed(&upstream_peer, PacketType::PeerHere, &wire)
+                .await
+            {
+                debug!(error = %e, "PeerHere: failed to forward upstream");
+            } else {
+                debug!(
+                    target = ?reply.target_client_pub,
+                    query_id = reply.query_id,
+                    new_path_len = onward.path.len(),
+                    "PeerHere: forwarded upstream with extended path"
+                );
+            }
+            return Ok(());
+        }
+
+        // No matching pending or forwarded query — either a
+        // duplicate reply (we already processed it) or a reply
+        // for a query we never originated/forwarded. Cache stays
+        // populated (already inserted above) so future traffic
+        // benefits; the unsolicited-reply itself drops.
+        debug!(
+            target = ?reply.target_client_pub,
+            query_id = reply.query_id,
+            "PeerHere: no matching pending or forwarded query (cached anyway)"
+        );
+        Ok(())
+    }
+
+    /// Receive-side handler for `PacketType::PeerGone`. A federation
+    /// bridge tells us "client X disconnected from me, flush any
+    /// cache entry pointing through me." We only evict if our
+    /// cache's next-hop is the emitting bridge — PeerGone from
+    /// bridge A must not evict a route through bridge B.
+    async fn handle_peer_gone(
+        &self,
+        header: &Header,
+        full_packet: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(DriftError::UnknownPeer);
+        }
+        let peer_id = header.src_id;
+        let payload_bytes = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers
+                .get_mut(&peer_id)
+                .ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer
+                .handshake
+                .session()
+                .ok_or(DriftError::UnknownPeer)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            rx.open(header.seq, PacketType::PeerGone as u8, &aad, body)?
+        };
+        let sender_pub = {
+            let peers = self.peers.lock_for(&peer_id).await;
+            peers
+                .get(&peer_id)
+                .map(|p| p.peer_static_pub)
+                .ok_or(DriftError::UnknownPeer)?
+        };
+        let sender_is_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&sender_pub);
+        if !sender_is_bridge {
+            debug!(?sender_pub, "PeerGone: sender not in federation_table; dropping");
+            return Err(DriftError::AuthFailed);
+        }
+        let gone = find_peer::parse_peer_gone(&payload_bytes)?;
+        // Anti-spoof: PeerGone's bridge_pub must match the
+        // sender's authenticated pubkey.
+        if gone.bridge_pub != sender_pub {
+            debug!(
+                claimed = ?gone.bridge_pub,
+                actual = ?sender_pub,
+                "PeerGone: spoofed bridge_pub; dropping"
+            );
+            return Err(DriftError::AuthFailed);
+        }
+        // Evict only if our cached next-hop is the emitter.
+        let evicted = {
+            let mut dir = self.peer_directory.lock().unwrap();
+            if let Some(&(cached_pid, _)) = dir.get(&gone.client_pub) {
+                if cached_pid == peer_id {
+                    dir.remove(&gone.client_pub);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        debug!(
+            client = ?gone.client_pub,
+            bridge = ?gone.bridge_pub,
+            evicted,
+            "PeerGone: processed"
+        );
+        Ok(())
+    }
+
+    /// Background GC for federation-discovery state. Periodically
+    /// prunes expired entries from `pending_finds`,
+    /// `recent_queries`, `neg_cache`, and `forwarded_queries`.
+    /// Without this loop these maps grow unboundedly across a long-
+    /// lived bridge process — every cold-path lookup adds a row.
+    /// The aging policy mirrors the protocol constants:
+    ///
+    /// | Map                | Lifetime per entry           |
+    /// |--------------------|-------------------------------|
+    /// | `pending_finds`    | `MAX_FIND_DEADLINE_MS` (2 s)  |
+    /// | `recent_queries`   | `QUERY_DEDUP_TTL_MS` (10 s)   |
+    /// | `neg_cache`        | `NEG_CACHE_TTL_MS` (5 s)      |
+    /// | `forwarded_queries`| `MAX_FIND_DEADLINE_MS` (2 s)  |
+    ///
+    /// The sweep ticks once per second — fine-grained enough to
+    /// keep memory bounded without burning CPU on what is, after
+    /// all, four small HashMaps.
+    pub(crate) async fn run_find_peer_gc_loop(self: std::sync::Arc<Self>) {
+        let period = std::time::Duration::from_secs(1);
+        let mut ticker = tokio::time::interval(period);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now = std::time::Instant::now();
+            let pf_dead = std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS);
+            let mut pf_purged = 0usize;
+            {
+                let mut pf = self.pending_finds.lock().unwrap();
+                let before = pf.len();
+                pf.retain(|_, p| now.duration_since(p.started_at) < pf_dead);
+                pf_purged = before.saturating_sub(pf.len());
+            }
+            // recent_queries values are `Instant` deadlines.
+            let mut rq_purged = 0usize;
+            {
+                let mut rq = self.recent_queries.lock().unwrap();
+                let before = rq.len();
+                rq.retain(|_, expires| *expires > now);
+                rq_purged = before.saturating_sub(rq.len());
+            }
+            // neg_cache values are `Instant` deadlines.
+            let mut nc_purged = 0usize;
+            {
+                let mut nc = self.neg_cache.lock().unwrap();
+                let before = nc.len();
+                nc.retain(|_, expires| *expires > now);
+                nc_purged = before.saturating_sub(nc.len());
+            }
+            // forwarded_queries doesn't carry its own deadline —
+            // use recent_queries (same query_id key) as the
+            // source of truth. A forwarded query whose query_id
+            // has been GC'd from recent_queries is past its
+            // dedup window AND past its forward deadline.
+            let mut fq_purged = 0usize;
+            {
+                let recent: std::collections::HashSet<u64> =
+                    self.recent_queries.lock().unwrap().keys().copied().collect();
+                let mut fq = self.forwarded_queries.lock().unwrap();
+                let before = fq.len();
+                fq.retain(|qid, _| recent.contains(qid));
+                fq_purged = before.saturating_sub(fq.len());
+            }
+            if pf_purged + rq_purged + nc_purged + fq_purged > 0 {
+                debug!(
+                    pf = pf_purged,
+                    rq = rq_purged,
+                    nc = nc_purged,
+                    fq = fq_purged,
+                    "find_peer GC: swept expired entries"
+                );
+            }
+        }
+    }
+
+    /// Helper: do we have an Established session with `pubkey`?
+    /// Used by `handle_find_peer` to confirm a presence ticket
+    /// hasn't outlived its underlying session.
+    async fn session_established_with_pubkey(&self, pubkey: &[u8; 32]) -> bool {
+        let peers = self.peers.lock_all().await;
+        for p in peers.iter() {
+            if p.peer_static_pub == *pubkey
+                && matches!(p.handshake, HandshakeState::Established { .. })
+            {
+                return true;
+            }
+        }
+        false
     }
 
     async fn dispatch(&self, action: SendAction) -> Result<()> {
@@ -3684,6 +4945,22 @@ impl Inner {
             }
             PacketType::PresenceTicket => {
                 self.handle_presence_ticket(&header, data, body).await?;
+                Ok(None)
+            }
+            PacketType::FindPeer => {
+                self.handle_find_peer(&header, data, body).await?;
+                Ok(None)
+            }
+            PacketType::PeerHere => {
+                self.handle_peer_here(&header, data, body).await?;
+                Ok(None)
+            }
+            PacketType::PeerGone => {
+                self.handle_peer_gone(&header, data, body).await?;
+                Ok(None)
+            }
+            PacketType::FindPeerHashed => {
+                self.handle_find_peer_hashed(&header, data, body).await?;
                 Ok(None)
             }
         }
@@ -4602,6 +5879,10 @@ impl Inner {
         // the session key, so this is safe to act on immediately.
         let _ = rx.open(header.seq, PacketType::Close as u8, &aad, body)?;
 
+        // Capture the disconnecting peer's pubkey before we mutate
+        // their entry — needed for PeerGone emission below.
+        let disconnected_pub = peer.peer_static_pub;
+
         let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
         if peer.auto_registered {
             debug!(peer_id = ?peer_id, "peer closed; removing auto-registered entry");
@@ -4618,7 +5899,65 @@ impl Inner {
                 .handshakes_inflight
                 .fetch_sub(1, Ordering::Relaxed);
         }
+        drop(peers);
+
+        // PeerGone emission: if the disconnected peer was a local
+        // client (not a federation bridge) AND we had a presence
+        // ticket for them (i.e., we'd been announcing them in our
+        // FederationDirectory), tell every federation peer to
+        // evict their cached route through us.
+        let is_federation_bridge = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .contains_key(&disconnected_pub);
+        let had_presence_ticket = self
+            .presence_tickets
+            .lock()
+            .unwrap()
+            .remove(&disconnected_pub)
+            .is_some();
+        if !is_federation_bridge && had_presence_ticket {
+            self.emit_peer_gone(&disconnected_pub).await;
+        }
         Ok(())
+    }
+
+    /// Broadcast `PeerGone` to every federation peer. Called when
+    /// a local client disconnects so federation peers can evict
+    /// their cached route immediately rather than waiting on the
+    /// next idempotent-set FederationDirectory announce (~7 s).
+    async fn emit_peer_gone(&self, client_pub: &[u8; 32]) {
+        let our_pub = self.identity.public_bytes();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let payload = find_peer::build_peer_gone(&find_peer::PeerGone {
+            client_pub: *client_pub,
+            emitted_at_ms: now_ms,
+            bridge_pub: our_pub,
+        });
+        let fed_peers: Vec<PeerId> = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .values()
+            .copied()
+            .collect();
+        for peer in &fed_peers {
+            if let Err(e) = self
+                .send_typed(peer, PacketType::PeerGone, &payload)
+                .await
+            {
+                debug!(error = %e, ?peer, "PeerGone: failed to emit");
+            }
+        }
+        debug!(
+            client = ?client_pub,
+            n = fed_peers.len(),
+            "PeerGone: emitted to federation"
+        );
     }
 }
 

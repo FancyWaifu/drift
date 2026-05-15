@@ -114,7 +114,7 @@ pub fn parse(bytes: &[u8]) -> Result<FederatedEnvelope<'_>, DriftError> {
 
 /// On-wire length of a presence ticket.
 pub const TICKET_LEN: usize = 8 + 24 + 64;
-const TICKET_NONCE_LEN: usize = 24;
+pub const TICKET_NONCE_LEN: usize = 24;
 
 /// A presence ticket as it travels on the wire and as the bridge
 /// stores it.
@@ -238,12 +238,31 @@ pub fn verify_ticket(
 // peer running an outdated DRIFT.
 
 const DIRECTORY_HEADER_LEN: usize = 4;
-const DIRECTORY_VERSION: u8 = 2;
+const DIRECTORY_VERSION_V2: u8 = 2;
+/// Current wire version. v3 adds a 1-byte `hops` field per entry
+/// for proactive multi-hop announce (Phase C). v3 receivers also
+/// accept v2 payloads on the wire and treat each entry as hops=0
+/// — the previous version is upgrade-equivalent. v2 receivers
+/// reject v3 (silent drop, expected during rolling upgrade).
+const DIRECTORY_VERSION_V3: u8 = 3;
+/// Back-compat alias — old call sites assume v2. Kept around to
+/// avoid touching every test that hard-codes version 2.
+const DIRECTORY_VERSION: u8 = DIRECTORY_VERSION_V2;
 const DIRECTORY_ENTRY_LEN: usize = 32 + TICKET_LEN;
+/// v3 entry: client_pub (32) + ticket (96) + hops (1) = 129 bytes.
+const DIRECTORY_ENTRY_V3_LEN: usize = 32 + TICKET_LEN + 1;
 /// Maximum entries per directory packet. Sized so that
-/// `DIRECTORY_HEADER_LEN + MAX_DIRECTORY_ENTRIES * 128` fits
-/// comfortably under MAX_PAYLOAD.
+/// `DIRECTORY_HEADER_LEN + MAX_DIRECTORY_ENTRIES * 129` fits
+/// comfortably under MAX_PAYLOAD (10 * 129 + 4 = 1294 bytes).
 pub const MAX_DIRECTORY_ENTRIES: usize = 10;
+
+/// Maximum hop count a re-announced directory entry may carry.
+/// Caps the radius of proactive propagation; reactive `FindPeer`
+/// covers the long tail (see `FEDERATION_DISCOVERY.md` §8).
+/// A direct-client entry has hops=0; an entry forwarded once has
+/// hops=1; an entry forwarded twice has hops=2 — caps here. We
+/// don't re-announce entries with hops >= MAX_ANNOUNCE_HOPS.
+pub const MAX_ANNOUNCE_HOPS: u8 = 2;
 
 /// Build a FederationDirectory v2 payload from a slice of
 /// (pubkey, ticket) pairs. Callers MUST keep
@@ -264,6 +283,75 @@ pub fn build_directory(entries: &[([u8; 32], PresenceTicket)]) -> Vec<u8> {
         out.extend_from_slice(&encode_ticket(ticket));
     }
     out
+}
+
+/// Build a FederationDirectory **v3** payload from a slice of
+/// (pubkey, ticket, hops) triples. v3 is the current format —
+/// hops=0 indicates a directly-connected client; hops>0 means
+/// the entry was learned transitively from another bridge.
+///
+/// Callers MUST keep `entries.len() <= MAX_DIRECTORY_ENTRIES`.
+pub fn build_directory_v3(entries: &[([u8; 32], PresenceTicket, u8)]) -> Vec<u8> {
+    debug_assert!(
+        entries.len() <= MAX_DIRECTORY_ENTRIES,
+        "directory v3 chunk too large: {}",
+        entries.len()
+    );
+    let count = entries.len() as u16;
+    let mut out =
+        Vec::with_capacity(DIRECTORY_HEADER_LEN + entries.len() * DIRECTORY_ENTRY_V3_LEN);
+    out.push(DIRECTORY_VERSION_V3);
+    out.push(0); // reserved
+    out.extend_from_slice(&count.to_be_bytes());
+    for (pubkey, ticket, hops) in entries {
+        out.extend_from_slice(pubkey);
+        out.extend_from_slice(&encode_ticket(ticket));
+        out.push(*hops);
+    }
+    out
+}
+
+/// Parse a FederationDirectory payload. Accepts v2 (treats every
+/// entry as hops=0) AND v3 (reads the hops byte). Returns triples
+/// `(pubkey, ticket, hops)`. Does NOT verify ticket signatures —
+/// see `handle_federation_directory` for that.
+///
+/// Used as the unified parse path; new callers should prefer this
+/// over the legacy v2-only `parse_directory`.
+pub fn parse_directory_v3(
+    bytes: &[u8],
+) -> Result<Vec<([u8; 32], PresenceTicket, u8)>, DriftError> {
+    if bytes.len() < DIRECTORY_HEADER_LEN {
+        return Err(DriftError::DecodeError);
+    }
+    let version = bytes[0];
+    let entry_len = match version {
+        DIRECTORY_VERSION_V2 => DIRECTORY_ENTRY_LEN,
+        DIRECTORY_VERSION_V3 => DIRECTORY_ENTRY_V3_LEN,
+        _ => return Err(DriftError::DecodeError),
+    };
+    if bytes[1] != 0 {
+        return Err(DriftError::DecodeError);
+    }
+    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    let expected_len = DIRECTORY_HEADER_LEN + count * entry_len;
+    if bytes.len() != expected_len {
+        return Err(DriftError::DecodeError);
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = DIRECTORY_HEADER_LEN + i * entry_len;
+        let mut p = [0u8; 32];
+        p.copy_from_slice(&bytes[off..off + 32]);
+        let ticket = decode_ticket(&bytes[off + 32..off + 32 + TICKET_LEN])?;
+        let hops = if version == DIRECTORY_VERSION_V3 {
+            bytes[off + 32 + TICKET_LEN]
+        } else {
+            0
+        };
+        out.push((p, ticket, hops));
+    }
+    Ok(out)
 }
 
 /// Parse a FederationDirectory v2 payload into (pubkey, ticket)
@@ -478,5 +566,53 @@ mod tests {
         ))
         .to_bytes();
         assert!(verify_ticket(&attacker_pub, &bridge_pub, &ticket, 0).is_err());
+    }
+
+    // ─── Directory v3 (Phase C) ──────────────────────────────────
+
+    #[test]
+    fn directory_v3_roundtrip_with_mixed_hops() {
+        let bridge = [0x10; 32];
+        let (pa, ta) = fake_entry(&[0x20; 32], &bridge, 9_999_999_999_999);
+        let (pb, tb) = fake_entry(&[0x21; 32], &bridge, 9_999_999_999_999);
+        let (pc, tc) = fake_entry(&[0x22; 32], &bridge, 9_999_999_999_999);
+        let entries = vec![(pa, ta.clone(), 0u8), (pb, tb.clone(), 1u8), (pc, tc.clone(), 2u8)];
+        let wire = build_directory_v3(&entries);
+        let parsed = parse_directory_v3(&wire).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], (pa, ta, 0));
+        assert_eq!(parsed[1], (pb, tb, 1));
+        assert_eq!(parsed[2], (pc, tc, 2));
+    }
+
+    #[test]
+    fn directory_v3_parser_accepts_v2_as_hops_zero() {
+        // Build an old-style v2 payload, parse with the v3
+        // parser, expect hops=0 for every entry.
+        let bridge = [0xAB; 32];
+        let (pa, ta) = fake_entry(&[0xA0; 32], &bridge, 9_999_999_999_999);
+        let v2_payload = build_directory(&[(pa, ta.clone())]);
+        let parsed = parse_directory_v3(&v2_payload).unwrap();
+        assert_eq!(parsed, vec![(pa, ta, 0)]);
+    }
+
+    #[test]
+    fn directory_v3_parser_rejects_unknown_version() {
+        let mut bytes = vec![99u8, 0, 0, 0];
+        assert!(parse_directory_v3(&bytes).is_err());
+        // And truncated.
+        bytes.clear();
+        bytes.push(3);
+        assert!(parse_directory_v3(&bytes).is_err());
+    }
+
+    #[test]
+    fn directory_v3_legacy_v2_parser_rejects_v3() {
+        // Old v2-only callers must reject v3 payloads (silent
+        // drop in the receive path).
+        let bridge = [0xCC; 32];
+        let (p, t) = fake_entry(&[0xC0; 32], &bridge, 9_999_999_999_999);
+        let v3 = build_directory_v3(&[(p, t, 0)]);
+        assert!(parse_directory(&v3).is_err());
     }
 }

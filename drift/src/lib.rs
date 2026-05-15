@@ -36,4 +36,4 @@ pub use drift_core::{derive_peer_id, Direction, PeerId, SessionKey, KEY_LEN, PEE
 pub use drift_core::{DriftError, Result};
 pub use drift_core::{Header, PacketType, HEADER_LEN};
 pub use drift_core::{Identity, STATIC_KEY_LEN};
-pub use transport::{Metrics, Received, Transport, TransportConfig, MAX_PAYLOAD};
+pub use transport::{FindPeerMode, Metrics, Received, Transport, TransportConfig, MAX_PAYLOAD};

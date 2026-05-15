@@ -138,6 +138,16 @@ the direct dial wins — fewer hops, no bridge operator in the
 middle. `--server-addr` / `--bridge` on the command line still
 override the inventory if you want to force a particular route.
 
+`via_bridge` is **optional**. If a target host entry has only a
+`pubkey` (no endpoints, no via_bridge), drift-mosh-client routes
+through your configured `default_bridge` with the all-zero
+"consult your directory" sentinel and the bridge resolves the
+target via federation discovery — proactive multi-hop announce
+fills caches at steady state, reactive `FindPeer` covers the cold
+path for clients that joined since the last announce. See
+`FEDERATION_DISCOVERY.md` at the workspace root for the protocol
+spec and `SPEC.md §10` for the wire-format reference.
+
 For the **fully zero-config** case, set a `default_bridge` at
 the top of drift.toml instead of recording every individual
 target. `drift-mosh-client --server-pub <X>` then dials the
