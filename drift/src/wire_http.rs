@@ -434,6 +434,15 @@ use base64::Engine as _;
 /// Internal: spawned task that drains the SSE stream into the
 /// `inbound` channel. Each `data: <base64>\n\n` event becomes one
 /// packet pushed onto the channel.
+///
+/// `initial_leftover` carries any bytes that arrived in the
+/// SID-bootstrap chunk but weren't consumed by SID parsing. These
+/// can include a complete subsequent event (e.g. the bridge bundles
+/// SID + HELLO_ACK in one HTTP chunk) — so we drain `leftover`
+/// FIRST, before blocking on the next chunk. Without this, the
+/// pre-loaded events sit unprocessed until the next-chunk poll,
+/// which can stall the entire handshake on a chatty bridge that
+/// pauses between events.
 async fn sse_pump<S>(
     mut byte_stream: S,
     initial_leftover: Vec<u8>,
@@ -443,45 +452,68 @@ async fn sse_pump<S>(
 {
     let mut leftover = initial_leftover;
     use futures_util::StreamExt;
+
+    // Drain any pre-loaded events first. This handles the case
+    // where the bridge's first HTTP chunk carries SID + at least
+    // one DATA event together.
+    drain_events(&mut leftover, &inbound).await;
+    if inbound.is_closed() {
+        return;
+    }
+
     while let Some(chunk_res) = byte_stream.next().await {
         let chunk = match chunk_res {
             Ok(c) => c,
             Err(_) => return,
         };
         leftover.extend_from_slice(&chunk);
-        // SSE events end with a blank line (\n\n or \r\n\r\n).
-        loop {
-            let Some(boundary) = find_event_boundary(&leftover) else {
-                break;
+        drain_events(&mut leftover, &inbound).await;
+        if inbound.is_closed() {
+            return;
+        }
+    }
+}
+
+/// Drain every complete SSE event from `leftover` and push each
+/// decoded DRIFT packet onto `inbound`. Returns when there are no
+/// more complete events to drain.
+async fn drain_events(
+    leftover: &mut Vec<u8>,
+    inbound: &tokio::sync::mpsc::Sender<Vec<u8>>,
+) {
+    loop {
+        let Some(boundary) = find_event_boundary(leftover) else {
+            return;
+        };
+        let event_bytes: Vec<u8> = leftover.drain(..boundary.end).collect();
+        let event_str = match std::str::from_utf8(&event_bytes) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for line in event_str.lines() {
+            let payload = match line.strip_prefix("data: ") {
+                Some(p) => p,
+                None => continue,
             };
-            let event_bytes: Vec<u8> = leftover.drain(..boundary.end).collect();
-            // Each event is "data: <payload>\n" (possibly
-            // multi-line, but our server emits single-line
-            // data: payloads). Strip the prefix and \n.
-            let event_str = match std::str::from_utf8(&event_bytes) {
-                Ok(s) => s,
+            // First event is `SID:<hex>` — handled by the
+            // bootstrap path, not here. Subsequent events are
+            // base64-encoded DRIFT packets.
+            if let Some(_sid) = payload.strip_prefix("SID:") {
+                continue;
+            }
+            // Server encodes with STANDARD_NO_PAD (see
+            // `handle_sse` above) — match it. The padding-strict
+            // STANDARD decoder would silently reject every event,
+            // which is exactly the bug this comment exists to
+            // prevent recurring.
+            let bytes = match base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(payload.as_bytes())
+            {
+                Ok(b) => b,
                 Err(_) => continue,
             };
-            for line in event_str.lines() {
-                let payload = match line.strip_prefix("data: ") {
-                    Some(p) => p,
-                    None => continue,
-                };
-                // First event is `SID:<hex>` — handled by the
-                // bootstrap path, not here. Subsequent events
-                // are base64-encoded DRIFT packets.
-                if let Some(_sid) = payload.strip_prefix("SID:") {
-                    continue;
-                }
-                let bytes = match base64::engine::general_purpose::STANDARD
-                    .decode(payload.as_bytes())
-                {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                if inbound.send(bytes).await.is_err() {
-                    return; // receiver dropped
-                }
+            if inbound.send(bytes).await.is_err() {
+                return; // receiver dropped
             }
         }
     }
