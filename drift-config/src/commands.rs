@@ -131,11 +131,13 @@ pub fn peer_ls(config_path: &Path) -> Result<()> {
             h.pubkey.as_str()
         };
         let role_hint = if !h.endpoints.is_empty() {
-            "listener"
+            "direct"
         } else if h.via_bridge.is_some() {
             "bridged"
         } else {
-            "client"
+            // Neither endpoint nor via_bridge — relies on the
+            // inventory's `default_bridge` + federation discovery.
+            "discovery"
         };
         println!("  {} ({})", name, role_hint);
         println!("    pubkey:  {}…", pub_short);

@@ -70,7 +70,13 @@ pub struct KeygenArgs {
 
 #[derive(Subcommand)]
 pub enum PeerCommand {
-    /// Add a peer manually given its pubkey + endpoint(s).
+    /// Add a peer manually. Three valid forms:
+    ///
+    ///   1. `--pubkey HEX --endpoint udp://host:port`  →  direct dial
+    ///   2. `--pubkey HEX --via-bridge BRIDGE_HEX`     →  federation through a known bridge
+    ///   3. `--pubkey HEX` (no endpoint, no via-bridge) →  federation-discovery
+    ///      via the inventory's `default_bridge`. Requires `default_bridge`
+    ///      to be set at the top of drift.toml — see `drift-config init`.
     Add(PeerAddArgs),
     /// List all hosts in the inventory.
     Ls,
@@ -86,6 +92,8 @@ pub struct PeerAddArgs {
     #[arg(long)]
     pub pubkey: String,
     /// One or more DRIFT URLs (e.g. udp://1.2.3.4:51820).
+    /// Optional — omit for federation-discovery mode (case 3 in
+    /// the parent help).
     #[arg(long = "endpoint", short = 'e')]
     pub endpoints: Vec<String>,
     /// Pubkey-hex of the bridge this peer is reachable through.
@@ -94,6 +102,13 @@ pub struct PeerAddArgs {
     /// no need to pass --bridge / --target-bridge on the command
     /// line. The bridge itself must also have an entry in this
     /// inventory with `endpoints`.
+    ///
+    /// Optional. When both `endpoints` and `via_bridge` are
+    /// omitted, the entry becomes a "discovery-only" host: tools
+    /// will dial the inventory's `default_bridge` with the
+    /// UNKNOWN_BRIDGE_PUB sentinel and let the bridge's
+    /// `peer_directory` resolve the route via federation
+    /// discovery. See FEDERATION_DISCOVERY.md for the protocol.
     #[arg(long = "via-bridge")]
     pub via_bridge: Option<String>,
 }
