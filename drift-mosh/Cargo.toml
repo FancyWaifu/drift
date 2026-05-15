@@ -36,6 +36,9 @@ toml = "0.8"
 # Generating fresh client identities when the config dir is
 # empty.
 rand = "0.8"
+# Only used on Unix for `isatty` in the `--exec` stdin-pipe path.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bin]]
 # The user-facing CLI: `drift-mosh user@host`.

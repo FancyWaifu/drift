@@ -23,6 +23,7 @@ use drift::streams::StreamManager;
 use drift::{Direction, Transport, TransportConfig};
 use drift_mosh::{ClientKey, Ctrl, PTY_CHUNK_SIZE};
 use futures_util::StreamExt;
+use rand::RngCore;
 use signal_hook::consts::signal::SIGWINCH;
 use signal_hook_tokio::Signals;
 use std::sync::Arc;
@@ -431,12 +432,49 @@ async fn run() -> Result<()> {
         let mut to_send = cmd.as_bytes().to_vec();
         to_send.push(b'\n');
         pty_stream.send(&to_send).await?;
+
+        // Forward local stdin to the remote shell if stdin is not
+        // a TTY (i.e., piped or redirected). This is what lets
+        // `cat script.sh | drift-mosh-client --exec sh` push a
+        // script as input to the remote command. When local stdin
+        // closes, send Ctrl-D (EOT) so the remote command sees
+        // end-of-input and finishes its own read loop.
+        //
+        // Skipped when stdin is a TTY — a human at the terminal
+        // doesn't have anything useful to pipe through; their
+        // session is interactive (use the no-`--exec` mode for
+        // that).
+        if !is_stdin_tty() {
+            let pty_for_stdin = pty_stream.clone();
+            let stdin_pump = tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 1024];
+                let mut stdin = std::io::stdin().lock();
+                let mut bytes = Vec::with_capacity(4096);
+                while let Ok(n) = stdin.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+                bytes
+            });
+            if let Ok(bytes) = stdin_pump.await {
+                if !bytes.is_empty() {
+                    let _ = pty_for_stdin.send(&bytes).await;
+                }
+            }
+            // Newline before Ctrl-D so any unterminated line
+            // flushes to the remote command first.
+            let _ = pty_for_stdin.send(b"\n\x04").await;
+        }
+
         // Brief pause so the shell processes the command before
         // we send `exit`. Without this, on some shells the two
         // lines can get clobbered if they arrive in the same
         // read syscall.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        pty_stream.send(b"exit\n").await?;
+        let _ = pty_stream.send(b"exit\n").await;
 
         // Drain pty output to stdout until quiet period elapses
         // or stream closes.
@@ -873,6 +911,37 @@ fn decode_hex32(s: &str) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+/// True if local stdin is connected to a terminal. We use this in
+/// `--exec` mode to decide whether to pipe stdin through to the
+/// remote shell — if a human is sitting at a tty there's nothing
+/// useful to pipe, but if it's a file/pipe redirect the user wants
+/// that as input to the remote command.
+fn is_stdin_tty() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: isatty is always safe; checks one int fd.
+        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms we conservatively assume it IS a
+        // tty so we don't try to read input that isn't there.
+        true
+    }
+}
+
+/// Naive substring search — `haystack.windows(n).position(...)`.
+/// Used to spot the sentinel in the prelude buffer. The buffer
+/// stays small (a few hundred bytes) so O(n*m) is fine.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }
 
 fn parse_session_id(opt: Option<&str>) -> Result<[u8; 16]> {
