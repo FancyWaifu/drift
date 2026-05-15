@@ -64,7 +64,7 @@ data-encoding = "2"
 # HTTP client for the `doh://` adapter (DRIFT-over-DoH-over-Cloudflare-
 # Worker). rustls feature so we don't pull in OpenSSL; gzip off
 # because DRIFT bodies are already AEAD ciphertext (incompressible).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream"] }
 # SHA-256 for the `fed-pipe` example (file-transfer integrity).
 sha2 = "0.10"
 # TLS-shaped DRIFT transport (`tls://...`). The wire is plain
