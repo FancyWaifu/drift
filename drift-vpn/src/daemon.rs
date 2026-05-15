@@ -96,6 +96,53 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
     #[cfg(not(target_os = "linux"))]
     let _ = &tun_name; // silence unused-var on non-Linux
 
+    // macOS: the `tun` crate creates a utun device as a
+    // point-to-point link, and macOS picks a bogus default
+    // destination (we observed `10.0.0.255` for a 10.99.0.2/24
+    // address — not the subnet's broadcast OR a sensible peer).
+    // The result is no kernel route for the configured subnet,
+    // so packets to peer IPs fall back to the default gateway
+    // and get dropped before they reach our TUN.
+    //
+    // Add the subnet route explicitly. On Linux this is done
+    // automatically by the kernel when the TUN's address has a
+    // prefix > 0.
+    #[cfg(target_os = "macos")]
+    {
+        let subnet = match cfg.interface.address {
+            ipnet::IpNet::V4(n) => n.network().to_string(),
+            ipnet::IpNet::V6(_) => unreachable!("v6 rejected above"),
+        };
+        let prefix = cfg.interface.address.prefix_len();
+        let cidr = format!("{}/{}", subnet, prefix);
+        let status = std::process::Command::new("route")
+            .args(["add", "-net", &cidr, "-interface", &tun_name])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                info!(
+                    cidr = %cidr,
+                    iface = %tun_name,
+                    "added subnet route (macOS workaround for utun default destination)"
+                );
+            }
+            Ok(s) => {
+                warn!(
+                    cidr = %cidr,
+                    iface = %tun_name,
+                    code = ?s.code(),
+                    "route add exited non-zero; tunnel may not receive traffic"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "failed to run route(8); tunnel may not receive traffic"
+                );
+            }
+        }
+    }
+
     // 2. DRIFT transport. v0.2 supports multiple `listen` URLs
     //    so one daemon serves clients on whichever wire works
     //    for their network. The first URL becomes the primary
@@ -532,6 +579,24 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
                     continue;
                 }
             };
+            // macOS utun prepends a 4-byte address-family header
+            // (0x00000002 for AF_INET, 0x0000001E for AF_INET6)
+            // to every packet. Linux tun devices don't. Strip
+            // the prefix on macOS so the IP parser sees a real
+            // IP packet starting with the version nibble.
+            //
+            // We also need to re-prepend the header on the
+            // RETURN path (drift → tun) so the macOS kernel
+            // accepts the packet — handled in the d2t_writer
+            // loop below.
+            #[cfg(target_os = "macos")]
+            let pkt = if n >= 4 {
+                &buf[4..n]
+            } else {
+                debug!(n, "utun read too short to contain BSD framing");
+                continue;
+            };
+            #[cfg(not(target_os = "macos"))]
             let pkt = &buf[..n];
             let (_, dst) = match parse_endpoints(pkt) {
                 Ok(p) => p,
@@ -695,7 +760,38 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
                     continue;
                 }
             }
-            match tun_w.write_all(&recv.payload).await {
+            // macOS utun expects the same 4-byte BSD framing
+            // prefix on writes as it produces on reads. Drift
+            // sees the inner IP packet (we stripped the prefix
+            // in the t2d loop); we re-prepend AF_INET / AF_INET6
+            // here based on the IP version nibble before
+            // handing it to the kernel.
+            //
+            // Linux tun devices don't need this — write the raw
+            // IP packet.
+            #[cfg(target_os = "macos")]
+            let write_result = {
+                if recv.payload.is_empty() {
+                    Ok(())
+                } else {
+                    let version = recv.payload[0] >> 4;
+                    let af: [u8; 4] = match version {
+                        4 => [0x00, 0x00, 0x00, 0x02], // AF_INET
+                        6 => [0x00, 0x00, 0x00, 0x1E], // AF_INET6
+                        _ => {
+                            debug!(version, "drop inbound with unknown IP version");
+                            continue;
+                        }
+                    };
+                    let mut framed = Vec::with_capacity(4 + recv.payload.len());
+                    framed.extend_from_slice(&af);
+                    framed.extend_from_slice(&recv.payload);
+                    tun_w.write_all(&framed).await
+                }
+            };
+            #[cfg(not(target_os = "macos"))]
+            let write_result = tun_w.write_all(&recv.payload).await;
+            match write_result {
                 Ok(_) => {
                     metrics_recv.tun_writes.fetch_add(1, Relaxed);
                     metrics_recv
