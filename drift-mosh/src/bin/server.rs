@@ -702,6 +702,26 @@ async fn session_worker(
     let _ = resize_cancel_tx.send(());
     let master_back = resize_task.await.ok();
 
+    // If the remote shell exited (pty hit EOF), the session is
+    // semantically OVER — there's nothing for a future reattach
+    // to attach to. Explicitly close the streams so the client's
+    // recv loops see EOF and exit cleanly instead of hanging on
+    // a session that will never produce more output. SSH does
+    // this naturally because the channel is tied to the shell
+    // process; drift-mosh's "session survives reconnects" model
+    // means we have to be explicit about which detach reasons
+    // are terminal vs reattachable.
+    //
+    // Reasons we keep the streams open (for reattach):
+    //   - `bye` — operator-initiated detach (laptop suspend etc.)
+    //   - `send_fail` / `pty_stream_recv_none` / `ctrl_recv_none`
+    //     / `channel_closed` — transient network blip
+    //   - `evicted_by_new_worker` — a fresh client attach took over
+    if reason == "pty_eof" {
+        let _ = pty_stream.close().await;
+        let _ = ctrl_stream.close().await;
+    }
+
     session.attached.store(false, std::sync::atomic::Ordering::Release);
     session.last_detached = Some(Instant::now());
     if let Some(m) = master_back {
