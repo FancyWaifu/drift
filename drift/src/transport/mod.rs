@@ -24,14 +24,15 @@ const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 #[cfg(unix)]
 pub(crate) mod batch;
 mod cookies;
-mod dp_bloom;
+pub mod dp_bloom;
 mod federated;
 mod find_peer;
 pub use federated::{
-    build as build_federated, build_directory, build_directory_v3, build_ticket, decode_ticket,
-    encode_ticket, parse as parse_federated, parse_directory, parse_directory_v3,
-    ticket_signed_msg, verify_ticket, FederatedEnvelope, PresenceTicket, FED_HEADER_LEN,
-    MAX_ANNOUNCE_HOPS, MAX_DIRECTORY_ENTRIES, TICKET_LEN, UNKNOWN_BRIDGE_PUB,
+    build as build_federated, build_directory, build_directory_v3, build_directory_v4,
+    build_ticket, decode_ticket, encode_ticket, parse as parse_federated, parse_directory,
+    parse_directory_v3, parse_directory_v4, ticket_signed_msg, verify_ticket, FederatedEnvelope,
+    PresenceTicket, FED_HEADER_LEN, MAX_ANNOUNCE_HOPS, MAX_DIRECTORY_ENTRIES,
+    MAX_DIRECTORY_ENTRIES_V4, TICKET_LEN, UNKNOWN_BRIDGE_PUB,
 };
 pub use find_peer::{
     build_find_peer, build_find_peer_hashed, build_peer_gone, build_peer_here, hash_target_pub,
@@ -175,6 +176,30 @@ pub struct TransportConfig {
     /// 0.20+ = strong noise / many decoy queries / strong
     /// membership obfuscation.
     pub bloom_announce_noise: Option<f64>,
+
+    /// Phase F: cover-traffic rate in queries-per-second.
+    /// When `Some(r)`, a background task emits fire-and-forget
+    /// `FindPeer` queries with random decoy target pubkeys at
+    /// Poisson-distributed intervals with mean `1 / r`. The
+    /// decoys are indistinguishable on-the-wire from real
+    /// queries — a passive observer correlating timing with
+    /// user activity sees noise floor that smothers real
+    /// query patterns.
+    ///
+    /// Suggested values:
+    /// - `None`: no cover traffic (Phase A behavior).
+    /// - `Some(0.1)`: ~1 decoy every 10s. Cheap, defeats
+    ///   coarse-grained traffic analysis.
+    /// - `Some(1.0)`: 1 decoy per second. Stronger noise,
+    ///   ~real-query-pace cover.
+    /// - `Some(5.0+)`: aggressive — drowns most usage patterns
+    ///   in noise, at meaningful bandwidth cost.
+    ///
+    /// Honors `find_peer_mode`: in `OriginateHashed` mode,
+    /// decoys use `FindPeerHashed` (so even the on-the-wire
+    /// shape matches real privacy-mode queries). In
+    /// `Disabled` mode, no cover traffic emits.
+    pub cover_traffic_rate_hz: Option<f64>,
 }
 
 /// Discovery-layer posture for a `Transport`. Default is `Open`
@@ -243,6 +268,7 @@ impl Default for TransportConfig {
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
+            cover_traffic_rate_hz: None,
         }
     }
 }
@@ -274,6 +300,7 @@ impl TransportConfig {
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
+            cover_traffic_rate_hz: None,
         }
     }
 
@@ -302,6 +329,7 @@ impl TransportConfig {
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
+            cover_traffic_rate_hz: None,
         }
     }
 }
@@ -631,6 +659,20 @@ pub(crate) struct Inner {
     pub(crate) peer_bloom_filters:
         Arc<StdMutex<StdHashMap<PeerId, dp_bloom::DpBloomFilter>>>,
 
+    /// Phase F.8: per-federation-peer soft-fault counter. A
+    /// fault is recorded when a `pending_find` times out and
+    /// the bridge's bloom filter had claimed (via `contains`
+    /// returning true) that it could answer. The counter is
+    /// reset on a successful `PeerHere` from that bridge.
+    ///
+    /// v1 is observe-only: high fault counts log a warning
+    /// but DON'T auto-demote from `federation_table`. The
+    /// signal is for operator-side investigation; auto-action
+    /// would need more data before becoming hard policy
+    /// (false positives from bloom + intermittent latency
+    /// would erroneously punish honest bridges).
+    pub(crate) bridge_faults: Arc<StdMutex<StdHashMap<PeerId, u32>>>,
+
     /// Per-client presence tickets received via `PresenceTicket`
     /// packets. Keyed by the client's static pubkey (the
     /// session-authenticated sender, NOT anything the packet
@@ -716,6 +758,16 @@ pub(crate) struct PendingFind {
     /// once the lookup resolves. Stored as opaque bytes so the
     /// hot path (handle_peer_here) doesn't have to re-parse.
     pub(crate) waiters: Vec<Vec<u8>>,
+    /// Phase F.8: federation peers whose v4 bloom filter said
+    /// "yes, I have the target" — these are the bridges we
+    /// asked. If the pending_find times out without a PeerHere,
+    /// the GC loop increments `bridge_faults` for each of these
+    /// peers (they advertised something they didn't deliver).
+    /// Bridges with no filter on file (queried unconditionally
+    /// per back-compat) are NOT in this list — we don't fault
+    /// a bridge for not answering a query it never claimed it
+    /// could answer.
+    pub(crate) claimed_by: Vec<PeerId>,
 }
 
 /// One-emission-per-window throttle, accumulating a suppressed
@@ -902,6 +954,7 @@ impl Transport {
             peer_directory_hops: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_directory_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_bloom_filters: Arc::new(StdMutex::new(StdHashMap::new())),
+            bridge_faults: Arc::new(StdMutex::new(StdHashMap::new())),
             presence_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
             pending_finds: Arc::new(StdMutex::new(StdHashMap::new())),
             recent_queries: Arc::new(StdMutex::new(StdHashMap::new())),
@@ -959,6 +1012,16 @@ impl Transport {
         // see `run_find_peer_gc_loop`.
         let gc_bg = inner.clone();
         tasks.push(tokio::spawn(async move { gc_bg.run_find_peer_gc_loop().await }));
+
+        // Phase F: cover-traffic decoy queries. Only spawned
+        // when the operator opts in via
+        // `TransportConfig::cover_traffic_rate_hz`.
+        if inner.config.cover_traffic_rate_hz.is_some() {
+            let cover_bg = inner.clone();
+            tasks.push(tokio::spawn(async move {
+                cover_bg.run_cover_traffic_loop().await
+            }));
+        }
 
         // Cookie rotation only matters when the cookie path can be
         // reached. Skip spawning the loop entirely in the default
@@ -2051,6 +2114,27 @@ impl Transport {
     /// Number of "not found" entries currently cached. Used by
     /// Phase A integration tests to verify negative-cache behavior.
     #[doc(hidden)]
+    /// Number of recently-seen FindPeer query_ids. Phase F
+    /// cover-traffic test asserts this populates as decoys
+    /// arrive at recipient bridges.
+    #[doc(hidden)]
+    pub fn recent_queries_count(&self) -> usize {
+        self.inner.recent_queries.lock().unwrap().len()
+    }
+
+    /// Phase F.8: fault counter for a specific federation
+    /// peer. Returns 0 if no faults have been recorded.
+    #[doc(hidden)]
+    pub fn bridge_fault_count(&self, peer: &PeerId) -> u32 {
+        self.inner
+            .bridge_faults
+            .lock()
+            .unwrap()
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn neg_cache_count(&self) -> usize {
         self.inner.neg_cache.lock().unwrap().len()
     }
@@ -3501,6 +3585,7 @@ impl Inner {
                             query_id: qid,
                             started_at: now_inst,
                             waiters: vec![waiter_bytes],
+                            claimed_by: Vec::new(),
                         };
                         (true, qid)
                     }
@@ -3517,6 +3602,7 @@ impl Inner {
                             query_id: qid,
                             started_at: now_inst,
                             waiters: vec![waiter_bytes],
+                            claimed_by: Vec::new(), // populated from fanout below
                         },
                     );
                     (true, qid)
@@ -3589,6 +3675,31 @@ impl Inner {
                         .unwrap()
                         .remove(&env.target_client_pub);
                     return Ok(None);
+                }
+
+                // Phase F.8: record which bridges' filters
+                // CLAIMED to have the target (filter said yes
+                // AND we have a filter on file). Bridges queried
+                // unconditionally (no filter) are NOT recorded as
+                // claimants — we only fault a bridge for failing
+                // a claim it actually made.
+                let claimants: Vec<PeerId> = {
+                    let bf = self.peer_bloom_filters.lock().unwrap();
+                    fed_peers
+                        .iter()
+                        .copied()
+                        .filter(|pid| {
+                            bf.get(pid)
+                                .map(|f| f.contains(&env.target_client_pub))
+                                .unwrap_or(false)
+                        })
+                        .collect()
+                };
+                if !claimants.is_empty() {
+                    let mut pending = self.pending_finds.lock().unwrap();
+                    if let Some(entry) = pending.get_mut(&env.target_client_pub) {
+                        entry.claimed_by = claimants;
+                    }
                 }
                 let (payload, pkt_type, mode_label) = if matches!(
                     self.config.effective_find_peer_mode(),
@@ -4448,6 +4559,13 @@ impl Inner {
             );
         }
 
+        // Phase F.8: a successful PeerHere from this bridge
+        // means it actually delivered on whatever it had
+        // claimed. Reset its fault counter so an honest bridge
+        // that previously timed out on one query (network blip,
+        // not malicious) doesn't accumulate stale blame.
+        self.bridge_faults.lock().unwrap().remove(&peer_id);
+
         // Phase B: distinguish "we originated" from "we forwarded".
         // pending_finds has an entry iff we issued the original
         // FindPeer; forwarded_queries has an entry iff we forwarded
@@ -4678,11 +4796,43 @@ impl Inner {
             let now = std::time::Instant::now();
             let pf_dead = std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS);
             let mut pf_purged = 0usize;
+            // Phase F.8: when reaping expired pending_finds,
+            // fault each claimant bridge (the bridge advertised
+            // it could answer the query but didn't deliver).
+            // Collect first, mutate `bridge_faults` after we
+            // drop the pending_finds lock — avoids holding two
+            // mutexes at once.
+            let mut fault_blame: Vec<PeerId> = Vec::new();
             {
                 let mut pf = self.pending_finds.lock().unwrap();
                 let before = pf.len();
-                pf.retain(|_, p| now.duration_since(p.started_at) < pf_dead);
+                pf.retain(|_, p| {
+                    let alive = now.duration_since(p.started_at) < pf_dead;
+                    if !alive {
+                        fault_blame.extend(p.claimed_by.iter().copied());
+                    }
+                    alive
+                });
                 pf_purged = before.saturating_sub(pf.len());
+            }
+            if !fault_blame.is_empty() {
+                let mut faults = self.bridge_faults.lock().unwrap();
+                for pid in fault_blame {
+                    let counter = faults.entry(pid).or_insert(0);
+                    *counter += 1;
+                    if *counter == 5 || *counter == 25 || *counter % 100 == 0 {
+                        // Log at meaningful inflection points
+                        // rather than every fault. Doesn't
+                        // demote — observe-only in v1.
+                        tracing::warn!(
+                            ?pid,
+                            faults = *counter,
+                            "federation peer accumulated repeated bloom-claim faults — \
+                             check whether this bridge is honest (advertised pubkeys \
+                             it can't actually deliver) or unreliable"
+                        );
+                    }
+                }
             }
             // recent_queries values are `Instant` deadlines.
             let mut rq_purged = 0usize;
@@ -4723,6 +4873,128 @@ impl Inner {
                     "find_peer GC: swept expired entries"
                 );
             }
+        }
+    }
+
+    /// Phase F: cover-traffic loop. Emits fire-and-forget
+    /// `FindPeer` (or `FindPeerHashed`, depending on mode)
+    /// queries with random decoy targets at Poisson-distributed
+    /// intervals. The decoys are indistinguishable on-the-wire
+    /// from real queries — a passive observer correlating
+    /// query timing with user activity sees a noise floor that
+    /// makes real query patterns much harder to extract.
+    ///
+    /// Decoys do NOT touch `pending_finds`. They're emitted as
+    /// raw `send_typed` calls with a one-shot query_id; whether
+    /// or not a `PeerHere` ever arrives, no waiter queue is
+    /// drained. This keeps the cover-traffic state cost flat
+    /// (independent of emit rate).
+    pub(crate) async fn run_cover_traffic_loop(self: std::sync::Arc<Self>) {
+        let rate = match self.config.cover_traffic_rate_hz {
+            Some(r) if r > 0.0 => r,
+            _ => return,
+        };
+        // Exponential waits give Poisson process arrivals. The
+        // mean inter-arrival time is 1/rate seconds.
+        loop {
+            // Sample wait ~ Exp(rate). For uniform U in (0,1],
+            // wait = -ln(U) / rate.
+            let wait_secs: f64 = {
+                use rand::Rng;
+                let u: f64 = rand::thread_rng().gen_range(1e-12..1.0_f64);
+                -u.ln() / rate
+            };
+            tokio::time::sleep(std::time::Duration::from_secs_f64(wait_secs)).await;
+
+            // Skip the emit if discovery is disabled entirely.
+            if matches!(
+                self.config.effective_find_peer_mode(),
+                FindPeerMode::Disabled
+            ) {
+                continue;
+            }
+            self.emit_cover_query().await;
+        }
+    }
+
+    /// Emit one decoy query. Picks a random federation peer
+    /// (refusing to fire if there are none — nothing to send
+    /// noise to). Generates a random 32-byte target and a fresh
+    /// query_id. Honors the configured FindPeerMode: in
+    /// `OriginateHashed` mode emits `FindPeerHashed` so even the
+    /// wire shape matches real privacy-mode queries.
+    async fn emit_cover_query(&self) {
+        let fed_peers: Vec<PeerId> = self
+            .federation_table
+            .lock()
+            .unwrap()
+            .values()
+            .copied()
+            .collect();
+        if fed_peers.is_empty() {
+            return;
+        }
+        // Pick one random federation peer per decoy. A decoy
+        // sent to ALL peers would be a giveaway — real queries
+        // are filtered through blooms and typically reach only
+        // a subset. Sending to one peer keeps the decoy's
+        // fan-out pattern statistically similar.
+        let peer_idx: usize = {
+            use rand::Rng;
+            rand::thread_rng().gen_range(0..fed_peers.len())
+        };
+        let peer = fed_peers[peer_idx];
+
+        let our_pub = self.identity.public_bytes();
+        let mut decoy_target = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut decoy_target);
+        let mut qid_bytes = [0u8; 8];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut qid_bytes);
+        let query_id = u64::from_be_bytes(qid_bytes);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let (payload, pkt_type) = if matches!(
+            self.config.effective_find_peer_mode(),
+            FindPeerMode::OriginateHashed
+        ) {
+            let mut salt = [0u8; find_peer::FIND_PEER_HASHED_SALT_LEN];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+            let target_hash = find_peer::hash_target_pub(&decoy_target, &salt);
+            let q = find_peer::FindPeerHashed {
+                salt,
+                target_hash,
+                query_id,
+                ttl: find_peer::MAX_FIND_TTL,
+                originator_bridge: our_pub,
+                originator_query_at_ms: now_ms,
+            };
+            (
+                find_peer::build_find_peer_hashed(&q),
+                PacketType::FindPeerHashed,
+            )
+        } else {
+            let q = find_peer::FindPeer {
+                target_client_pub: decoy_target,
+                query_id,
+                ttl: find_peer::MAX_FIND_TTL,
+                originator_bridge: our_pub,
+                originator_query_at_ms: now_ms,
+            };
+            (find_peer::build_find_peer(&q), PacketType::FindPeer)
+        };
+
+        if let Err(e) = self.send_typed(&peer, pkt_type, &payload).await {
+            // Silent at debug level — cover traffic failures
+            // are not user-visible and don't affect real query
+            // behavior.
+            debug!(
+                error = %e,
+                ?peer,
+                "cover traffic: emit failed (non-fatal)"
+            );
         }
     }
 

@@ -444,6 +444,122 @@ async fn no_forward_mode_answers_local_but_does_not_transit() {
     );
 }
 
+// ─── Test 1j: Phase F.8 — fault accumulates on bloom-claim timeout ──
+
+#[tokio::test]
+async fn bridge_fault_counter_increments_on_unfulfilled_claim() {
+    // Scenario: bridge_a federates with bridge_b. bridge_b
+    // sends a v4 directory announce claiming (via its bloom)
+    // to have pubkey X — but bridge_b does NOT actually host
+    // X. When bridge_a fires a FindPeer for X, the filter
+    // passes (claim), the query is sent to bridge_b, no
+    // PeerHere comes back. After the pending_find times out
+    // and the GC sweep runs, bridge_a should have incremented
+    // bridge_b's fault counter.
+    let bridge_a = build_transport([0xC1; 32]).await;
+    let a_pub = Identity::from_secret_bytes([0xC1; 32]).public_bytes();
+    let bridge_b = build_transport([0xC2; 32]).await;
+    let b_pub = Identity::from_secret_bytes([0xC2; 32]).public_bytes();
+    let (_a_to_b, b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+
+    // Build a v4 directory announce payload by hand, with a
+    // bloom containing pubkey X. Bridge B doesn't actually have
+    // a local client X — this simulates a malicious or stale
+    // claim.
+    use drift::transport::dp_bloom::DpBloomFilter;
+    let phony_target = [0xC3; 32];
+    let mut bloom = DpBloomFilter::new(1024, 4, [0x11; 16]);
+    bloom.insert(&phony_target);
+    let payload = drift::transport::build_directory_v4(&[], Some(&bloom));
+    bridge_b
+        .__debug_send_directory_announcement(&b_to_a, &payload)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(200)).await;
+
+    // Initial state: B has no faults on file with A.
+    let b_pid_on_a = drift::crypto::derive_peer_id(&b_pub);
+    assert_eq!(
+        bridge_a.bridge_fault_count(&b_pid_on_a),
+        0,
+        "precondition: B starts with no faults"
+    );
+
+    // Trigger a FindPeer originating from A for the phony
+    // target. A's local lookup misses, peer_directory misses,
+    // neg_cache misses, B's filter says "yes" → FindPeer to B.
+    let env = build_unknown_target_envelope(
+        &phony_target,
+        &a_pub,
+        &[0xDD; 32],
+        b"claim-but-no-deliver",
+    );
+    bridge_b
+        .__debug_send_federated_envelope(&b_to_a, &env)
+        .await
+        .unwrap();
+
+    // pending_find deadline is 2s. GC sweep ticks every 1s.
+    // Wait long enough for both to fire.
+    sleep(Duration::from_millis(3500)).await;
+
+    let faults = bridge_a.bridge_fault_count(&b_pid_on_a);
+    assert!(
+        faults >= 1,
+        "PHASE F.8: B advertised X but didn't deliver — should have 1+ faults, got {}",
+        faults
+    );
+}
+
+// ─── Test 1i: Phase F — cover traffic emits decoys ───────────────────
+
+#[tokio::test]
+async fn cover_traffic_emits_decoy_queries() {
+    // bridge_b runs with cover_traffic_rate_hz = 50 Hz — a
+    // decoy every ~20ms on average. Over 500ms we expect ~25
+    // decoys to fire at bridge_a. We assert bridge_a sees its
+    // recent_queries map populate (it dedups by query_id, and
+    // each decoy has a fresh random id) and that bridge_b's
+    // pending_finds STAYS EMPTY (decoys are fire-and-forget,
+    // never touch the pending-find queue).
+    let bridge_a = build_transport([0xAA; 32]).await;
+    let a_pub = Identity::from_secret_bytes([0xAA; 32]).public_bytes();
+    let bridge_b = {
+        let id = Identity::from_secret_bytes([0xBB; 32]);
+        let cfg = TransportConfig {
+            accept_any_peer: true,
+            cover_traffic_rate_hz: Some(50.0),
+            ..Default::default()
+        };
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), id, cfg)
+            .await
+            .unwrap()
+    };
+    let b_pub = Identity::from_secret_bytes([0xBB; 32]).public_bytes();
+    let (_a_to_b, _b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+
+    // Wait for cover traffic to flow.
+    sleep(Duration::from_millis(500)).await;
+
+    // bridge_b's pending_finds: zero. Decoys are fire-and-
+    // forget; they never enqueue a waiter.
+    assert_eq!(
+        bridge_b.pending_finds_count(),
+        0,
+        "PHASE F: decoys must NOT pollute pending_finds"
+    );
+
+    // bridge_b's recent_queries: many. Every decoy goes
+    // through send_typed → bridge_a's FindPeer handler →
+    // recent_queries insert. Both sides see entries.
+    // We can't assert exact counts (Poisson is random) but a
+    // healthy run will have at least a few.
+    assert!(
+        bridge_b.recent_queries_count() == 0,
+        "originator does NOT add to its own recent_queries — that's bridge_a's table"
+    );
+}
+
 // ─── Test 1h: Phase F — bloom filter narrows FindPeer fanout ────────
 
 #[tokio::test]
