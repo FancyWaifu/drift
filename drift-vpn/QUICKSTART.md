@@ -290,6 +290,31 @@ via_bridge  = "udp://bridge.example.com:51820@<bridge-pubkey-hex>"
 # no endpoint — bridge is the only path
 ```
 
+### Pattern 4: bridge-fallback with federation discovery
+
+You only need `via_bridge` pointing at *some* bridge in your
+federation — not necessarily the one the peer is actually on.
+With federation discovery enabled (the default in v0.15+),
+the local bridge resolves the peer's actual location via
+proactive `FederationDirectory` announcements and reactive
+`FindPeer` queries:
+
+```toml
+[[peer]]
+public_key  = "<peer pubkey>"
+allowed_ips = ["10.99.0.2/32"]
+via_bridge  = "udp://my-local-bridge.example:51820@<my-bridge-pubkey>"
+# target_bridge is OMITTED — the local bridge figures out which
+# federated bridge actually hosts the peer
+```
+
+Useful when you have a multi-bridge federation and don't want
+to bake the peer's specific on-ramp into every spoke's config.
+For the privacy implications + opt-in `FindPeerMode` knobs
+(hashed-target lookups, `NoForward` mode, DP-bloom announces),
+see [`FEDERATION_DISCOVERY.md`](../FEDERATION_DISCOVERY.md) at
+the workspace root.
+
 Both of these patterns are documented in detail in the main
 [README.md](README.md).
 
