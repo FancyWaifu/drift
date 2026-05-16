@@ -245,16 +245,27 @@ const DIRECTORY_VERSION_V2: u8 = 2;
 /// — the previous version is upgrade-equivalent. v2 receivers
 /// reject v3 (silent drop, expected during rolling upgrade).
 const DIRECTORY_VERSION_V3: u8 = 3;
+/// Phase F. v4 appends an optional DP-noised bloom filter
+/// section after the v3-shaped entries. v4 receivers accept
+/// v3 and v2 (treating each older entry as hops=0 and the
+/// filter as absent). v3-and-older receivers reject v4
+/// (silent drop, expected during rolling upgrade).
+const DIRECTORY_VERSION_V4: u8 = 4;
 /// Back-compat alias — old call sites assume v2. Kept around to
 /// avoid touching every test that hard-codes version 2.
 const DIRECTORY_VERSION: u8 = DIRECTORY_VERSION_V2;
 const DIRECTORY_ENTRY_LEN: usize = 32 + TICKET_LEN;
-/// v3 entry: client_pub (32) + ticket (96) + hops (1) = 129 bytes.
+/// v3+ entry: client_pub (32) + ticket (96) + hops (1) = 129 bytes.
 const DIRECTORY_ENTRY_V3_LEN: usize = 32 + TICKET_LEN + 1;
-/// Maximum entries per directory packet. Sized so that
-/// `DIRECTORY_HEADER_LEN + MAX_DIRECTORY_ENTRIES * 129` fits
-/// comfortably under MAX_PAYLOAD (10 * 129 + 4 = 1294 bytes).
+/// Maximum entries per directory packet (v2/v3 default and v4
+/// without a bloom). Sized so that `DIRECTORY_HEADER_LEN +
+/// MAX_DIRECTORY_ENTRIES * 129` fits comfortably under
+/// MAX_PAYLOAD (10 * 129 + 4 = 1294 bytes).
 pub const MAX_DIRECTORY_ENTRIES: usize = 10;
+/// v4-with-bloom entry cap. Drops to 8 to leave room for the
+/// ~150-byte bloom-filter section (128 bytes filter + ~20
+/// metadata). 8 * 129 + 4 + 150 ≈ 1186 bytes < MAX_PAYLOAD.
+pub const MAX_DIRECTORY_ENTRIES_V4: usize = 8;
 
 /// Maximum hop count a re-announced directory entry may carry.
 /// Caps the radius of proactive propagation; reactive `FindPeer`
@@ -352,6 +363,152 @@ pub fn parse_directory_v3(
         out.push((p, ticket, hops));
     }
     Ok(out)
+}
+
+// ─── FederationDirectory v4 (Phase F — DP bloom filter) ──────────
+//
+// v4 is v3 with an optional bloom filter section appended:
+//
+// ```text
+//   [0]            version (u8) = 4
+//   [1]            reserved (u8) = 0
+//   [2..4]         count (u16 BE) — direct entries, each 129 bytes
+//   [4..N]         entries (count × 129 bytes, v3-shaped)
+//   [N..N+2]       filter_bytes_len (u16 BE) — length of the bloom bits
+//   [N+2..M]       bloom_bytes (filter_bytes_len bytes)
+//   [M]            k (u8) — number of hash functions
+//   [M+1..M+1+16]  salt (BLOOM_SALT_LEN bytes)
+// ```
+//
+// `filter_bytes_len == 0` means "no bloom on this announce"
+// (signal-equivalent to a v3 packet, but still labelled v4 so
+// receivers know the sender is on this protocol version).
+
+use crate::transport::dp_bloom::{DpBloomFilter, BLOOM_SALT_LEN};
+
+/// Build a v4 directory payload from (pubkey, ticket, hops)
+/// triples + an optional bloom filter.
+///
+/// Cap on direct entries when a bloom is included:
+/// `MAX_DIRECTORY_ENTRIES_V4` (8) — leaves room for a
+/// ~150-byte bloom under MAX_PAYLOAD. Callers MUST observe
+/// the cap; the function will panic in debug builds otherwise.
+pub fn build_directory_v4(
+    entries: &[([u8; 32], PresenceTicket, u8)],
+    bloom: Option<&DpBloomFilter>,
+) -> Vec<u8> {
+    debug_assert!(
+        if bloom.is_some() {
+            entries.len() <= MAX_DIRECTORY_ENTRIES_V4
+        } else {
+            entries.len() <= MAX_DIRECTORY_ENTRIES
+        },
+        "v4 chunk too large: {} entries with bloom={}",
+        entries.len(),
+        bloom.is_some()
+    );
+    let bloom_bytes_len = bloom.map(|b| b.bits.len()).unwrap_or(0);
+    let bloom_metadata = if bloom.is_some() { 2 + 1 + BLOOM_SALT_LEN } else { 2 };
+    let count = entries.len() as u16;
+    let mut out = Vec::with_capacity(
+        DIRECTORY_HEADER_LEN
+            + entries.len() * DIRECTORY_ENTRY_V3_LEN
+            + bloom_metadata
+            + bloom_bytes_len,
+    );
+    out.push(DIRECTORY_VERSION_V4);
+    out.push(0); // reserved
+    out.extend_from_slice(&count.to_be_bytes());
+    for (pubkey, ticket, hops) in entries {
+        out.extend_from_slice(pubkey);
+        out.extend_from_slice(&encode_ticket(ticket));
+        out.push(*hops);
+    }
+    // Bloom section.
+    let len = bloom_bytes_len as u16;
+    out.extend_from_slice(&len.to_be_bytes());
+    if let Some(b) = bloom {
+        out.extend_from_slice(&b.bits);
+        out.push(b.k);
+        out.extend_from_slice(&b.salt);
+    }
+    out
+}
+
+/// Parse a directory payload (v2, v3, or v4). Returns the
+/// entries plus the optional bloom filter on v4.
+///
+/// v2 entries are returned as hops=0 (same as `parse_directory_v3`).
+/// v4 with `filter_bytes_len == 0` returns `None` for the filter.
+pub fn parse_directory_v4(
+    bytes: &[u8],
+) -> Result<(Vec<([u8; 32], PresenceTicket, u8)>, Option<DpBloomFilter>), DriftError> {
+    if bytes.len() < DIRECTORY_HEADER_LEN {
+        return Err(DriftError::DecodeError);
+    }
+    let version = bytes[0];
+    if bytes[1] != 0 {
+        return Err(DriftError::DecodeError);
+    }
+    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    match version {
+        DIRECTORY_VERSION_V2 | DIRECTORY_VERSION_V3 => {
+            // Delegate to v3 parser (which already accepts v2).
+            let entries = parse_directory_v3(bytes)?;
+            Ok((entries, None))
+        }
+        DIRECTORY_VERSION_V4 => {
+            let entries_end = DIRECTORY_HEADER_LEN + count * DIRECTORY_ENTRY_V3_LEN;
+            if bytes.len() < entries_end + 2 {
+                return Err(DriftError::DecodeError);
+            }
+            let mut entries = Vec::with_capacity(count);
+            for i in 0..count {
+                let off = DIRECTORY_HEADER_LEN + i * DIRECTORY_ENTRY_V3_LEN;
+                let mut p = [0u8; 32];
+                p.copy_from_slice(&bytes[off..off + 32]);
+                let ticket = decode_ticket(&bytes[off + 32..off + 32 + TICKET_LEN])?;
+                let hops = bytes[off + 32 + TICKET_LEN];
+                entries.push((p, ticket, hops));
+            }
+            let filter_bytes_len =
+                u16::from_be_bytes([bytes[entries_end], bytes[entries_end + 1]]) as usize;
+            if filter_bytes_len == 0 {
+                if bytes.len() != entries_end + 2 {
+                    return Err(DriftError::DecodeError);
+                }
+                return Ok((entries, None));
+            }
+            let expected =
+                entries_end + 2 + filter_bytes_len + 1 + BLOOM_SALT_LEN;
+            if bytes.len() != expected {
+                return Err(DriftError::DecodeError);
+            }
+            let bits_start = entries_end + 2;
+            let bits = bytes[bits_start..bits_start + filter_bytes_len].to_vec();
+            let k = bytes[bits_start + filter_bytes_len];
+            let mut salt = [0u8; BLOOM_SALT_LEN];
+            salt.copy_from_slice(
+                &bytes[bits_start + filter_bytes_len + 1..bits_start + filter_bytes_len + 1 + BLOOM_SALT_LEN],
+            );
+            // Sanity: m must be at most bits.len() * 8 and > 0.
+            let m_bytes = filter_bytes_len;
+            let m_bits = (m_bytes * 8) as u16;
+            if m_bits == 0 || k == 0 {
+                return Err(DriftError::DecodeError);
+            }
+            Ok((
+                entries,
+                Some(DpBloomFilter {
+                    bits,
+                    m: m_bits,
+                    k,
+                    salt,
+                }),
+            ))
+        }
+        _ => Err(DriftError::DecodeError),
+    }
 }
 
 /// Parse a FederationDirectory v2 payload into (pubkey, ticket)
@@ -614,5 +771,82 @@ mod tests {
         let (p, t) = fake_entry(&[0xC0; 32], &bridge, 9_999_999_999_999);
         let v3 = build_directory_v3(&[(p, t, 0)]);
         assert!(parse_directory(&v3).is_err());
+    }
+
+    // ─── Directory v4 (Phase F — bloom filter) ───────────────────
+
+    #[test]
+    fn directory_v4_roundtrip_without_bloom() {
+        let bridge = [0xD0; 32];
+        let (p, t) = fake_entry(&[0xD1; 32], &bridge, 9_999_999_999_999);
+        let entries = vec![(p, t.clone(), 0u8)];
+        let wire = build_directory_v4(&entries, None);
+        let (parsed_entries, parsed_bloom) = parse_directory_v4(&wire).unwrap();
+        assert_eq!(parsed_entries.len(), 1);
+        assert_eq!(parsed_entries[0], (p, t, 0));
+        assert!(parsed_bloom.is_none());
+    }
+
+    #[test]
+    fn directory_v4_roundtrip_with_bloom() {
+        use crate::transport::dp_bloom::DpBloomFilter;
+        let bridge = [0xE0; 32];
+        let (p, t) = fake_entry(&[0xE1; 32], &bridge, 9_999_999_999_999);
+        let entries = vec![(p, t.clone(), 0u8)];
+        let mut bloom = DpBloomFilter::new(1024, 4, [0xAA; 16]);
+        bloom.insert(&[0xE1; 32]);
+        let wire = build_directory_v4(&entries, Some(&bloom));
+        let (parsed_entries, parsed_bloom) = parse_directory_v4(&wire).unwrap();
+        assert_eq!(parsed_entries, vec![(p, t, 0)]);
+        let parsed_bloom = parsed_bloom.expect("bloom missing");
+        assert_eq!(parsed_bloom.bits, bloom.bits);
+        assert_eq!(parsed_bloom.m, bloom.m);
+        assert_eq!(parsed_bloom.k, bloom.k);
+        assert_eq!(parsed_bloom.salt, bloom.salt);
+        // Roundtrip preserves membership tests.
+        assert!(parsed_bloom.contains(&[0xE1; 32]));
+        assert!(!parsed_bloom.contains(&[0xFF; 32]));
+    }
+
+    #[test]
+    fn directory_v4_parser_accepts_v3_and_v2_as_no_bloom() {
+        let bridge = [0xF0; 32];
+        let (p, t) = fake_entry(&[0xF1; 32], &bridge, 9_999_999_999_999);
+        let v3 = build_directory_v3(&[(p, t.clone(), 1)]);
+        let (entries, bloom) = parse_directory_v4(&v3).unwrap();
+        assert_eq!(entries, vec![(p, t.clone(), 1)]);
+        assert!(bloom.is_none());
+
+        let v2 = build_directory(&[(p, t.clone())]);
+        let (entries2, bloom2) = parse_directory_v4(&v2).unwrap();
+        assert_eq!(entries2, vec![(p, t, 0)]);
+        assert!(bloom2.is_none());
+    }
+
+    #[test]
+    fn directory_v4_rejects_unknown_version_and_truncation() {
+        let mut bytes = vec![99u8, 0, 0, 0];
+        assert!(parse_directory_v4(&bytes).is_err());
+        // Truncated v4 with claimed bloom-filter-len overshoot.
+        let bridge = [0; 32];
+        let (p, t) = fake_entry(&[0x10; 32], &bridge, 9_999_999_999_999);
+        let mut wire = build_directory_v4(&[(p, t, 0)], None);
+        wire.pop(); // truncate one byte
+        assert!(parse_directory_v4(&wire).is_err());
+        bytes.clear();
+        bytes.push(DIRECTORY_VERSION_V4);
+        assert!(parse_directory_v4(&bytes).is_err());
+    }
+
+    #[test]
+    fn directory_v3_parser_rejects_v4() {
+        // v3 receivers must drop v4 packets silently.
+        use crate::transport::dp_bloom::DpBloomFilter;
+        let bridge = [0x11; 32];
+        let (p, t) = fake_entry(&[0x12; 32], &bridge, 9_999_999_999_999);
+        let bloom = DpBloomFilter::new(64, 2, [0; 16]);
+        let v4 = build_directory_v4(&[(p, t, 0)], Some(&bloom));
+        assert!(parse_directory_v3(&v4).is_err());
+        assert!(parse_directory(&v4).is_err());
     }
 }
