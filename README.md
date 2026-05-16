@@ -8,6 +8,95 @@ DRIFT is an encrypted transport protocol where your address IS your public key, 
 
 Reticulum proved identity-first networking works. DRIFT proves it can also be fast — congestion control, stream multiplexing, session resumption, connection migration — and that the same protocol can run everywhere from a Rust binary on a server to a WASM blob in a browser tab.
 
+## Recent work — Federation peer discovery (May 2026)
+
+The last major arc of work was a six-phase implementation of **federation peer discovery** — the protocol layer that lets a DRIFT client reach any peer in a multi-bridge federation by pubkey alone, with privacy-aware variants for the lookup itself. Before this, `drift.toml` host entries needed an explicit `via_bridge` pointing at the bridge holding the target. After it, a host entry can carry only a pubkey and the local bridge handles the routing.
+
+### The mental model
+
+Three layers of cache, narrowing the cost of each lookup:
+
+1. **Proactive announce** — every ~7 seconds each bridge broadcasts a `FederationDirectory v3/v4` to its federation peers listing its local clients (with XEdDSA presence tickets attesting that those clients actually authorized the relay). Steady-state lookups hit a warm cache.
+2. **Reactive discovery** — if the cache misses, the bridge originates a `FindPeer` query across federation. Up to 4 hops with loop prevention, signed hop attestations on every intermediate, and `PeerHere` chains as replies. Cold-path resolution in ≤2 seconds.
+3. **Instant invalidation** — when a client disconnects, `PeerGone` broadcasts evict cached routes immediately rather than waiting for the next announce.
+
+Phase F added a privacy layer on top: bridges announce a **DP-noised bloom filter** of their local clients, so originators can locally test "could this bridge host the target?" before sending any query. A bridge whose filter says "definitely not" never sees the query at all.
+
+### What landed
+
+| Phase | What it shipped |
+|---|---|
+| **A** | `FindPeer` / `PeerHere` / `PeerGone` packet types + 1-hop discovery between directly-federated bridges |
+| **B** | Multi-hop forwarding (TTL=4), loop prevention, path extension on re-emit |
+| **C** | `FederationDirectory v3` with `hops` field for proactive transitive announces |
+| **D** | `via_bridge` becomes optional in `drift.toml` (host entries can carry just a pubkey, falls through to `default_bridge` + UNKNOWN sentinel) |
+| **E v1** | `find_peer_disabled` flag — opt out of discovery entirely |
+| **E v2** | `FindPeerHashed` (`SHA-256(target ‖ salt)`) + `FindPeerMode` enum (`Open` / `NoForward` / `OriginateHashed` / `Disabled`) |
+| **F** | `FederationDirectory v4` with DP-noised bloom filter; cover-traffic decoys at Poisson intervals; per-bridge fault tracking on unfulfilled bloom claims |
+| Hop signing | Replaced Phase B's stub tickets with XEdDSA bridge-self-signed attestations — `"DRIFT-HOP" ‖ bridge_pub ‖ query_id ‖ expiry ‖ nonce` domain-separated from presence tickets |
+| Background GC | Sweep loop bounds memory across `pending_finds`, `recent_queries`, `neg_cache`, `forwarded_queries` |
+
+### Bugs caught + fixed live
+
+- **`UNKNOWN_BRIDGE_PUB` missed local clients** — single-bridge federations couldn't resolve their own clients via discovery; pinned by integration test (`unknown_bridge_pub_resolves_to_local_client`).
+- **Native HTTP connector vs server base64** — listener used `STANDARD_NO_PAD`, my native connector used padding-strict `STANDARD`. Silent decode failure, "unknown peer" timeouts. Fixed + load-bearing comment.
+- **drift-mosh-server watchdog over-aggressive** — restarted handshake every 6 s on data-plane silence, even when the bridge was healthy. Caused mosh-server on LXC to be unreachable from clients. Relaxed to 60 s.
+- **drift-vpn macOS broken** — utun device picked a bogus point-to-point destination (no kernel route) AND tun reads/writes were missing macOS BSD framing (`AF_INET` 4-byte prefix). Both gated with `#[cfg(target_os = "macos")]`. Verified end-to-end Mac → router → Drift1 VPN tunnel.
+
+### Where to look in the source
+
+| Component | File |
+|---|---|
+| Wire codecs (FindPeer / PeerHere / PeerGone / FindPeerHashed / hop attestations) | [`drift/src/transport/find_peer.rs`](drift/src/transport/find_peer.rs) |
+| Directory codec (v2 / v3 / v4) + presence tickets | [`drift/src/transport/federated.rs`](drift/src/transport/federated.rs) |
+| DP bloom filter | [`drift/src/transport/dp_bloom.rs`](drift/src/transport/dp_bloom.rs) |
+| Discovery state + handlers + cover traffic + GC | [`drift/src/transport/mod.rs`](drift/src/transport/mod.rs) (search `handle_find_peer`, `run_cover_traffic_loop`) |
+| Authoritative wire-format spec | [`SPEC.md` §10](SPEC.md) |
+| Design doc + threat model + algorithm sketches | [`FEDERATION_DISCOVERY.md`](FEDERATION_DISCOVERY.md) |
+| Integration tests (11 cases covering all phases) | [`drift/tests/federation_discovery.rs`](drift/tests/federation_discovery.rs) |
+| Adapter test driver (native + WASM groups) | [`scripts/test-adapters.sh`](scripts/test-adapters.sh) |
+| WASM cross-stack smoke (Node 22+ runs the browser-side adapters against the native bridge) | [`drift-wasm/test/network-ws-node.js`](drift-wasm/test/network-ws-node.js), [`network-http-node.js`](drift-wasm/test/network-http-node.js) |
+
+### Privacy controls — `TransportConfig` knobs
+
+```rust
+TransportConfig {
+    // Phase E v2
+    find_peer_mode: FindPeerMode::OriginateHashed, // hash targets; transit bridges see only hashes
+    // or NoForward to answer-but-not-relay; Disabled to opt out.
+
+    // Phase F
+    bloom_announce_noise: Some(0.05),  // emit v4 bloom with 5% one-sided DP noise
+    cover_traffic_rate_hz: Some(0.1),  // decoy FindPeer ~every 10 seconds, Poisson-timed
+
+    // ..rest of TransportConfig
+}
+```
+
+Stacked, these defeat bulk traffic analysis: transit bridges see only hashed targets, can't tell decoy from real, never receive queries for pubkeys their filter rejects. The remaining leak is to the **answering** bridge (which by construction has to learn the target to deliver the route). Closing that gap properly requires lattice-based PIR — multi-week project, multi-megabyte per query, deferred.
+
+### Open work
+
+- **drift-vpn Windows daemon** (Wintun) — pre-existing pending task, never started.
+- **Browser test harness** (chromedriver / playwright) — only way to fully exercise the WASM `ws_stream` / `webrtc` / `webtransport` adapters end-to-end.
+- **drift-mosh-client WASM build** — would give an in-browser remote shell with no system install, riding on the cross-stack story this session validated.
+- **PIR-based "high-privacy" lookup mode** — lattice-based homomorphic PIR for the case where you can't trust even the answering bridge. See the trade-off discussion in [`FEDERATION_DISCOVERY.md`](FEDERATION_DISCOVERY.md).
+- **`webtransport://` / `webrtc://` URL schemes** — currently programmatic-only adapters on the native side; adding CLI-accessible schemes needs a QUIC server stack for WT and a signaling protocol for WebRTC. ~1 day each.
+
+### Test totals after this work
+
+```
+drift unit:                     95 ✓
+federation_discovery:           11 ✓  (Phases A → F end-to-end)
+federation_directory_semantics:  3 ✓
+adversarial_federation:          3 ✓
+adversarial_presence_tickets:    5 ✓
+loopback_full_mesh:              5 ✓  (webrtc ignored on macOS — env-specific)
+drift-config + others:          56 ✓
+```
+
+Plus three Docker harnesses (`federation-discovery`, `federation-triangle`, `two-bridge`) all green, and a live Mac↔LXC drift-vpn tunnel proving end-to-end usability.
+
 ## Features
 
 **Crypto** — X25519 + ChaCha20-Poly1305 (WireGuard-style minimal surface). Optional post-quantum hybrid (X25519 + ML-KEM-768). Adaptive DoS cookies. RFC 9000-style 3× amplification limit. No plaintext mode.
