@@ -444,6 +444,86 @@ async fn no_forward_mode_answers_local_but_does_not_transit() {
     );
 }
 
+// ─── Test 1h: Phase F — bloom filter narrows FindPeer fanout ────────
+
+#[tokio::test]
+async fn bloom_filter_says_no_suppresses_findpeer() {
+    // Setup: bridge_a federates with bridge_b. bridge_a's local
+    // clients DO NOT include the target. bridge_a announces a
+    // v4 directory with a bloom filter that doesn't include the
+    // target either. When bridge_b sends a Federated envelope
+    // at bridge_a with UNKNOWN_BRIDGE_PUB for the missing
+    // target, bridge_a's bloom-filter pre-filter should see
+    // every federation peer's filter say "no" and suppress the
+    // FindPeer fanout entirely.
+    //
+    // The neg_cache should also pick up an entry so subsequent
+    // dials for the same pubkey within NEG_CACHE_TTL_MS don't
+    // re-fire.
+    let bridge_a = build_transport([0xF6; 32]).await;
+    let a_pub = Identity::from_secret_bytes([0xF6; 32]).public_bytes();
+    // bridge_b runs with bloom-announce ENABLED — that's how
+    // bridge_a will receive a filter for bridge_b.
+    let bridge_b = {
+        let id = Identity::from_secret_bytes([0xF7; 32]);
+        let cfg = TransportConfig {
+            accept_any_peer: true,
+            bloom_announce_noise: Some(0.0), // no noise for the test
+            ..Default::default()
+        };
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), id, cfg)
+            .await
+            .unwrap()
+    };
+    let b_pub = Identity::from_secret_bytes([0xF7; 32]).public_bytes();
+    let (_a_to_b, _b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+
+    // bridge_b has no local clients — its bloom will be empty.
+    // Trigger bridge_b to announce its (empty) directory + bloom
+    // to bridge_a.
+    let b_entries = bridge_b.established_client_entries().await;
+    bridge_b.announce_directory(&b_entries).await;
+    sleep(Duration::from_millis(300)).await;
+
+    // Now ship a Federated envelope at bridge_a with
+    // UNKNOWN_BRIDGE_PUB targeting a pubkey that is NOT in any
+    // bloom filter on file. bridge_a should:
+    //   - check its own local clients (miss)
+    //   - check peer_directory (miss)
+    //   - check neg_cache (miss)
+    //   - check federation peers' bloom filters (bridge_b's filter
+    //     is empty after no-noise insertion of 0 clients) — every
+    //     filter says "no"
+    //   - suppress the fanout, insert into neg_cache
+    let nobody_pub = [0xCA; 32];
+    let env = build_unknown_target_envelope(
+        &nobody_pub,
+        &a_pub,
+        &[0xAB; 32],
+        b"target-not-in-any-filter",
+    );
+    bridge_b
+        .__debug_send_federated_envelope(&_b_to_a, &env)
+        .await
+        .unwrap();
+    sleep(ROUND_TRIP_WAIT).await;
+
+    assert_eq!(
+        bridge_a.pending_finds_count(),
+        0,
+        "PHASE F: bloom filter said 'no' on every peer, FindPeer must NOT fire"
+    );
+    assert_eq!(
+        bridge_a.neg_cache_count(),
+        1,
+        "PHASE F: bloom-suppressed lookup should populate neg_cache to short-circuit retries"
+    );
+    assert!(
+        !bridge_a.peer_directory_contains(&nobody_pub),
+        "directory stays empty — nothing to cache"
+    );
+}
+
 // ─── Test 1g: local-hit on UNKNOWN_BRIDGE_PUB (regression for 7ee8412) ──
 
 #[tokio::test]

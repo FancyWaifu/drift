@@ -24,6 +24,7 @@ const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
 #[cfg(unix)]
 pub(crate) mod batch;
 mod cookies;
+mod dp_bloom;
 mod federated;
 mod find_peer;
 pub use federated::{
@@ -159,6 +160,21 @@ pub struct TransportConfig {
     /// federation behavior. See `FindPeerMode` for the
     /// per-variant semantics.
     pub find_peer_mode: FindPeerMode,
+
+    /// Phase F: announce a DP-noised bloom filter of local
+    /// clients in FederationDirectory v4. When `Some(p)`, this
+    /// bridge's `announce_directory` emits v4 packets carrying
+    /// the filter (with one-sided noise rate `p`); federation
+    /// peers cache the filter and use it to pre-filter their
+    /// `FindPeer` fanout. `None` falls back to v3 announces
+    /// (no filter; original behavior).
+    ///
+    /// Suggested values: 0.0 = plain bloom (FP only from hash
+    /// collisions; max privacy loss vs DP), 0.05 (the reference
+    /// noise rate) = moderate privacy / moderate extra FPs,
+    /// 0.20+ = strong noise / many decoy queries / strong
+    /// membership obfuscation.
+    pub bloom_announce_noise: Option<f64>,
 }
 
 /// Discovery-layer posture for a `Transport`. Default is `Open`
@@ -226,6 +242,7 @@ impl Default for TransportConfig {
             qlog_path: None,
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
+            bloom_announce_noise: None,
         }
     }
 }
@@ -256,6 +273,7 @@ impl TransportConfig {
             qlog_path: None,
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
+            bloom_announce_noise: None,
         }
     }
 
@@ -283,6 +301,7 @@ impl TransportConfig {
             qlog_path: None,
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
+            bloom_announce_noise: None,
         }
     }
 }
@@ -597,6 +616,21 @@ pub(crate) struct Inner {
     pub(crate) peer_directory_tickets:
         Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
 
+    /// Phase F: per-federation-peer bloom filter from their most
+    /// recent FederationDirectory v4 announce. Keyed by the
+    /// announcing bridge's `PeerId`. Used by
+    /// `handle_federated`'s UNKNOWN_BRIDGE_PUB miss path to
+    /// pre-filter `FindPeer` fanout — bridges whose filter says
+    /// "definitely not" are skipped entirely, narrowing the
+    /// per-lookup gossip blast radius.
+    ///
+    /// A bridge with no filter on file (v3-or-earlier announcer,
+    /// or v4 announcer with `filter_bytes_len = 0`) is queried
+    /// unconditionally — bloom is purely a NARROWING optimization
+    /// for protocols that support it; absence is back-compat.
+    pub(crate) peer_bloom_filters:
+        Arc<StdMutex<StdHashMap<PeerId, dp_bloom::DpBloomFilter>>>,
+
     /// Per-client presence tickets received via `PresenceTicket`
     /// packets. Keyed by the client's static pubkey (the
     /// session-authenticated sender, NOT anything the packet
@@ -867,6 +901,7 @@ impl Transport {
             peer_directory: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_directory_hops: Arc::new(StdMutex::new(StdHashMap::new())),
             peer_directory_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
+            peer_bloom_filters: Arc::new(StdMutex::new(StdHashMap::new())),
             presence_tickets: Arc::new(StdMutex::new(StdHashMap::new())),
             pending_finds: Arc::new(StdMutex::new(StdHashMap::new())),
             recent_queries: Arc::new(StdMutex::new(StdHashMap::new())),
@@ -1770,10 +1805,42 @@ impl Transport {
             out
         };
 
-        // For each federation peer, build a v3 payload combining:
+        // Phase F: build the bloom filter once per announce
+        // cycle if configured. The same filter goes out to every
+        // federation peer (no per-recipient bloom — it'd defeat
+        // the privacy point of having ONE consistent view of
+        // "what hashes match this bridge's local clients").
+        //
+        // We hash the direct entries' pubkeys plus the transitive
+        // ones (across all announcers) — the filter represents
+        // "any client reachable via me", which is what receivers
+        // actually want to test against.
+        let bloom: Option<dp_bloom::DpBloomFilter> =
+            self.inner.config.bloom_announce_noise.map(|noise| {
+                let mut salt = [0u8; dp_bloom::BLOOM_SALT_LEN];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+                let mut f = dp_bloom::DpBloomFilter::default_for_size(salt);
+                for (pk, _) in entries {
+                    f.insert(pk);
+                }
+                for (pk, _, _, _) in &transitive {
+                    f.insert(pk);
+                }
+                f.add_dp_noise(noise);
+                f
+            });
+        let cap = if bloom.is_some() {
+            federated::MAX_DIRECTORY_ENTRIES_V4
+        } else {
+            federated::MAX_DIRECTORY_ENTRIES
+        };
+
+        // For each federation peer, build a v3-or-v4 payload
+        // combining:
         //   - direct entries (hops=0), always included
         //   - transitive entries (hops+1), filtered by split-horizon
         //     (skip entries we learned FROM this peer).
+        //   - bloom filter (v4 only), attached to the FIRST chunk.
         for peer_id in &peers {
             let mut combined: Vec<([u8; 32], federated::PresenceTicket, u8)> =
                 entries.iter().map(|(p, t)| (*p, t.clone(), 0u8)).collect();
@@ -1783,11 +1850,28 @@ impl Transport {
                 }
                 combined.push((*pub_, ticket.clone(), *new_hops));
             }
-            let chunks: Vec<Vec<u8>> = if combined.is_empty() {
+            let chunks: Vec<Vec<u8>> = if let Some(b) = &bloom {
+                if combined.is_empty() {
+                    vec![federated::build_directory_v4(&[], Some(b))]
+                } else {
+                    let mut out = Vec::new();
+                    let mut first = true;
+                    for chunk in combined.chunks(cap) {
+                        let bloom_for_chunk = if first {
+                            first = false;
+                            Some(b)
+                        } else {
+                            None
+                        };
+                        out.push(federated::build_directory_v4(chunk, bloom_for_chunk));
+                    }
+                    out
+                }
+            } else if combined.is_empty() {
                 vec![federated::build_directory_v3(&[])]
             } else {
                 combined
-                    .chunks(federated::MAX_DIRECTORY_ENTRIES)
+                    .chunks(cap)
                     .map(federated::build_directory_v3)
                     .collect()
             };
@@ -3444,13 +3528,68 @@ impl Inner {
                 // Snapshot federation peers (drop the lock before
                 // awaiting send_typed — never hold a sync mutex
                 // across an await point).
-                let fed_peers: Vec<PeerId> = self
+                let all_fed_peers: Vec<PeerId> = self
                     .federation_table
                     .lock()
                     .unwrap()
                     .values()
                     .copied()
                     .collect();
+
+                // Phase F: pre-filter the fanout list using each
+                // peer's cached bloom filter. A peer with a
+                // filter that says "definitely not here" gets
+                // skipped entirely — the gossip blast radius
+                // shrinks from "every federation peer" to "only
+                // peers whose filter passed for this target".
+                //
+                // Peers with NO filter on file (v3-or-earlier
+                // announcers, or v4 with empty filter) are
+                // queried unconditionally — bloom is a pure
+                // narrowing optimization, never a strict gate.
+                let fed_peers: Vec<PeerId> = {
+                    let bf = self.peer_bloom_filters.lock().unwrap();
+                    all_fed_peers
+                        .iter()
+                        .copied()
+                        .filter(|pid| match bf.get(pid) {
+                            Some(filter) => filter.contains(&env.target_client_pub),
+                            None => true, // no filter cached → query
+                        })
+                        .collect()
+                };
+                if fed_peers.len() < all_fed_peers.len() {
+                    debug!(
+                        target_client = ?env.target_client_pub,
+                        before = all_fed_peers.len(),
+                        after = fed_peers.len(),
+                        "FindPeer: bloom filters narrowed fanout"
+                    );
+                }
+                if fed_peers.is_empty() {
+                    debug!(
+                        target_client = ?env.target_client_pub,
+                        "FindPeer: every federation peer's bloom said 'no'; dropping query"
+                    );
+                    // Treat as neg-cache hit to avoid re-firing
+                    // for every queued waiter. Short TTL so a
+                    // post-rotation filter that now contains
+                    // the target picks up promptly.
+                    self.neg_cache.lock().unwrap().insert(
+                        env.target_client_pub,
+                        now_inst
+                            + std::time::Duration::from_millis(
+                                find_peer::NEG_CACHE_TTL_MS,
+                            ),
+                    );
+                    // Drop any queued waiters for this target —
+                    // they'd just sit until their own deadline.
+                    self.pending_finds
+                        .lock()
+                        .unwrap()
+                        .remove(&env.target_client_pub);
+                    return Ok(None);
+                }
                 let (payload, pkt_type, mode_label) = if matches!(
                     self.config.effective_find_peer_mode(),
                     FindPeerMode::OriginateHashed
@@ -3578,10 +3717,27 @@ impl Inner {
             return Err(DriftError::AuthFailed);
         }
 
-        // Phase C: parse v3 (also accepts v2 → treats every entry
-        // as hops=0). The hops field controls whether we'll later
-        // re-announce this entry transitively.
-        let entries = federated::parse_directory_v3(&payload_bytes)?;
+        // Phase F: parse v4 (also accepts v3 and v2; v3/v2
+        // come back with `bloom = None`). v3's hops field is
+        // preserved; v4 additionally yields the announcer's
+        // DP-bloom-filtered local-clients set, which we cache
+        // for FindPeer fanout narrowing.
+        let (entries, bloom) = federated::parse_directory_v4(&payload_bytes)?;
+        // Update / clear the bloom filter for this announcer.
+        // An announcer that switches from v4-with-bloom to
+        // v3-or-v4-without-bloom should have the cached entry
+        // dropped so we don't keep filtering on stale data.
+        {
+            let mut bf = self.peer_bloom_filters.lock().unwrap();
+            match bloom {
+                Some(b) => {
+                    bf.insert(peer_id, b);
+                }
+                None => {
+                    bf.remove(&peer_id);
+                }
+            }
+        }
 
         // ── Per-entry verification ──
         //
