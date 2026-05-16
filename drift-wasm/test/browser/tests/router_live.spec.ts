@@ -40,16 +40,116 @@ const ROUTER_MOSH_PUB =
 const ROUTER_BRIDGE_PEER_ID = "354c981eb6986e56";
 const ROUTER_MOSH_PEER_ID = "3bd71d177c0d77db";
 
-// Note on browser↔browser via bridge (NOT a test here):
-// I tried `pageA.addPeer(pageB.pub); pageA.sendToPeer(...)` against
-// the public router-bridge. The bridge mesh-routes A's HELLO to B's
-// WS interface correctly, but B's WASM Session drops it: the WASM
-// `Session::handle_incoming_bytes` (drift-wasm/src/session.rs) only
-// handles `HelloAck` + `Data` packet types — there's no codepath
-// for receiving an incoming HELLO and replying with HELLO_ACK. Same
-// root cause as the WebRTC browser↔browser gap: WASM is strictly
-// client-side. A proper browser↔browser test needs server-handshake
-// support added to the WASM Session, which is real protocol work.
+test.describe("LIVE: browser ↔ browser via public router-bridge", () => {
+  test.skip(
+    () => !process.env.DRIFT_LIVE_ROUTER,
+    "set DRIFT_LIVE_ROUTER=1 to run against the public WAN IP",
+  );
+  test.skip(
+    ({ browserName }) => browserName !== "chromium",
+    "single-browser live test to keep WAN traffic predictable",
+  );
+  test.setTimeout(45_000);
+
+  test("A sendToPeer → bridge mesh-route → B receives", async ({ browser }) => {
+    // The WASM Session gained server-side handshake support
+    // (drift-wasm/src/session.rs handle_hello) — so a browser
+    // can now respond to an incoming HELLO. Combined with the
+    // bridge's mesh routing, two browsers can DRIFT-handshake
+    // entirely through the bridge with no direct addressability.
+    const ctxA = await browser.newContext();
+    const ctxB = await browser.newContext();
+    const pageA = await ctxA.newPage();
+    const pageB = await ctxB.newPage();
+    pageA.on("console", (m) => console.log(`[A:${m.type()}] ${m.text()}`));
+    pageB.on("console", (m) => console.log(`[B:${m.type()}] ${m.text()}`));
+
+    await Promise.all([pageA.goto("/"), pageB.goto("/")]);
+    await Promise.all([
+      pageA.waitForFunction(() => (window as any).driftReady === true, null, {
+        timeout: 10_000,
+      }),
+      pageB.waitForFunction(() => (window as any).driftReady === true, null, {
+        timeout: 10_000,
+      }),
+    ]);
+
+    const wsUrl = `ws://${ROUTER_WAN_IP}:${ROUTER_WS_PORT}`;
+
+    // B connects first + stashes an onMessage handler that
+    // buffers received DATA payloads onto window.__received.
+    const bPubAndPeerId = await pageB.evaluate(
+      async ({ wsUrl, bridgePub }) => {
+        const w = window as any;
+        const id = w.DriftIdentity.generate();
+        const client = await w.DriftClient.connectWebSocket(wsUrl, id, bridgePub);
+        w.__client = client;
+        w.__received = [];
+        client.onMessage((srcPeerIdHex: string, data: Uint8Array) => {
+          w.__received.push({
+            from: srcPeerIdHex,
+            text: new TextDecoder().decode(data),
+          });
+          console.log(`[B onMessage] from=${srcPeerIdHex} bytes=${data.length}`);
+        });
+        return { pub: id.publicKeyHex(), peerId: id.peerIdHex() };
+      },
+      { wsUrl, bridgePub: ROUTER_BRIDGE_PUB },
+    );
+    console.log(
+      `[live] B online: pub=${bPubAndPeerId.pub} peerId=${bPubAndPeerId.peerId}`,
+    );
+
+    // A connects, addPeer's B (which round-trips a mesh
+    // handshake through the bridge), then sends DATA.
+    const aResult = await pageA.evaluate(
+      async ({ wsUrl, bridgePub, bPub }) => {
+        const w = window as any;
+        const id = w.DriftIdentity.generate();
+        const log = (s: string) => console.log(`[A] ${s}`);
+
+        const client = await w.DriftClient.connectWebSocket(wsUrl, id, bridgePub);
+        log(`handshake ok server=${client.serverPeerIdHex()}`);
+
+        const t0 = performance.now();
+        const bPeerId = await client.addPeer(bPub);
+        const addPeerMs = performance.now() - t0;
+        log(`addPeer(B) ok ${addPeerMs.toFixed(0)}ms → ${bPeerId}`);
+
+        const msg = new TextEncoder().encode("hello-B-from-A-via-router-bridge");
+        await client.sendToPeer(bPeerId, msg);
+        log(`sendToPeer(B, ${msg.length}B) ok`);
+
+        await new Promise((r) => setTimeout(r, 500));
+        return { addPeerMs, bPeerId, aPub: id.publicKeyHex() };
+      },
+      { wsUrl, bridgePub: ROUTER_BRIDGE_PUB, bPub: bPubAndPeerId.pub },
+    );
+    console.log(
+      `[live] A → B mesh handshake completed in ${aResult.addPeerMs.toFixed(0)}ms`,
+    );
+
+    // Poll briefly for B's receive buffer to fill (don't race
+    // delivery).
+    const bReceived: any[] = await pageB.evaluate(async () => {
+      const w = window as any;
+      for (let i = 0; i < 30; i++) {
+        if (w.__received.length > 0) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return w.__received;
+    });
+    console.log(`[live] B received: ${JSON.stringify(bReceived)}`);
+
+    expect(bReceived.length).toBeGreaterThan(0);
+    expect(bReceived[0].text).toBe("hello-B-from-A-via-router-bridge");
+
+    await pageA.evaluate(() => (window as any).__client?.close?.());
+    await pageB.evaluate(() => (window as any).__client?.close?.());
+    await ctxA.close();
+    await ctxB.close();
+  });
+});
 
 test.describe("LIVE: browser → public router-bridge", () => {
   test.skip(

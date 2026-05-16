@@ -190,6 +190,18 @@ impl Session {
                     web_sys::console::warn_1(&format!("DRIFT hello_ack: {:?}", e).into());
                 }
             }
+            PacketType::Hello => {
+                // Incoming HELLO from another peer — handshake
+                // us as the responder. Mesh-routed by the
+                // bridge means another browser (or any DRIFT
+                // peer that can reach us via the relay) is
+                // initiating a session with us. We auto-register
+                // them (no allowlist on the WASM side — equivalent
+                // of native `accept_any_peer = true`).
+                if let Err(e) = self.handle_hello(&header, data) {
+                    web_sys::console::warn_1(&format!("DRIFT hello: {:?}", e).into());
+                }
+            }
             PacketType::Data => {
                 self.handle_data(&header, data);
             }
@@ -309,6 +321,140 @@ impl Session {
         if let Some(resolve) = resolve {
             let _ = resolve.call0(&JsValue::NULL);
         }
+        Ok(())
+    }
+
+    /// Server-side handshake. Mirror of native
+    /// `regenerate_session` (drift/src/transport/mod.rs): on
+    /// receipt of a peer's HELLO, derive the session key from
+    /// static+ephemeral DH, seal a HELLO_ACK, and install the
+    /// session so subsequent DATA decrypts.
+    ///
+    /// For v1 we refuse PQ-hybrid HELLOs from the WASM side —
+    /// server-side ML-KEM encap isn't wired into the WASM
+    /// build yet. The peer's WASM session will receive nothing
+    /// and time out; that mirrors native's PQ-mismatch fail-
+    /// closed behavior.
+    fn handle_hello(&self, header: &Header, data: &[u8]) -> Result<(), JsValue> {
+        // Refuse PQ (FLAG_PQ_HYBRID, bit 2 — see drift-core::header).
+        if header.flags & drift_core::header::FLAG_PQ_HYBRID != 0 {
+            return Err(JsValue::from_str(
+                "PQ-hybrid HELLO refused: WASM server-side ML-KEM not implemented",
+            ));
+        }
+        if data.len() < HEADER_LEN + HELLO_PAYLOAD_LEN {
+            return Err(JsValue::from_str("HELLO too short"));
+        }
+        let body = &data[HEADER_LEN..];
+        let mut client_static_pub = [0u8; STATIC_KEY_LEN];
+        client_static_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
+        let mut client_eph_pub = [0u8; STATIC_KEY_LEN];
+        client_eph_pub.copy_from_slice(&body[STATIC_KEY_LEN..STATIC_KEY_LEN * 2]);
+        let mut client_nonce = [0u8; NONCE_LEN];
+        client_nonce.copy_from_slice(
+            &body[STATIC_KEY_LEN * 2..STATIC_KEY_LEN * 2 + NONCE_LEN],
+        );
+        // Reject weak (zero / low-order) pubkeys upfront. The
+        // DH below would also catch low-order via Identity::dh's
+        // contributory check, but rejecting the obvious cases
+        // here saves any X25519 work on the fast-path.
+        if client_static_pub == [0u8; STATIC_KEY_LEN]
+            || client_eph_pub == [0u8; STATIC_KEY_LEN]
+        {
+            return Err(JsValue::from_str("rejected weak HELLO pubkey"));
+        }
+        // The HELLO must be addressed to us — mesh routing fans
+        // out, so a mis-addressed HELLO arriving here is either
+        // a bridge bug or a misdirected probe. Drop.
+        let local_peer_id = self.state.borrow().local_peer_id;
+        if header.dst_id != local_peer_id {
+            return Err(JsValue::from_str("HELLO not addressed to us"));
+        }
+        let client_peer_id = derive_peer_id(&client_static_pub);
+
+        // Generate our server-side ephemeral + nonce.
+        let server_ephemeral = Identity::generate();
+        let server_eph_pub = server_ephemeral.public_bytes();
+        let server_nonce = random_nonce();
+
+        // Static + ephemeral DH. Same key derivation as native
+        // `regenerate_session` — only the Direction tags on the
+        // SessionKey are flipped because we're the responder.
+        let local_secret = self.state.borrow().local_secret;
+        let local_id = Identity::from_secret_bytes(local_secret);
+        let static_dh = local_id
+            .dh(&client_static_pub)
+            .ok_or_else(|| JsValue::from_str("static DH failed"))?;
+        let ephemeral_dh = server_ephemeral
+            .dh(&client_eph_pub)
+            .ok_or_else(|| JsValue::from_str("ephemeral DH failed"))?;
+        let session_key_bytes =
+            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce);
+        let tx = SessionKey::new(&session_key_bytes, Direction::Responder);
+        let rx = SessionKey::new(&session_key_bytes, Direction::Initiator);
+
+        // Build HELLO_ACK header. Mirror native: dst is the
+        // client_peer_id, seq=1, hop_ttl=MESH_HOP_TTL so the
+        // bridge will mesh-route the ack back (the original
+        // HELLO came in mesh-routed if header.hop_ttl > 1; the
+        // bridge needs the same routing budget for the reply).
+        let mut ack_header = Header::new(
+            PacketType::HelloAck,
+            1,
+            local_peer_id,
+            client_peer_id,
+        );
+        ack_header.hop_ttl = MESH_HOP_TTL;
+        if MESH_HOP_TTL > 1 {
+            ack_header.flags |= drift_core::header::FLAG_ROUTED;
+        }
+        ack_header.payload_len = HELLO_ACK_PAYLOAD_LEN as u16;
+        let mut hbuf = [0u8; HEADER_LEN];
+        ack_header.encode(&mut hbuf);
+
+        // AAD covers header + server_eph_pub + server_nonce
+        // (matches native).
+        let canon = canonical_aad(&hbuf);
+        let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
+        aad.extend_from_slice(&canon);
+        aad.extend_from_slice(&server_eph_pub);
+        aad.extend_from_slice(&server_nonce);
+        let tag = tx
+            .seal(1, PacketType::HelloAck as u8, &aad, b"")
+            .map_err(|e| JsValue::from_str(&format!("HELLO_ACK seal: {}", e)))?;
+
+        let mut wire = Vec::with_capacity(HEADER_LEN + HELLO_ACK_PAYLOAD_LEN);
+        wire.extend_from_slice(&hbuf);
+        wire.extend_from_slice(&server_eph_pub);
+        wire.extend_from_slice(&server_nonce);
+        wire.extend_from_slice(&tag);
+
+        // Auto-register the peer (no allowlist). Install
+        // tx/rx — they're directly usable; the WASM Session
+        // doesn't use the native AwaitingData→Established two-
+        // phase model.
+        {
+            let mut s = self.state.borrow_mut();
+            let peer = s
+                .peers
+                .entry(client_peer_id)
+                .or_insert_with(|| PeerSession::new(client_static_pub));
+            peer.peer_pub = client_static_pub;
+            peer.tx = Some(tx);
+            peer.rx = Some(rx);
+            // Our first outbound DATA will be seq=2 — seq=1 was
+            // the HELLO_ACK we just sealed.
+            peer.next_seq = 2;
+        }
+
+        (self.send_fn)(&wire)?;
+        web_sys::console::log_1(
+            &format!(
+                "DRIFT inbound handshake complete (peer={})",
+                hex8(&client_peer_id)
+            )
+            .into(),
+        );
         Ok(())
     }
 
