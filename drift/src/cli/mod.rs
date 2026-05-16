@@ -181,6 +181,58 @@ pub struct BridgeArgs {
     /// `<url>@<pubkey-hex>` (same as `--peer`). Repeatable.
     #[arg(long = "federate")]
     pub federates: Vec<String>,
+
+    /// Phase PQ: disable the X25519 + ML-KEM-768 hybrid
+    /// handshake (escape hatch). Hybrid PQ is now the
+    /// default. Set this flag if you need the legacy
+    /// classical-only handshake — e.g., on a bandwidth- or
+    /// CPU-constrained device, or for interop testing with
+    /// peers that have intentionally turned PQ off.
+    ///
+    /// Classical-only servers still accept incoming hybrid
+    /// HELLOs from PQ-capable clients? No — they refuse
+    /// fail-closed (silent downgrade would defeat the
+    /// client's PQ guarantee). Use with intent.
+    ///
+    /// Wire cost when hybrid is on: per-handshake HELLO +1.2
+    /// KB, HELLO_ACK +1.1 KB. DATA framing unchanged.
+    /// See SPEC.md §6.7.
+    #[arg(long = "no-hybrid-pq", default_value_t = false)]
+    pub no_hybrid_pq: bool,
+
+    /// Phase G: federation-peer fault skip threshold. Bridges
+    /// that bloom-claim a target then fail to deliver
+    /// accumulate a fault counter; once a peer's count hits
+    /// this threshold, it's skipped from `FindPeer` fanout
+    /// until the counter decays back. `0` disables (observe-
+    /// only). Default `5`.
+    #[arg(long = "bridge-fault-skip-threshold", default_value_t = 5)]
+    pub bridge_fault_skip_threshold: u32,
+
+    /// Phase PQ-T.11: UDP receive-buffer size in bytes.
+    /// Bridges absorbing many concurrent first-time handshakes
+    /// (especially hybrid PQ HELLOs at ~1.3 KB each) need
+    /// more than the ~200 KB OS default or they drop under
+    /// thundering-herd reconnects. Default 4 MiB; the kernel
+    /// may clamp lower (raise `sysctl net.core.rmem_max` on
+    /// Linux, `kern.ipc.maxsockbuf` on macOS to lift the cap).
+    #[arg(
+        long = "udp-recv-buffer-bytes",
+        default_value_t = 4 * 1024 * 1024
+    )]
+    pub udp_recv_buffer_bytes: usize,
+
+    /// Phase PQ-T.11: first-HELLO jitter, in milliseconds.
+    /// The initial handshake send is delayed by a uniformly
+    /// random `0..N` ms. Disperses synchronized client
+    /// reconnects after a bridge restart. Default 334 (matches
+    /// WireGuard's `RekeyTimeoutJitterMaxMs`).
+    ///
+    /// Set to `0` to disable jitter — useful for LAN-only
+    /// deployments where latency budget trumps thundering-
+    /// herd robustness.
+    #[arg(long = "handshake-jitter-ms", default_value_t = 334)]
+    pub handshake_jitter_ms: u64,
 }
 
 #[derive(clap::Args)]

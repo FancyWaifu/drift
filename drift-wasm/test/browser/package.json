@@ -1,0 +1,18 @@
+{
+  "name": "drift-wasm-browser-tests",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "End-to-end browser tests for drift-wasm — exercises ws / ws_stream / http / webrtc / webtransport adapters in a real headless browser against a native drift bridge subprocess.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

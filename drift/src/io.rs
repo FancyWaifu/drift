@@ -908,6 +908,73 @@ impl UdpListenerIO {
             addr: local,
         })
     }
+
+    /// Bind + apply `SO_RCVBUF = recv_buffer_bytes` if set.
+    /// The kernel may clamp the requested size; the granted
+    /// size is logged at info level. A failure to set the
+    /// option is logged at warn and does NOT fail the bind.
+    pub async fn bind_with_recv_buffer(
+        addr: SocketAddr,
+        recv_buffer_bytes: Option<usize>,
+    ) -> io::Result<Self> {
+        let sock = UdpSocket::bind(addr).await?;
+        if let Some(want) = recv_buffer_bytes {
+            apply_udp_recv_buffer(&sock, want);
+        }
+        let local = sock.local_addr()?;
+        Ok(Self {
+            socket: Some(Arc::new(sock)),
+            addr: local,
+        })
+    }
+}
+
+/// Apply `SO_RCVBUF` to a bound `tokio::net::UdpSocket` via
+/// `socket2`. Logs the granted size (which the kernel may
+/// have clamped — see `sysctl net.core.rmem_max` on Linux,
+/// `kern.ipc.maxsockbuf` on macOS) at info level. Failures
+/// are logged at warn and silently tolerated.
+pub(crate) fn apply_udp_recv_buffer(sock: &UdpSocket, want_bytes: usize) {
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    // SAFETY: socket2::Socket::from_raw_fd takes ownership of
+    // the fd. We use into_raw_fd() to forget the temporary and
+    // hand the fd back to socket2 just for the setsockopt
+    // call, then immediately into_raw_fd() back out and let
+    // it drop without close.
+    let fd = sock.as_raw_fd();
+    // socket2 wants an owned Socket; we conjure one from the
+    // borrowed fd just long enough to call set_recv_buffer_size.
+    // Critical: we must NOT close this fd at the end — the
+    // tokio UdpSocket still owns it. into_raw_fd consumes the
+    // socket2::Socket without running its drop (which would
+    // close()), giving us back the same raw fd.
+    let s2 = unsafe { socket2::Socket::from_raw_fd(fd) };
+    let req_result = s2.set_recv_buffer_size(want_bytes);
+    let granted = s2.recv_buffer_size().ok();
+    let _leak = s2.into_raw_fd(); // see SAFETY note above
+    match req_result {
+        Ok(()) => match granted {
+            Some(g) if g < want_bytes => tracing::info!(
+                requested = want_bytes,
+                granted = g,
+                "SO_RCVBUF clamped by kernel; raise sysctl rmem_max for full size"
+            ),
+            Some(g) => tracing::info!(
+                requested = want_bytes,
+                granted = g,
+                "SO_RCVBUF applied"
+            ),
+            None => tracing::info!(
+                requested = want_bytes,
+                "SO_RCVBUF requested (granted size unreadable)"
+            ),
+        },
+        Err(e) => tracing::warn!(
+            requested = want_bytes,
+            error = ?e,
+            "SO_RCVBUF setsockopt failed — keeping OS default"
+        ),
+    }
 }
 
 #[async_trait]

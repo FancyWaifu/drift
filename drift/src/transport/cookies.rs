@@ -268,10 +268,12 @@ impl Inner {
                     ephemeral,
                     last_sent,
                     cookie,
+                    pq,
                     ..
                 } => {
                     *cookie = Some(blob);
                     *last_sent = Instant::now();
+                    let pq_ek = pq.as_ref().map(|(ek, _)| ek.as_slice());
                     let wire = super::build_hello_wire(
                         self.local_peer_id,
                         peer.id,
@@ -280,6 +282,7 @@ impl Inner {
                         *client_nonce,
                         mesh_next_hop.is_some(),
                         Some(&blob),
+                        pq_ek,
                     );
                     let target = mesh_next_hop.unwrap_or(peer.addr);
                     Some((wire, target))

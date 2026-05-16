@@ -21,6 +21,13 @@ pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER_LEN - AUTH_TAG_LEN;
 const HELLO_PAYLOAD_LEN: usize = STATIC_KEY_LEN + STATIC_KEY_LEN + NONCE_LEN;
 // HELLO_ACK payload: server_ephemeral_pub(32) + server_nonce(16) + auth_tag(16) = 64
 const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
+// Phase PQ: when `FLAG_PQ_HYBRID` is set on the header, an
+// ML-KEM-768 extension appends after the standard payload (and
+// after any cookie tail on HELLO). The reader chains these
+// fields from the header flags: base → optional cookie → optional
+// PQ. See `drift::header::FLAG_PQ_HYBRID` for the wire contract.
+pub(crate) const HELLO_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_EK_LEN; // 1184
+pub(crate) const HELLO_ACK_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_CT_LEN; // 1088
 #[cfg(unix)]
 pub(crate) mod batch;
 mod cookies;
@@ -64,8 +71,25 @@ use std::collections::HashMap as StdHashMap;
 /// for deployments with different constraints (e.g., IoT, bulk, real-time).
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
-    /// Initial retry interval for handshake HELLO. Subsequent retries
-    /// double each attempt (exponential backoff). Default: 50ms.
+    /// Initial retry interval for handshake HELLO. Subsequent
+    /// retries double each attempt (exponential backoff).
+    ///
+    /// Default: **1000 ms** — aligned with RFC 6298 §2.1's
+    /// pre-RTT-sample initial RTO (which has been the Linux
+    /// kernel's TCP default since 2.6) and QUIC's PTO baseline
+    /// (RFC 9002 §6.2.1).
+    ///
+    /// Smaller values like 50ms recover faster from a single
+    /// dropped HELLO on a fast path, but trigger a
+    /// retransmission storm when the HELLO is large enough
+    /// to take meaningful time to transmit (e.g. hybrid PQ
+    /// HELLOs at ~1.3 KB on slow links). See
+    /// `docs/HANDSHAKE_RETRY_DESIGN.md`.
+    ///
+    /// LAN-only deployments with sub-ms RTT can override down
+    /// to e.g. 50ms safely. The retry loop additionally adapts
+    /// to the measured RTT once available — see the SRTT path
+    /// in `run_handshake_retry_loop`.
     pub handshake_retry_base_ms: u64,
     /// Maximum number of HELLO retry attempts before giving up.
     /// Default: 10 (total budget ~51s).
@@ -200,6 +224,95 @@ pub struct TransportConfig {
     /// shape matches real privacy-mode queries). In
     /// `Disabled` mode, no cover traffic emits.
     pub cover_traffic_rate_hz: Option<f64>,
+
+    /// Phase G: reputation-based fanout skipping.
+    ///
+    /// A federation peer accumulates `bridge_faults` whenever a
+    /// `FindPeer` we sent to it (because its bloom filter
+    /// claimed the target) expired with no `PeerHere` reply.
+    /// When a peer's fault count reaches or exceeds this
+    /// threshold, the fanout step skips it entirely for
+    /// subsequent queries — the bridge is treated as
+    /// unreliable or dishonest.
+    ///
+    /// Faults decay exponentially: every
+    /// `bridge_fault_decay_secs` the GC loop halves every
+    /// counter and drops zeroed entries. So a transient outage
+    /// doesn't permanently demote a peer, but sustained
+    /// misbehavior keeps a peer cut out.
+    ///
+    /// `0` disables the skipping behavior (observe-only —
+    /// faults still get logged, the fanout still queries the
+    /// peer). Default `5` strikes a balance: a peer needs
+    /// repeat-mistakes-without-recovery to get cut.
+    pub bridge_fault_skip_threshold: u32,
+
+    /// Phase G: seconds between fault-counter halvings (see
+    /// `bridge_fault_skip_threshold`). Smaller = faster
+    /// recovery, larger = stickier reputation. Default `30`s
+    /// gives a misbehaving bridge a couple of minutes of
+    /// quiet to fully decay back to zero.
+    pub bridge_fault_decay_secs: u64,
+
+    /// Phase PQ: enable the X25519 + ML-KEM-768 hybrid
+    /// handshake. When `true`:
+    ///   - This transport's outbound HELLOs carry an ML-KEM
+    ///     encapsulation key (1184 bytes) and set
+    ///     `FLAG_PQ_HYBRID` on the header.
+    ///   - HELLO_ACKs in reply must also carry the matching
+    ///     ML-KEM ciphertext and flag; the derived session
+    ///     key feeds both halves through `derive_hybrid_key`,
+    ///     defeating "harvest now, decrypt later" attacks even
+    ///     against a future quantum adversary that breaks
+    ///     X25519.
+    ///   - Inbound HELLOs WITHOUT the flag are accepted via
+    ///     the classical path (interop with non-PQ peers).
+    ///   - Inbound HELLOs WITH the flag are accepted only if
+    ///     this side ALSO has `hybrid_pq` enabled — refused
+    ///     otherwise, because silently dropping to classical
+    ///     would defeat the originator's PQ guarantee.
+    ///
+    /// Wire cost: ~+1.2 KB per HELLO and +1.1 KB per HELLO_ACK
+    /// — fits comfortably below typical MTU and matches what
+    /// TLS 1.3 hybrid is shipping in 2024-2025.
+    pub hybrid_pq: bool,
+
+    /// Requested UDP socket receive-buffer size, in bytes.
+    /// `None` (default) keeps the OS default (~200 KB on
+    /// macOS/Linux), which is fine for single-client
+    /// transports but drops packets under thundering-herd
+    /// reconnects on servers — especially with hybrid PQ
+    /// HELLOs at ~1.3 KB each.
+    ///
+    /// `Some(n)` requests `SO_RCVBUF = n` via `socket2` after
+    /// the UDP socket is bound. The kernel may clamp the
+    /// request (see `sysctl net.core.rmem_max` on Linux,
+    /// `kern.ipc.maxsockbuf` on macOS); the actual value
+    /// applied is logged at info level. Failures are logged
+    /// at warn and do NOT abort bind — the socket continues
+    /// with whatever the kernel granted.
+    ///
+    /// Recommended for bridges: 4 MiB (`4 * 1024 * 1024`).
+    pub udp_recv_buffer_bytes: Option<usize>,
+
+    /// First-HELLO jitter window, in milliseconds. When
+    /// non-zero, the initial handshake send is delayed by a
+    /// uniformly random `0..handshake_jitter_ms` ms. Retries
+    /// after the initial send use `handshake_retry_base_ms`
+    /// + exponential backoff and are NOT additionally
+    /// jittered (the backoff already disperses them).
+    ///
+    /// Purpose: when many clients reconnect after a server
+    /// restart (or many clients boot at the same time),
+    /// synchronized HELLOs can overrun the server's UDP recv
+    /// buffer. Spreading them by even a few hundred ms
+    /// dramatically reduces drop rates.
+    ///
+    /// Per WireGuard's `RekeyTimeoutJitterMaxMs = 334`,
+    /// a value in the 200–500 range is a sane default for
+    /// clients expected to reconnect en masse. Default `0`
+    /// (no jitter) preserves prior behavior.
+    pub handshake_jitter_ms: u64,
 }
 
 /// Discovery-layer posture for a `Transport`. Default is `Open`
@@ -249,7 +362,8 @@ impl TransportConfig {
 impl Default for TransportConfig {
     fn default() -> Self {
         Self {
-            handshake_retry_base_ms: 50,
+            // RFC 6298 §2.1 initial RTO. See the field doc.
+            handshake_retry_base_ms: 1000,
             handshake_max_attempts: 10,
             handshake_scan_ms: 25,
             beacon_interval_ms: 2000,
@@ -269,6 +383,28 @@ impl Default for TransportConfig {
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
             cover_traffic_rate_hz: None,
+            bridge_fault_skip_threshold: 5,
+            bridge_fault_decay_secs: 30,
+            // Phase PQ-T.12: PQ is now ON by default. The wire
+            // is interop-compatible with classical peers (a
+            // PQ-enabled server still accepts classical
+            // HELLOs); only the originator's outgoing HELLOs
+            // carry the FLAG_PQ_HYBRID extension. Opt out via
+            // `TransportConfig { hybrid_pq: false, ..default() }`
+            // or, for `drift bridge`, the `--no-hybrid-pq` flag.
+            //
+            // Operational notes for server-side deployments:
+            //   - bump `udp_recv_buffer_bytes` to 4+ MiB to
+            //     absorb thundering-herd reconnects of large
+            //     hybrid HELLOs (drift bridge does this by
+            //     default); and
+            //   - keep `handshake_jitter_ms` non-zero on
+            //     clients that may reconnect en masse so
+            //     synchronized HELLOs don't all arrive in the
+            //     same microsecond.
+            hybrid_pq: true,
+            udp_recv_buffer_bytes: None,
+            handshake_jitter_ms: 0,
         }
     }
 }
@@ -301,6 +437,28 @@ impl TransportConfig {
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
             cover_traffic_rate_hz: None,
+            bridge_fault_skip_threshold: 5,
+            bridge_fault_decay_secs: 30,
+            // Phase PQ-T.12: PQ is now ON by default. The wire
+            // is interop-compatible with classical peers (a
+            // PQ-enabled server still accepts classical
+            // HELLOs); only the originator's outgoing HELLOs
+            // carry the FLAG_PQ_HYBRID extension. Opt out via
+            // `TransportConfig { hybrid_pq: false, ..default() }`
+            // or, for `drift bridge`, the `--no-hybrid-pq` flag.
+            //
+            // Operational notes for server-side deployments:
+            //   - bump `udp_recv_buffer_bytes` to 4+ MiB to
+            //     absorb thundering-herd reconnects of large
+            //     hybrid HELLOs (drift bridge does this by
+            //     default); and
+            //   - keep `handshake_jitter_ms` non-zero on
+            //     clients that may reconnect en masse so
+            //     synchronized HELLOs don't all arrive in the
+            //     same microsecond.
+            hybrid_pq: true,
+            udp_recv_buffer_bytes: None,
+            handshake_jitter_ms: 0,
         }
     }
 
@@ -330,6 +488,28 @@ impl TransportConfig {
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
             cover_traffic_rate_hz: None,
+            bridge_fault_skip_threshold: 5,
+            bridge_fault_decay_secs: 30,
+            // Phase PQ-T.12: PQ is now ON by default. The wire
+            // is interop-compatible with classical peers (a
+            // PQ-enabled server still accepts classical
+            // HELLOs); only the originator's outgoing HELLOs
+            // carry the FLAG_PQ_HYBRID extension. Opt out via
+            // `TransportConfig { hybrid_pq: false, ..default() }`
+            // or, for `drift bridge`, the `--no-hybrid-pq` flag.
+            //
+            // Operational notes for server-side deployments:
+            //   - bump `udp_recv_buffer_bytes` to 4+ MiB to
+            //     absorb thundering-herd reconnects of large
+            //     hybrid HELLOs (drift bridge does this by
+            //     default); and
+            //   - keep `handshake_jitter_ms` non-zero on
+            //     clients that may reconnect en masse so
+            //     synchronized HELLOs don't all arrive in the
+            //     same microsecond.
+            hybrid_pq: true,
+            udp_recv_buffer_bytes: None,
+            handshake_jitter_ms: 0,
         }
     }
 }
@@ -415,6 +595,14 @@ pub(crate) struct MetricsInner {
     /// actually hold a real session with.
     pub(crate) federation_invalid_tickets_dropped: AtomicU64,
     pub(crate) batched_sends: AtomicU64,
+    /// Phase PQ: handshakes that completed using the X25519 +
+    /// ML-KEM-768 hybrid path. Subset of `handshakes_completed`.
+    pub(crate) hybrid_pq_handshakes_completed: AtomicU64,
+    /// Phase PQ: HELLOs that arrived with `FLAG_PQ_HYBRID` but
+    /// were rejected because this side has `hybrid_pq` disabled
+    /// (or vice-versa: an unexpected PQ HelloAck arrived). Each
+    /// rejection is silent on the wire but loud in this counter.
+    pub(crate) hybrid_pq_handshakes_refused: AtomicU64,
     pub(crate) handshakes_inflight: std::sync::atomic::AtomicUsize,
     /// Packets dropped because the destination peer wasn't
     /// known to this node (handlers that require `dst_id ==
@@ -464,6 +652,12 @@ pub struct Metrics {
     pub unknown_peer_drops: u64,
     pub federation_spoof_drops: u64,
     pub federation_invalid_tickets_dropped: u64,
+    /// Phase PQ. Subset of `handshakes_completed` that ran the
+    /// hybrid X25519 + ML-KEM-768 path.
+    pub hybrid_pq_handshakes_completed: u64,
+    /// Phase PQ. HELLOs refused because of a PQ posture
+    /// mismatch (either direction).
+    pub hybrid_pq_handshakes_refused: u64,
 }
 
 /// One outbound packet for `Transport::send_data_batch_qos`.
@@ -898,7 +1092,17 @@ impl Transport {
         identity: Identity,
         config: TransportConfig,
     ) -> Result<Self> {
-        let udp_socket = Arc::new(UdpSocket::bind(addr).await?);
+        let udp_socket = UdpSocket::bind(addr).await?;
+        // Phase PQ-T.11.1: opt-in SO_RCVBUF tuning. Bridges
+        // expecting many concurrent first-time handshakes
+        // (especially hybrid PQ at ~1.3 KB each) should set
+        // this to several MB to avoid kernel drops under
+        // thundering-herd reconnects. See `udp_recv_buffer_bytes`
+        // doc on TransportConfig.
+        if let Some(want) = config.udp_recv_buffer_bytes {
+            crate::io::apply_udp_recv_buffer(&udp_socket, want);
+        }
+        let udp_socket = Arc::new(udp_socket);
         #[cfg(unix)]
         if config.enable_ecn {
             if let Err(e) = ecn::enable_ecn(&udp_socket) {
@@ -1108,14 +1312,33 @@ impl Transport {
         identity: Identity,
         config: TransportConfig,
     ) -> Result<(Self, String)> {
-        let (scheme, _) = url
+        let (scheme, addr_str) = url
             .find("://")
             .map(|i| (&url[..i], &url[i + 3..]))
             .unwrap_or(("udp", url));
         let scheme = scheme.to_string();
-        let mut listener = crate::io::make_listener(url)
+        // Phase PQ-T.11.1: special-case udp:// so we can apply
+        // SO_RCVBUF via UdpListenerIO::bind_with_recv_buffer
+        // before handing off to bind_inner. Other adapters
+        // (tcp, ws, tls, http, dns, webtransport) don't expose
+        // a single socket whose recv buffer would matter at
+        // bind time — they create per-connection sockets later.
+        let mut listener: Box<dyn crate::io::Listener> = if scheme == "udp"
+            && config.udp_recv_buffer_bytes.is_some()
+        {
+            let addr = crate::io::parse_ip_addr(addr_str).map_err(DriftError::Io)?;
+            let udp = crate::io::UdpListenerIO::bind_with_recv_buffer(
+                addr,
+                config.udp_recv_buffer_bytes,
+            )
             .await
             .map_err(DriftError::Io)?;
+            Box::new(udp) as Box<dyn crate::io::Listener>
+        } else {
+            crate::io::make_listener(url)
+                .await
+                .map_err(DriftError::Io)?
+        };
         let bound_addr = listener.local_addr().map_err(DriftError::Io)?;
         let bound_url = format!("{}://{}", scheme, bound_addr);
 
@@ -1369,6 +1592,12 @@ impl Transport {
                 .load(Ordering::Relaxed),
             federation_invalid_tickets_dropped: m
                 .federation_invalid_tickets_dropped
+                .load(Ordering::Relaxed),
+            hybrid_pq_handshakes_completed: m
+                .hybrid_pq_handshakes_completed
+                .load(Ordering::Relaxed),
+            hybrid_pq_handshakes_refused: m
+                .hybrid_pq_handshakes_refused
                 .load(Ordering::Relaxed),
         }
     }
@@ -2925,7 +3154,13 @@ impl Inner {
                 if matches!(peer.handshake, HandshakeState::Pending)
                     && peer.direction == Direction::Initiator
                 {
-                    build_hello(self.local_peer_id, peer, &self.identity, mesh_next_hop)
+                    build_hello(
+                        self.local_peer_id,
+                        peer,
+                        &self.identity,
+                        mesh_next_hop,
+                        self.config.hybrid_pq,
+                    )
                 } else {
                     SendAction::Queued
                 }
@@ -3633,7 +3868,7 @@ impl Inner {
                 // announcers, or v4 with empty filter) are
                 // queried unconditionally — bloom is a pure
                 // narrowing optimization, never a strict gate.
-                let fed_peers: Vec<PeerId> = {
+                let fed_peers_bloom: Vec<PeerId> = {
                     let bf = self.peer_bloom_filters.lock().unwrap();
                     all_fed_peers
                         .iter()
@@ -3644,6 +3879,38 @@ impl Inner {
                         })
                         .collect()
                 };
+
+                // Phase G.3: reputation-based skipping. Drop
+                // peers whose fault counter is at or above the
+                // configured threshold. A bridge that has
+                // repeatedly bloom-claimed targets without
+                // delivering them gets cut out of fanout until
+                // its counter decays back below the threshold
+                // (Phase G.2). `threshold = 0` disables the
+                // check entirely (back to bloom-only behavior).
+                let fed_peers: Vec<PeerId> = {
+                    let threshold = self.config.bridge_fault_skip_threshold;
+                    if threshold == 0 {
+                        fed_peers_bloom.clone()
+                    } else {
+                        let faults = self.bridge_faults.lock().unwrap();
+                        fed_peers_bloom
+                            .iter()
+                            .copied()
+                            .filter(|pid| {
+                                faults.get(pid).copied().unwrap_or(0) < threshold
+                            })
+                            .collect()
+                    }
+                };
+                if fed_peers.len() < fed_peers_bloom.len() {
+                    debug!(
+                        target_client = ?env.target_client_pub,
+                        before = fed_peers_bloom.len(),
+                        after = fed_peers.len(),
+                        "FindPeer: reputation skipped high-fault peers"
+                    );
+                }
                 if fed_peers.len() < all_fed_peers.len() {
                     debug!(
                         target_client = ?env.target_client_pub,
@@ -4790,6 +5057,7 @@ impl Inner {
     pub(crate) async fn run_find_peer_gc_loop(self: std::sync::Arc<Self>) {
         let period = std::time::Duration::from_secs(1);
         let mut ticker = tokio::time::interval(period);
+        let gc_started_at = std::time::Instant::now();
         ticker.tick().await;
         loop {
             ticker.tick().await;
@@ -4822,8 +5090,10 @@ impl Inner {
                     *counter += 1;
                     if *counter == 5 || *counter == 25 || *counter % 100 == 0 {
                         // Log at meaningful inflection points
-                        // rather than every fault. Doesn't
-                        // demote — observe-only in v1.
+                        // rather than every fault. Demotion is
+                        // applied at fanout time
+                        // (`bridge_fault_skip_threshold`); the GC
+                        // loop just maintains the counter.
                         tracing::warn!(
                             ?pid,
                             faults = *counter,
@@ -4832,6 +5102,31 @@ impl Inner {
                              it can't actually deliver) or unreliable"
                         );
                     }
+                }
+            }
+            // Phase G.2: exponential decay of fault counters.
+            // Faults arrive on the pending_find deadline cadence
+            // (one fault per blame every 2s+ when a bridge is
+            // actively misbehaving), so the decay has to be much
+            // slower than the GC tick (1s) or counters can never
+            // climb. Halve every `bridge_fault_decay_secs` —
+            // slow enough that a steady stream of faults
+            // accumulates past the threshold within seconds,
+            // fast enough that a once-bad bridge recovers within
+            // a couple of minutes of good behavior.
+            let decay_secs = self.config.bridge_fault_decay_secs;
+            if decay_secs > 0 {
+                let cycles_since_start = now
+                    .saturating_duration_since(gc_started_at)
+                    .as_secs();
+                if cycles_since_start > 0
+                    && cycles_since_start % decay_secs == 0
+                {
+                    let mut faults = self.bridge_faults.lock().unwrap();
+                    faults.retain(|_, counter| {
+                        *counter >>= 1;
+                        *counter > 0
+                    });
                 }
             }
             // recent_queries values are `Instant` deadlines.
@@ -5026,6 +5321,21 @@ impl Inner {
                 }
             }
             SendAction::Hello(bytes, addr, iface) => {
+                // Phase PQ-T.11.3: first-HELLO jitter.
+                // Only the FIRST HELLO comes through SendAction::Hello —
+                // retransmits go directly through the retry loop, which
+                // already spreads them via exponential backoff. So this
+                // delay applies once per fresh handshake, exactly when
+                // synchronized reconnects need spreading out.
+                let jitter_ms = self.config.handshake_jitter_ms;
+                if jitter_ms > 0 {
+                    use rand::Rng;
+                    let delay = rand::thread_rng().gen_range(0..jitter_ms);
+                    if delay > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay))
+                            .await;
+                    }
+                }
                 self.ifaces.send_for(iface, &bytes, addr).await?;
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics
@@ -5454,16 +5764,35 @@ impl Inner {
                     // both simultaneously (one to pick wire
                     // type, one to bump attempts).
                     let resumption_ctx = peer.pending_resumption.clone();
+                    // Phase PQ-T.10: if a previous session
+                    // gave us a real RTT sample for this peer,
+                    // use the RFC 6298 §2.4 formula instead of
+                    // the static `handshake_retry_base_ms`
+                    // default. Floor at 200ms (DRIFT-specific
+                    // — RFC 6298's 1s floor is conservative
+                    // for transcontinental TCP, not our
+                    // typical paths). Drops "initial" 1s
+                    // default to RTT-aware on rekey / second
+                    // handshake without giving up the
+                    // first-contact safety margin.
+                    let effective_base_ms = match peer.neighbor_srtt {
+                        Some(srtt) => {
+                            let srtt_ms = srtt.as_millis() as u64;
+                            (4 * srtt_ms).max(200)
+                        }
+                        None => self.config.handshake_retry_base_ms,
+                    };
                     if let HandshakeState::AwaitingAck {
                         client_nonce,
                         ephemeral,
                         last_sent,
                         attempts,
                         cookie,
+                        pq,
                     } = &mut peer.handshake
                     {
                         let wait =
-                            handshake_backoff_ms(self.config.handshake_retry_base_ms, *attempts);
+                            handshake_backoff_ms(effective_base_ms, *attempts);
                         if last_sent.elapsed() < std::time::Duration::from_millis(wait) {
                             continue;
                         }
@@ -5490,6 +5819,12 @@ impl Inner {
                                 mesh.is_some(),
                             )
                         } else {
+                            // Re-emit the same ML-KEM ek bytes
+                            // for the retransmit so the server,
+                            // if it eventually responds, produces
+                            // a ciphertext we can decapsulate
+                            // with the stashed dk.
+                            let pq_ek = pq.as_ref().map(|(ek, _)| ek.as_slice());
                             build_hello_wire(
                                 self.local_peer_id,
                                 peer.id,
@@ -5498,6 +5833,7 @@ impl Inner {
                                 *client_nonce,
                                 mesh.is_some(),
                                 cookie.as_ref(),
+                                pq_ek,
                             )
                         };
                         let target = mesh.unwrap_or(peer.addr);
@@ -5571,12 +5907,59 @@ impl Inner {
             return Err(DriftError::AuthFailed);
         }
 
+        // Phase PQ: extract the ML-KEM encap key when the
+        // client signaled `FLAG_PQ_HYBRID`. We reject HELLOs
+        // that request PQ when this side has `hybrid_pq`
+        // disabled — silent fallback to classical would defeat
+        // the originator's harvest-now-decrypt-later guarantee.
+        // The ek lives at the very tail of the body, after any
+        // cookie that may also be present.
+        let pq_requested =
+            (header.flags & drift_core::header::FLAG_PQ_HYBRID) != 0;
+        if pq_requested && !self.config.hybrid_pq {
+            let cpid = derive_peer_id(&client_static_pub);
+            tracing::warn!(
+                client_peer_id = ?cpid,
+                ?src,
+                "rejected HELLO with FLAG_PQ_HYBRID — \
+                 this server has hybrid_pq disabled; \
+                 client must retry without the flag"
+            );
+            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .hybrid_pq_handshakes_refused
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(DriftError::AuthFailed);
+        }
+        let pq_client_ek: Option<Vec<u8>> = if pq_requested {
+            if body.len() < HELLO_PAYLOAD_LEN + HELLO_PQ_TAIL_LEN {
+                return Err(DriftError::PacketTooShort {
+                    got: body.len(),
+                    need: HELLO_PAYLOAD_LEN + HELLO_PQ_TAIL_LEN,
+                });
+            }
+            let ek_start = body.len() - HELLO_PQ_TAIL_LEN;
+            Some(body[ek_start..].to_vec())
+        } else {
+            None
+        };
+
         // Adaptive DoS cookie check. Happens BEFORE any peer-table
         // allocation and BEFORE any X25519 work, so an attacker
         // spamming HELLOs from spoofed addresses only costs us the
         // Blake2b MAC compute + a single UDP send per packet.
+        //
+        // Phase PQ: the PQ ek (1184 B) sits at the body tail and
+        // can make a non-cookie HELLO look long enough to falsely
+        // satisfy a simple `body.len() >= HELLO_WITH_COOKIE_LEN`
+        // check. Strip the PQ tail before deciding cookie
+        // presence — the cookie lives between the base and the
+        // PQ ek (see SPEC.md §6.7).
         let cookie_required = self.cookie_required_sync();
-        let has_cookie_tail = body.len() >= HELLO_WITH_COOKIE_LEN;
+        let body_minus_pq = body
+            .len()
+            .saturating_sub(if pq_requested { HELLO_PQ_TAIL_LEN } else { 0 });
+        let has_cookie_tail = body_minus_pq >= HELLO_WITH_COOKIE_LEN;
         if cookie_required {
             if !has_cookie_tail {
                 self.send_challenge(
@@ -5734,6 +6117,7 @@ impl Inner {
                         &self.metrics.handshakes_inflight,
                         header.hop_ttl,
                         iface_idx,
+                        pq_client_ek.as_deref(),
                     )?
                 }
             } else {
@@ -5759,6 +6143,7 @@ impl Inner {
                     &self.metrics.handshakes_inflight,
                     header.hop_ttl,
                     iface_idx,
+                    pq_client_ek.as_deref(),
                 )?
             }
         };
@@ -5827,6 +6212,25 @@ impl Inner {
                 need: HELLO_ACK_PAYLOAD_LEN,
             });
         }
+        // Phase PQ: if the server signaled `FLAG_PQ_HYBRID`,
+        // the body has an ML-KEM-768 ciphertext appended after
+        // the standard auth tag. Extract it; the decapsulation
+        // happens later inside the peer-lock block once we have
+        // the stashed dk.
+        let server_pq = (header.flags & drift_core::header::FLAG_PQ_HYBRID) != 0;
+        let pq_ct: Option<&[u8]> = if server_pq {
+            let need = HELLO_ACK_PAYLOAD_LEN + HELLO_ACK_PQ_TAIL_LEN;
+            if body.len() < need {
+                return Err(DriftError::PacketTooShort {
+                    got: body.len(),
+                    need,
+                });
+            }
+            let ct_start = HELLO_ACK_PAYLOAD_LEN;
+            Some(&body[ct_start..ct_start + HELLO_ACK_PQ_TAIL_LEN])
+        } else {
+            None
+        };
         let mut server_ephemeral_pub = [0u8; STATIC_KEY_LEN];
         server_ephemeral_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
         let mut server_nonce = [0u8; NONCE_LEN];
@@ -5857,15 +6261,21 @@ impl Inner {
             // Pattern match by value via std::mem::replace to consume the
             // ephemeral secret (it's not Copy).
             let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
-            let (client_nonce, ephemeral, hello_sent_at) = match old_state {
+            let (client_nonce, ephemeral, hello_sent_at, pq_dk_opt) = match old_state {
                 HandshakeState::AwaitingAck {
                     client_nonce,
                     ephemeral,
                     last_sent,
+                    pq,
                     ..
                     // `cookie` is discarded — once HELLO_ACK lands, the
                     // handshake is done and the token is no longer useful.
-                } => (client_nonce, ephemeral, last_sent),
+                } => (
+                    client_nonce,
+                    ephemeral,
+                    last_sent,
+                    pq.map(|(_ek, dk)| dk),
+                ),
                 other => {
                     // Restore and bail.
                     peer.handshake = other;
@@ -5873,6 +6283,27 @@ impl Inner {
                     return Ok(());
                 }
             };
+
+            // Phase PQ: the client and server must agree on
+            // PQ vs classical. Mismatch is a protocol error.
+            //   - We asked for PQ (pq_dk_opt.is_some()) but
+            //     server replied without the flag → silent
+            //     downgrade attempt; refuse.
+            //   - We did NOT ask for PQ but server replied with
+            //     the flag → server-side state corruption or
+            //     a forged ACK; refuse.
+            if pq_dk_opt.is_some() != server_pq {
+                tracing::warn!(
+                    client_pq = pq_dk_opt.is_some(),
+                    server_pq,
+                    "PQ posture mismatch in HELLO_ACK — refusing handshake"
+                );
+                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .hybrid_pq_handshakes_refused
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(DriftError::AuthFailed);
+            }
 
             // Passive RTT sample: the time from when we sent
             // the last HELLO to receiving this HELLO_ACK is
@@ -5894,8 +6325,35 @@ impl Inner {
                 .dh(&server_ephemeral_pub)
                 .ok_or(DriftError::AuthFailed)?;
             drop(ephemeral); // zeroize client ephemeral secret
-            let session_key_bytes =
-                derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce);
+
+            // Phase PQ: decapsulate the server's ML-KEM
+            // ciphertext (if any) with the stashed dk and
+            // derive the hybrid session key. A bogus ct (wrong
+            // length, decap failure) returns None → reject
+            // the whole handshake. The dk drops after this
+            // block, zeroing itself.
+            let session_key_bytes = if let (Some(dk), Some(ct)) =
+                (pq_dk_opt, pq_ct)
+            {
+                let mlkem_ss = dk
+                    .decapsulate(ct)
+                    .ok_or(DriftError::AuthFailed)?;
+                let key = drift_core::pq::derive_hybrid_key(
+                    &static_dh,
+                    &ephemeral_dh,
+                    &mlkem_ss,
+                    &client_nonce,
+                    &server_nonce,
+                );
+                drift_core::Zeroizing::new(key)
+            } else {
+                derive_session_key(
+                    &static_dh,
+                    &ephemeral_dh,
+                    &client_nonce,
+                    &server_nonce,
+                )
+            };
 
             let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
             let rx = SessionKey::new(&session_key_bytes, Direction::Responder);
@@ -5903,10 +6361,23 @@ impl Inner {
             let mut hbuf = [0u8; HEADER_LEN];
             header.encode(&mut hbuf);
             let canon = canonical_aad(&hbuf);
-            let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
+            // Phase PQ: when hybrid, the AAD must mirror the
+            // server's — header + server_eph_pub + server_nonce
+            // + server_mlkem_ct. If anyone tampered with the ct
+            // we got a different mlkem_ss → different session
+            // key → AEAD open() below fails.
+            let mut aad = Vec::with_capacity(
+                HEADER_LEN
+                    + STATIC_KEY_LEN
+                    + NONCE_LEN
+                    + pq_ct.map(|c| c.len()).unwrap_or(0),
+            );
             aad.extend_from_slice(&canon);
             aad.extend_from_slice(&server_ephemeral_pub);
             aad.extend_from_slice(&server_nonce);
+            if let Some(ct) = pq_ct {
+                aad.extend_from_slice(ct);
+            }
             rx.open(1, PacketType::HelloAck as u8, &aad, tag)?;
 
             peer.reset_seq();
@@ -5925,6 +6396,11 @@ impl Inner {
             self.metrics
                 .handshakes_completed
                 .fetch_add(1, Ordering::Relaxed);
+            if server_pq {
+                self.metrics
+                    .hybrid_pq_handshakes_completed
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             debug!("handshake complete with peer {:?}", peer_id);
             if let Some(q) = &self.qlog {
                 q.log_handshake_complete(&format!("{:?}", peer_id), false);
@@ -6156,7 +6632,11 @@ impl Inner {
             let mut flushed: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::new();
             if matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
                 if let HandshakeState::AwaitingData {
-                    tx, rx, key_bytes, ..
+                    tx,
+                    rx,
+                    key_bytes,
+                    was_hybrid_pq,
+                    ..
                 } = std::mem::replace(&mut peer.handshake, HandshakeState::Pending)
                 {
                     peer.handshake = HandshakeState::Established {
@@ -6168,6 +6648,11 @@ impl Inner {
                     self.metrics
                         .handshakes_completed
                         .fetch_add(1, Ordering::Relaxed);
+                    if was_hybrid_pq {
+                        self.metrics
+                            .hybrid_pq_handshakes_completed
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     self.metrics
                         .handshakes_inflight
                         .fetch_sub(1, Ordering::Relaxed);
@@ -6565,6 +7050,7 @@ fn regenerate_session(
     inflight_gauge: &std::sync::atomic::AtomicUsize,
     incoming_hop_ttl: u8,
     iface_idx: usize,
+    pq_client_ek: Option<&[u8]>,
 ) -> Result<(Vec<u8>, SocketAddr)> {
     let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
     let server_nonce = random_nonce();
@@ -6581,8 +7067,31 @@ fn regenerate_session(
     let ephemeral_dh = server_ephemeral
         .dh(&client_ephemeral_pub)
         .ok_or(DriftError::AuthFailed)?;
-    let session_key_bytes =
-        derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce);
+
+    // Phase PQ: if the client supplied an ML-KEM-768 encap key,
+    // encapsulate it and weave the resulting shared secret into
+    // the session-key derivation via `derive_hybrid_key`. The
+    // ciphertext ships back in HELLO_ACK so the client can
+    // decapsulate. Reject malformed ek (wrong length, decap
+    // failure) with AuthFailed — same disposition as a bad
+    // X25519 contribution.
+    let (session_key_bytes, server_mlkem_ct) = if let Some(ek) = pq_client_ek {
+        let (ct, mlkem_ss) = drift_core::pq::server_encapsulate(ek)
+            .ok_or(DriftError::AuthFailed)?;
+        let key = drift_core::pq::derive_hybrid_key(
+            &static_dh,
+            &ephemeral_dh,
+            &mlkem_ss,
+            &client_nonce,
+            &server_nonce,
+        );
+        (drift_core::Zeroizing::new(key), Some(ct))
+    } else {
+        (
+            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce),
+            None,
+        )
+    };
     // server_ephemeral drops here; StaticSecret's Zeroize impl clears it.
     drop(server_ephemeral);
 
@@ -6617,24 +7126,46 @@ fn regenerate_session(
 
     let mut ack_header = Header::new(PacketType::HelloAck, 1, local_peer_id, client_peer_id)
         .with_hop_ttl(DEFAULT_MESH_TTL);
-    ack_header.payload_len = HELLO_ACK_PAYLOAD_LEN as u16;
+    if server_mlkem_ct.is_some() {
+        ack_header.flags |= drift_core::header::FLAG_PQ_HYBRID;
+    }
+    let ack_payload_len = HELLO_ACK_PAYLOAD_LEN
+        + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0);
+    ack_header.payload_len = ack_payload_len as u16;
     let mut hbuf = [0u8; HEADER_LEN];
     ack_header.encode(&mut hbuf);
 
     let canon = canonical_aad(&hbuf);
-    // AAD covers header + server_ephemeral_pub + server_nonce so that
-    // tampering with either fails the tag.
-    let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
+    // AAD covers header + server_ephemeral_pub + server_nonce +
+    // (when hybrid) server_mlkem_ct so that tampering with any
+    // of them fails the tag. The ML-KEM ciphertext is plaintext
+    // on the wire — it has to be, the client needs to
+    // decapsulate it — but its integrity is bound by the tag
+    // derived from the hybrid key, so a man-in-the-middle who
+    // edits the ct flips the client's derived key and the AEAD
+    // open() fails cleanly.
+    let mut aad = Vec::with_capacity(
+        HEADER_LEN
+            + STATIC_KEY_LEN
+            + NONCE_LEN
+            + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0),
+    );
     aad.extend_from_slice(&canon);
     aad.extend_from_slice(&server_ephemeral_pub);
     aad.extend_from_slice(&server_nonce);
+    if let Some(ct) = &server_mlkem_ct {
+        aad.extend_from_slice(ct);
+    }
     let tag = tx.seal(1, PacketType::HelloAck as u8, &aad, b"")?;
 
-    let mut wire = Vec::with_capacity(HEADER_LEN + HELLO_ACK_PAYLOAD_LEN);
+    let mut wire = Vec::with_capacity(HEADER_LEN + ack_payload_len);
     wire.extend_from_slice(&hbuf);
     wire.extend_from_slice(&server_ephemeral_pub);
     wire.extend_from_slice(&server_nonce);
     wire.extend_from_slice(&tag);
+    if let Some(ct) = &server_mlkem_ct {
+        wire.extend_from_slice(ct);
+    }
 
     peer.handshake = HandshakeState::AwaitingData {
         tx: tx.clone(),
@@ -6642,6 +7173,7 @@ fn regenerate_session(
         key_bytes: session_key_bytes,
         cached_ack: wire.clone(),
         cached_client_nonce: client_nonce,
+        was_hybrid_pq: server_mlkem_ct.is_some(),
     };
     if !was_awaiting_data {
         inflight_gauge.fetch_add(1, Ordering::Relaxed);
@@ -6662,16 +7194,21 @@ fn build_hello_wire(
     client_nonce: [u8; NONCE_LEN],
     mesh: bool,
     cookie: Option<&[u8; COOKIE_BLOB_LEN]>,
+    pq_ek: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut header = Header::new(PacketType::Hello, 0, local_peer_id, dst_id);
     if mesh {
         header = header.with_hop_ttl(DEFAULT_MESH_TTL);
     }
-    let payload_len = if cookie.is_some() {
+    if pq_ek.is_some() {
+        header.flags |= drift_core::header::FLAG_PQ_HYBRID;
+    }
+    let base_len = if cookie.is_some() {
         HELLO_WITH_COOKIE_LEN
     } else {
         HELLO_PAYLOAD_LEN
     };
+    let payload_len = base_len + pq_ek.map(|ek| ek.len()).unwrap_or(0);
     header.payload_len = payload_len as u16;
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
@@ -6683,6 +7220,9 @@ fn build_hello_wire(
     wire.extend_from_slice(&client_nonce);
     if let Some(c) = cookie {
         wire.extend_from_slice(c);
+    }
+    if let Some(ek) = pq_ek {
+        wire.extend_from_slice(ek);
     }
     wire
 }
@@ -6723,6 +7263,7 @@ fn build_hello(
     peer: &mut Peer,
     identity: &Identity,
     mesh_next_hop: Option<SocketAddr>,
+    hybrid_pq: bool,
 ) -> SendAction {
     // Mesh-only peer with no route yet: peer.addr is the
     // 0.0.0.0:0 placeholder that `add_mesh_peer` set, and no
@@ -6738,6 +7279,16 @@ fn build_hello(
     let client_nonce = random_nonce();
     let ephemeral = Identity::generate();
     let ephemeral_pub = ephemeral.public_bytes();
+    // Phase PQ: generate an ML-KEM-768 keypair when the
+    // hybrid handshake is enabled. The ek bytes get embedded
+    // in the HELLO; the dk stays in the AwaitingAck state so
+    // we can decapsulate the server's ciphertext on
+    // HELLO_ACK arrival.
+    let pq = if hybrid_pq {
+        Some(drift_core::pq::client_generate_keypair())
+    } else {
+        None
+    };
     let wire = build_hello_wire(
         local_peer_id,
         peer.id,
@@ -6746,6 +7297,7 @@ fn build_hello(
         client_nonce,
         mesh_next_hop.is_some(),
         None,
+        pq.as_ref().map(|(ek, _)| ek.as_slice()),
     );
     peer.handshake = HandshakeState::AwaitingAck {
         client_nonce,
@@ -6753,6 +7305,7 @@ fn build_hello(
         last_sent: Instant::now(),
         attempts: 1,
         cookie: None,
+        pq,
     };
     let target = mesh_next_hop.unwrap_or(peer.addr);
     SendAction::Hello(wire, target, peer.interface_id)

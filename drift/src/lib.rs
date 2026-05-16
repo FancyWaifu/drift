@@ -24,6 +24,7 @@ pub mod transport;
 pub mod wire_dns;
 pub mod wire_doh;
 pub mod wire_http;
+pub mod wire_webtransport;
 
 // `onion://` adapter — opt-in via `--features onion`. The whole
 // Tor protocol stack is heavyweight, so we don't compile it

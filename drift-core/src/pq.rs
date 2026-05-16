@@ -100,25 +100,35 @@ pub fn server_encapsulate(ek_bytes: &[u8]) -> Option<(Vec<u8>, [u8; ML_KEM_SS_LE
     Some((ct.as_slice().to_vec(), ss_bytes))
 }
 
-/// Combine a classical X25519 shared secret and an ML-KEM
-/// shared secret into one 32-byte session key using the
+/// Combine the classical X25519 shared secrets (static + ephemeral
+/// halves, as produced by the existing DRIFT handshake) and an
+/// ML-KEM shared secret into one 32-byte session key using the
 /// DRIFT hybrid KDF:
 ///
-///   `session_key = BLAKE2b("drift-hybrid-pq-v1"
-///                          ‖ x25519_ss ‖ mlkem_ss
+///   `session_key = BLAKE2b("drift-hybrid-pq-v2"
+///                          ‖ static_dh ‖ ephemeral_dh ‖ mlkem_ss
 ///                          ‖ client_nonce ‖ server_nonce)`
 ///
-/// Both KEMs feed in; an attacker who breaks one still
-/// faces a 32-byte uniform shared secret from the other.
+/// Both KEMs feed in; an attacker who breaks one still faces a
+/// 32-byte uniform shared secret from the other. The two
+/// X25519 halves are kept separate (rather than pre-mixed) so
+/// the hybrid path's transcript matches the classical
+/// `derive_session_key` byte-for-byte except for the domain
+/// separator and the inserted `mlkem_ss`. This makes the
+/// security argument easier to follow: any forward secrecy or
+/// authentication property the classical path holds carries
+/// over unchanged.
 pub fn derive_hybrid_key(
-    x25519_ss: &[u8; 32],
+    static_dh: &[u8; 32],
+    ephemeral_dh: &[u8; 32],
     mlkem_ss: &[u8; ML_KEM_SS_LEN],
     client_nonce: &[u8; 16],
     server_nonce: &[u8; 16],
 ) -> [u8; 32] {
     let mut h = Blake2b::<U32>::new();
-    h.update(b"drift-hybrid-pq-v1");
-    h.update(x25519_ss);
+    h.update(b"drift-hybrid-pq-v2");
+    h.update(static_dh);
+    h.update(ephemeral_dh);
     h.update(mlkem_ss);
     h.update(client_nonce);
     h.update(server_nonce);
@@ -149,24 +159,28 @@ mod tests {
 
     #[test]
     fn hybrid_kdf_combines_both_kems() {
-        let x25519_ss = [0x11u8; 32];
+        let static_dh = [0x11u8; 32];
+        let eph_dh = [0x55u8; 32];
         let mlkem_ss = [0x22u8; 32];
         let cnonce = [0x33u8; 16];
         let snonce = [0x44u8; 16];
 
-        let k1 = derive_hybrid_key(&x25519_ss, &mlkem_ss, &cnonce, &snonce);
-        let k2 = derive_hybrid_key(&x25519_ss, &mlkem_ss, &cnonce, &snonce);
+        let k1 = derive_hybrid_key(&static_dh, &eph_dh, &mlkem_ss, &cnonce, &snonce);
+        let k2 = derive_hybrid_key(&static_dh, &eph_dh, &mlkem_ss, &cnonce, &snonce);
         assert_eq!(k1, k2, "derivation is deterministic");
 
-        // Changing either input half produces a different
-        // session key.
+        // Changing any input changes the session key.
         let mlkem_ss2 = [0x77u8; 32];
-        let k3 = derive_hybrid_key(&x25519_ss, &mlkem_ss2, &cnonce, &snonce);
+        let k3 = derive_hybrid_key(&static_dh, &eph_dh, &mlkem_ss2, &cnonce, &snonce);
         assert_ne!(k1, k3, "mlkem_ss change must propagate");
 
-        let x25519_ss2 = [0x88u8; 32];
-        let k4 = derive_hybrid_key(&x25519_ss2, &mlkem_ss, &cnonce, &snonce);
-        assert_ne!(k1, k4, "x25519_ss change must propagate");
+        let static_dh2 = [0x88u8; 32];
+        let k4 = derive_hybrid_key(&static_dh2, &eph_dh, &mlkem_ss, &cnonce, &snonce);
+        assert_ne!(k1, k4, "static_dh change must propagate");
+
+        let eph_dh2 = [0x99u8; 32];
+        let k5 = derive_hybrid_key(&static_dh, &eph_dh2, &mlkem_ss, &cnonce, &snonce);
+        assert_ne!(k1, k5, "ephemeral_dh change must propagate");
     }
 
     #[test]

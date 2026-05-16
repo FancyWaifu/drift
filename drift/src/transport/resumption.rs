@@ -489,6 +489,13 @@ impl Inner {
                 last_sent: Instant::now(),
                 attempts: 1,
                 cookie: None,
+                // ResumeHello path doesn't use PQ hybrid — a
+                // resumed session inherits the original
+                // session's key strength via the PSK rather
+                // than running a fresh KEM. PQ for resumption
+                // is a future-work item if the original
+                // session was PQ-derived.
+                pq: None,
             };
 
             let seq = peer

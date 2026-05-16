@@ -53,6 +53,16 @@ pub enum HandshakeState {
         last_sent: Instant,
         attempts: u8,
         cookie: Option<[u8; 24]>,
+        /// Phase PQ: client-side ML-KEM-768 keypair stashed for
+        /// the duration of the hybrid handshake. `Some(_)` iff
+        /// this HELLO was sent with `header::FLAG_PQ_HYBRID`.
+        /// The `Vec<u8>` is the 1184-byte encapsulation-key
+        /// bytes — kept so retransmits can re-emit the same ek
+        /// without re-running keygen. The `MlKemDecapKey`
+        /// decapsulates the server's ciphertext when HELLO_ACK
+        /// arrives, then drops (zeroed via the wrapper) once
+        /// the session is established.
+        pq: Option<(Vec<u8>, crate::pq::MlKemDecapKey)>,
     },
     /// We received a HELLO and sent a HELLO_ACK. Session key ready.
     /// We stay here until the first authenticated DATA packet arrives,
@@ -71,6 +81,13 @@ pub enum HandshakeState {
         key_bytes: Zeroizing<[u8; 32]>,
         cached_ack: Vec<u8>,
         cached_client_nonce: [u8; NONCE_LEN],
+        /// Phase PQ: true if the HELLO that produced this
+        /// pending session carried `FLAG_PQ_HYBRID` (server
+        /// derived a hybrid X25519+ML-KEM key). Carried forward
+        /// so the server-side "handshake fully complete" point
+        /// (first authenticated DATA in `handle_data`) can
+        /// bump the `hybrid_pq_handshakes_completed` metric.
+        was_hybrid_pq: bool,
     },
     /// Fully established — data flowing in both directions.
     ///

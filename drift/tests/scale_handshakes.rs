@@ -4,7 +4,7 @@
 //! eviction reaper against many simultaneous in-flight sessions.
 
 use drift::identity::Identity;
-use drift::{Direction, Transport};
+use drift::{Direction, Transport, TransportConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,12 +12,27 @@ use std::time::Duration;
 async fn thousand_concurrent_handshakes() {
     const N: usize = 1000;
 
+    // The server tunes its UDP recv buffer to absorb a 1000-
+    // client thundering herd. With hybrid PQ as the default
+    // (T.12) each HELLO is ~1.3 KB, so 1000 simultaneous
+    // arrivals are ~1.3 MB — well above the OS default ~200 KB
+    // recv buffer. Bridges in production do this via the
+    // `drift bridge --udp-recv-buffer-bytes` flag; the test
+    // configures the same knob directly.
     let server_id = Identity::from_secret_bytes([0xAB; 32]);
     let server_pub = server_id.public_bytes();
+    let server_cfg = TransportConfig {
+        udp_recv_buffer_bytes: Some(4 * 1024 * 1024),
+        ..Default::default()
+    };
     let server = Arc::new(
-        Transport::bind("127.0.0.1:0".parse().unwrap(), server_id)
-            .await
-            .unwrap(),
+        Transport::bind_with_config(
+            "127.0.0.1:0".parse().unwrap(),
+            server_id,
+            server_cfg,
+        )
+        .await
+        .unwrap(),
     );
     let server_addr = server.local_addr().unwrap();
 

@@ -94,6 +94,11 @@ fn answerer_dc(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "webrtc-rs ICE gathering hangs on macOS in loopback mode; \
+              see Quick Win 1 in the session retrospective"
+)]
 async fn handshake_and_data_over_webrtc() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

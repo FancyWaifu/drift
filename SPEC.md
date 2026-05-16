@@ -305,6 +305,73 @@ Tickets have a 1-hour default TTL. A resumption attempt with an expired or rejec
 
 After a `restart_handshake()` call, the cached ticket MUST be cleared — otherwise the next `send_data` will pick the now-invalid ticket and trigger a `ResumeHello` that the fresh-state server can't process.
 
+### 6.7 Post-quantum hybrid handshake (`FLAG_PQ_HYBRID`)
+
+DRIFT supports an X25519 + ML-KEM-768 hybrid key exchange for sessions whose long-term confidentiality must survive a future quantum adversary that can break X25519 (the "harvest now, decrypt later" threat). Both halves of the hybrid feed the session key — an attacker who breaks one must still solve the other, and ML-KEM-768 is post-quantum-secure.
+
+**Default-on as of 2026-05-16.** `TransportConfig::default()` returns `hybrid_pq = true`. The originator's HELLO carries the header flag `FLAG_PQ_HYBRID` (`1 << 2`) and appends an ML-KEM-768 encapsulation key; the responder's HELLO_ACK mirrors the flag and appends the ciphertext. Classical peers (no flag) are still accepted for interop — see the negotiation table below. To opt out (legacy peers, bandwidth-constrained devices), set `hybrid_pq = false` in the config or pass `--no-hybrid-pq` to `drift bridge`.
+
+#### Wire format
+
+`Hello` body when `FLAG_PQ_HYBRID` is set:
+
+```
+[
+  client_static_pub      (32)
+  client_ephemeral_pub   (32)
+  client_nonce           (16)
+  [optional cookie blob — see §6.5] (24 if present)
+  client_mlkem_ek        (1184)    ← always last; field order is: base ‖ cookie? ‖ pq_ek
+]
+```
+
+`HelloAck` body when `FLAG_PQ_HYBRID` is set:
+
+```
+[
+  server_ephemeral_pub   (32)
+  server_nonce           (16)
+  auth_tag               (16)      ← AEAD tag over header + server_eph_pub + server_nonce + server_mlkem_ct
+  server_mlkem_ct        (1088)
+]
+```
+
+The auth tag's AAD includes `server_mlkem_ct`, so any tampering with the ciphertext changes the client's derived session key and fails the AEAD open.
+
+#### Session-key derivation
+
+Hybrid mode replaces the classical `derive_session_key` with `derive_hybrid_key`:
+
+```
+session_key = BLAKE2b-256(
+    "drift-hybrid-pq-v2"
+  ‖ static_dh           (32)
+  ‖ ephemeral_dh        (32)
+  ‖ mlkem_ss            (32)   ← from ML-KEM-768 encap/decap
+  ‖ client_nonce        (16)
+  ‖ server_nonce        (16)
+)
+```
+
+The transcript is the classical KDF's transcript with `mlkem_ss` inserted and a fresh domain separator. All classical properties (forward secrecy from the ephemeral DH, identity binding from the static DH) carry over unchanged.
+
+#### Negotiation rules
+
+A peer's `hybrid_pq` config setting is local. The wire signal is the per-handshake `FLAG_PQ_HYBRID` flag. The two interact as follows:
+
+| Originator setting | `FLAG_PQ_HYBRID` on HELLO | Responder setting | Disposition |
+|---|---|---|---|
+| `false` | not set | `false` | Classical handshake (default behavior). |
+| `false` | not set | `true` | Classical handshake — responder accepts non-PQ originators for backwards compatibility. |
+| `true` | set | `true` | Hybrid handshake. |
+| `true` | set | `false` | **Refused**. Responder logs `rejected HELLO with FLAG_PQ_HYBRID` and returns no reply. The originator MUST NOT silently retry without the flag (silent downgrade would defeat the PQ guarantee the application opted into). |
+
+On the originator side, a `HelloAck` whose `FLAG_PQ_HYBRID` doesn't match the originator's outbound HELLO is treated as a protocol violation and the handshake is aborted.
+
+#### Wire cost
+
+Hybrid HELLO is ~1264 bytes (vs. 80 classical); hybrid HELLO_ACK is ~1152 bytes (vs. 64 classical). Both fit well under typical MTUs. The extra cost is per-handshake only — established sessions have identical DATA framing.
+
 ## 7. Data plane
 
 ### 7.1 DATA packet
