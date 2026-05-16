@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>drift-wasm browser harness</title>
+</head>
+<body>
+  <h1>drift-wasm browser harness</h1>
+  <pre id="log"></pre>
+
+  <script type="module">
+    // Bootstrap: load the wasm-pack `web` bundle, run its init,
+    // then re-export the public classes on `window` so Playwright
+    // `page.evaluate(...)` blocks can drive them.
+    import init, {
+      DriftIdentity,
+      DriftClient,
+      derivePeerId,
+    } from "/pkg-web/drift_wasm.js";
+
+    const logEl = document.getElementById("log");
+    const log = (msg) => {
+      logEl.textContent += msg + "\n";
+      // Also surface to Playwright's page-console capture.
+      console.log("[harness]", msg);
+    };
+
+    try {
+      await init();
+      window.DriftIdentity = DriftIdentity;
+      window.DriftClient = DriftClient;
+      window.derivePeerId = derivePeerId;
+      window.driftReady = true;
+      log("drift-wasm initialized");
+    } catch (e) {
+      window.driftReady = false;
+      window.driftInitError = String(e?.stack || e);
+      log("drift-wasm init FAILED: " + window.driftInitError);
+    }
+  </script>
+</body>
+</html>

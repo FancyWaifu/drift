@@ -1,0 +1,73 @@
+name: drift-wasm browser harness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "drift-wasm/**"
+      - "drift/src/**"
+      - "drift-core/src/**"
+      - ".github/workflows/browser-harness.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "drift-wasm/**"
+      - "drift/src/**"
+      - "drift-core/src/**"
+      - ".github/workflows/browser-harness.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  browser-harness:
+    name: playwright (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build native drift binary
+        run: cargo build --release -p drift --bin drift
+
+      - name: Build drift-wasm pkg-web
+        working-directory: drift-wasm
+        run: wasm-pack build --release --target web --out-dir pkg-web
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: drift-wasm/test/browser/package-lock.json
+
+      - name: Install harness dependencies
+        working-directory: drift-wasm/test/browser
+        run: npm install
+
+      - name: Install Playwright browser
+        working-directory: drift-wasm/test/browser
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run browser harness
+        working-directory: drift-wasm/test/browser
+        run: npx playwright test --project=${{ matrix.browser }}
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.browser }}
+          path: drift-wasm/test/browser/playwright-report/
+          retention-days: 14

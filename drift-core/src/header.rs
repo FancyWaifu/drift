@@ -6,9 +6,18 @@ pub const PROTOCOL_VERSION: u8 = 1;
 
 pub const FLAG_ROUTED: u8 = 1 << 0;
 pub const FLAG_COALESCE: u8 = 1 << 1;
-// Flag bits 1 << 2 and 1 << 3 were reserved for a FIN / ACK_REQ
-// feature that was never wired up on either side. Removed so the
-// header surface doesn't expose dead bits that decode as valid.
+/// Phase PQ: this HELLO / HELLO_ACK carries the X25519+ML-KEM-768
+/// hybrid handshake extension. The sender appended an ML-KEM
+/// encapsulation key (client side, in HELLO) or ciphertext
+/// (server side, in HELLO_ACK) to the standard payload — see
+/// `drift::transport`'s `HELLO_PQ_TAIL_LEN` / `HELLO_ACK_PQ_TAIL_LEN`
+/// and `derive_hybrid_key` in `drift-core::pq`. A flag-aware
+/// peer with `hybrid_pq` disabled MUST refuse the handshake;
+/// silent fallback to non-PQ would defeat the harvest-now-
+/// decrypt-later guarantee the client asked for.
+pub const FLAG_PQ_HYBRID: u8 = 1 << 2;
+// Flag bit 1 << 3 was reserved for an unused FIN / ACK_REQ
+// feature; still free.
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

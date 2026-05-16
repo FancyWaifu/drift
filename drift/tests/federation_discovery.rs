@@ -511,6 +511,185 @@ async fn bridge_fault_counter_increments_on_unfulfilled_claim() {
     );
 }
 
+// ─── Test 1k: Phase G — high-fault peer gets skipped from fanout ────
+
+#[tokio::test]
+async fn fanout_skips_peer_past_fault_threshold() {
+    // Scenario: bridge_b repeatedly bloom-claims targets it
+    // can't deliver. After 2 faults (the test-tuned threshold),
+    // bridge_a should stop sending FindPeers to bridge_b
+    // entirely — even when B sends a fresh phony claim.
+    //
+    // We use a very low threshold (2) and a long decay
+    // interval (3600s) so the test exercises the demotion
+    // path without racing the decay halving.
+    let bridge_a = {
+        let id = Identity::from_secret_bytes([0xE1; 32]);
+        let cfg = TransportConfig {
+            accept_any_peer: true,
+            bridge_fault_skip_threshold: 2,
+            bridge_fault_decay_secs: 3600,
+            ..Default::default()
+        };
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), id, cfg)
+            .await
+            .unwrap()
+    };
+    let a_pub = Identity::from_secret_bytes([0xE1; 32]).public_bytes();
+    let bridge_b = build_transport([0xE2; 32]).await;
+    let b_pub = Identity::from_secret_bytes([0xE2; 32]).public_bytes();
+    let (_a_to_b, b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+    let b_pid_on_a = drift::crypto::derive_peer_id(&b_pub);
+
+    use drift::transport::dp_bloom::DpBloomFilter;
+
+    // Drive bridge_b's fault counter past the threshold by
+    // sending two phony bloom-claim-then-no-deliver rounds.
+    // Each round: build a bloom containing a fresh phony
+    // target, advertise it to bridge_a via a directory
+    // announce, then fire a FindPeer for that target.
+    // Pending_find times out after 2s + GC sweeps at 1s →
+    // ~3s per round for the fault to land.
+    for round in 0..2 {
+        let phony_target = [0xF0 | round as u8; 32];
+        let mut bloom = DpBloomFilter::new(1024, 4, [0x22; 16]);
+        bloom.insert(&phony_target);
+        let dir = drift::transport::build_directory_v4(&[], Some(&bloom));
+        bridge_b
+            .__debug_send_directory_announcement(&b_to_a, &dir)
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(150)).await;
+
+        let env = build_unknown_target_envelope(
+            &phony_target,
+            &a_pub,
+            &[0xC0 | round as u8; 32],
+            b"claim-but-no-deliver",
+        );
+        bridge_b
+            .__debug_send_federated_envelope(&b_to_a, &env)
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(3500)).await;
+    }
+
+    let faults_after_round_2 = bridge_a.bridge_fault_count(&b_pid_on_a);
+    assert!(
+        faults_after_round_2 >= 2,
+        "precondition: 2 rounds should accumulate ≥2 faults, got {}",
+        faults_after_round_2
+    );
+
+    // Now bridge_b is past the threshold. Snapshot bridge_b's
+    // recent_queries_count (every inbound FindPeer adds an
+    // entry, deduped by query_id), advertise yet another
+    // phony target, and fire another FindPeer at bridge_a.
+    // We expect bridge_a's fanout to SKIP bridge_b — so
+    // bridge_b's recent_queries_count must NOT grow.
+    let queries_before = bridge_b.recent_queries_count();
+
+    let phony_target = [0xCD; 32];
+    let mut bloom = DpBloomFilter::new(1024, 4, [0x22; 16]);
+    bloom.insert(&phony_target);
+    let dir = drift::transport::build_directory_v4(&[], Some(&bloom));
+    bridge_b
+        .__debug_send_directory_announcement(&b_to_a, &dir)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(150)).await;
+
+    let env = build_unknown_target_envelope(
+        &phony_target,
+        &a_pub,
+        &[0xCC; 32],
+        b"should-not-reach-B",
+    );
+    bridge_b
+        .__debug_send_federated_envelope(&b_to_a, &env)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(400)).await;
+
+    let queries_after = bridge_b.recent_queries_count();
+    assert_eq!(
+        queries_before, queries_after,
+        "PHASE G: bridge_b past fault threshold ({}) must not receive new FindPeers — \
+         recent_queries went from {} to {}",
+        faults_after_round_2, queries_before, queries_after
+    );
+}
+
+// ─── Test 1l: Phase G — decay un-demotes a recovered peer ──────────
+
+#[tokio::test]
+async fn fault_decay_unblocks_recovered_peer() {
+    // Same scenario as `fanout_skips_peer_past_fault_threshold`,
+    // but here we use a short decay interval (1s) so the test
+    // can verify a once-demoted peer is reinstated after enough
+    // quiet time. We avoid sending any new bloom claims during
+    // the wait so no fresh faults accumulate.
+    let bridge_a = {
+        let id = Identity::from_secret_bytes([0xE3; 32]);
+        let cfg = TransportConfig {
+            accept_any_peer: true,
+            bridge_fault_skip_threshold: 2,
+            // 1s decay halves every cycle — fast for the test.
+            bridge_fault_decay_secs: 1,
+            ..Default::default()
+        };
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), id, cfg)
+            .await
+            .unwrap()
+    };
+    let a_pub = Identity::from_secret_bytes([0xE3; 32]).public_bytes();
+    let bridge_b = build_transport([0xE4; 32]).await;
+    let b_pub = Identity::from_secret_bytes([0xE4; 32]).public_bytes();
+    let (_a_to_b, b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+    let b_pid_on_a = drift::crypto::derive_peer_id(&b_pub);
+
+    use drift::transport::dp_bloom::DpBloomFilter;
+
+    // Drive the fault counter to the threshold quickly. We need
+    // a HIGH enough start so even after the decay halves during
+    // accumulation, we still pass the threshold. Use 3 rounds
+    // back-to-back (each ~3s) — even with decay nibbling, the
+    // counter should reach >= 2.
+    for round in 0..3 {
+        let phony = [0xF8 | round as u8; 32];
+        let mut bloom = DpBloomFilter::new(1024, 4, [0x33; 16]);
+        bloom.insert(&phony);
+        let dir = drift::transport::build_directory_v4(&[], Some(&bloom));
+        bridge_b
+            .__debug_send_directory_announcement(&b_to_a, &dir)
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(100)).await;
+        let env = build_unknown_target_envelope(
+            &phony,
+            &a_pub,
+            &[0xB0 | round as u8; 32],
+            b"claim-but-no-deliver",
+        );
+        bridge_b
+            .__debug_send_federated_envelope(&b_to_a, &env)
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(3200)).await;
+    }
+
+    // Wait long enough for the 1s decay to halve the counter
+    // repeatedly until it drops out of the table (== 0).
+    // log2(initial) iterations + safety margin.
+    sleep(Duration::from_secs(10)).await;
+
+    assert_eq!(
+        bridge_a.bridge_fault_count(&b_pid_on_a),
+        0,
+        "PHASE G: bridge_b's faults should have decayed to 0 after 10s of quiet"
+    );
+}
+
 // ─── Test 1i: Phase F — cover traffic emits decoys ───────────────────
 
 #[tokio::test]

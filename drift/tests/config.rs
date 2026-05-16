@@ -8,7 +8,12 @@ use std::time::Duration;
 #[tokio::test]
 async fn default_config_works() {
     let cfg = TransportConfig::default();
-    assert_eq!(cfg.handshake_retry_base_ms, 50);
+    // RFC 6298 §2.1 initial RTO. See
+    // `docs/HANDSHAKE_RETRY_DESIGN.md` for the rationale of
+    // 1 second over the original 50ms default — the latter
+    // triggered retransmission storms when paired with
+    // larger handshake payloads (hybrid PQ HELLOs).
+    assert_eq!(cfg.handshake_retry_base_ms, 1000);
     assert_eq!(cfg.handshake_max_attempts, 10);
     assert_eq!(cfg.beacon_interval_ms, 2000);
 }

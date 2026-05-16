@@ -38,9 +38,18 @@ futures-util = "0.3"
 webrtc = "0.11"
 # Native WebTransport server (QUIC/HTTP3). Matches the wasm-side
 # `wire_webtransport.rs` adapter so browsers can hit a DRIFT
-# node over WebTransport for UDP-like datagram semantics.
-wtransport = "0.6"
+# node over WebTransport for UDP-like datagram semantics. The
+# `self-signed` feature pulls in `rcgen` so the listener can
+# generate ephemeral ECDSA-P256 certificates per process — the
+# browser pins them via `serverCertificateHashes`, so no real CA
+# is needed.
+wtransport = { version = "0.6", features = ["self-signed"] }
 bytes = "1"
+# Low-level socket options for SO_RCVBUF tuning on UDP listeners.
+# Bridges expecting bursts of large (e.g. hybrid PQ) HELLOs need
+# more than the OS default ~200 KB recv buffer or they drop
+# under thundering-herd reconnects. See PQ-T.10.4 / PQ-T.11.1.
+socket2 = "0.5"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

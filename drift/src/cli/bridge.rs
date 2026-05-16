@@ -56,6 +56,24 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         // converge within a few seconds. Same value the
         // two_bridge_demo uses.
         beacon_interval_ms: 500,
+        // Phase PQ + G knobs, exposed as bridge CLI flags so
+        // operators can toggle without rebuilding. Hybrid PQ
+        // is default-on per `TransportConfig::default()`; CLI
+        // exposes `--no-hybrid-pq` as the escape hatch.
+        hybrid_pq: !args.no_hybrid_pq,
+        bridge_fault_skip_threshold: args.bridge_fault_skip_threshold,
+        // Phase PQ-T.11: bridges absorb thundering-herd
+        // reconnects (and large hybrid PQ HELLOs) — bump the
+        // UDP recv buffer from the ~200 KB OS default to
+        // `args.udp_recv_buffer_bytes` (default 4 MiB; CLI
+        // override available). Kernel may clamp; the granted
+        // size is logged at info level.
+        udp_recv_buffer_bytes: Some(args.udp_recv_buffer_bytes),
+        // First-HELLO jitter to disperse synchronized
+        // reconnect storms (e.g. clients reconnecting after a
+        // bridge restart). Default matches WireGuard's
+        // RekeyTimeoutJitterMaxMs = 334.
+        handshake_jitter_ms: args.handshake_jitter_ms,
         ..TransportConfig::default()
     };
 
