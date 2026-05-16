@@ -12,8 +12,8 @@ handshake. Each spec is one wire — no mocks, no stubs.
 | `tests/ws.spec.ts` | `connectWebSocket` | ✓ | ✓ | ✓ |
 | `tests/http.spec.ts` | `connectHttp` (SSE + POST) | ✓ | ✓ | ✓ |
 | `tests/webtransport.spec.ts` | `connectWebTransport` | ✓ | skip | skip |
+| `tests/webrtc.spec.ts` | `connectWebRtc` (WS sig → DTLS) | ✓ | skip | skip |
 | `tests/ws_stream.spec.ts` | `connectWebSocketStream` | live-skip | skip | skip |
-| `tests/webrtc.spec.ts` | `connectWebRtc` | TODO | TODO | TODO |
 
 `webtransport` runs against a native `webtransport://` listener
 (`drift/src/wire_webtransport.rs`) that generates an ephemeral
@@ -27,11 +27,20 @@ still gated behind an Origin Trial and its `opened` promise never
 resolves there — the test races a 4s timeout and reports the skip.
 Run against full Chrome to actually exercise the adapter.
 
-`webrtc` is stubbed. The current `connectWebRtc` WASM API is
-strictly client-side (sends HELLO, expects HELLO_ACK) — for
-browser↔browser the WASM `Session` needs a server-handshake codepath,
-and there's also no native WebRTC listener with signaling. Both
-are real protocol work; see the spec file header for the analysis.
+`webrtc` runs against a native `webrtc://` listener
+(`drift/src/wire_webrtc.rs`) that exposes a tiny WebSocket
+signaling endpoint on the bound port. The browser opens the
+WS, receives the SDP offer, replies with an answer, and the
+data channel opens once ICE/DTLS converges. From that point
+DRIFT runs over the channel like any other adapter. STUN
+(`stun.l.google.com:19302`) is included in the server's
+RTCConfiguration to unblock ICE on macOS loopback paths.
+
+Browser↔browser WebRTC (P2P, no server in the data path) is
+a future feature — the WASM `Session` is currently strictly
+client-side. The `webrtc://` listener gives browsers a
+straightforward path to dial native bridges over WebRTC,
+which is the common case.
 
 ## Running
 

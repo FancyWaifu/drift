@@ -21,6 +21,12 @@ export interface HarnessState {
   // The browser pins via `serverCertificateHashes`.
   bridgeWebTransportUrl: string;       // https://127.0.0.1:<port>
   bridgeWebTransportCertHex: string;   // 64 hex chars
+  // WebRTC: the WS signaling URL the browser dials. The
+  // `webrtc://` scheme is registered native-side
+  // (drift/src/wire_webrtc.rs); on the wire the signaling step
+  // is plain WebSocket carrying SDP, then the data plane lives
+  // on the resulting RTCDataChannel.
+  bridgeWebRtcSignalingUrl: string;    // ws://127.0.0.1:<port>
   bridgePid: number;
   staticServerUrl: string;    // http://127.0.0.1:<port>  for index.html
   staticServerPid: number;

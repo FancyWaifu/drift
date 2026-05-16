@@ -104,14 +104,20 @@ async function spawnBridge(
   for (const l of listeners) {
     args.push("--listen", l);
   }
-  // Phase PQ: turn on the hybrid handshake on the test bridge.
-  // The WASM client side doesn't speak PQ — this exercises the
-  // classical-client → PQ-server interop path, which is the
-  // backward-compat guarantee we depend on for browsers.
-  args.push("--hybrid-pq");
+  // PQ-T.12: hybrid PQ is default-on in the bridge as of
+  // 2026-05-16; no flag needed. The WASM client side doesn't
+  // speak PQ, so this exercises the classical-client → PQ-server
+  // interop path, which is the backward-compat guarantee we
+  // depend on for browsers.
   const proc = spawn(driftBin, args, {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, RUST_LOG: "error" }, // quiet during tests
+    // RUST_LOG default is `error` for noise control; override via
+    // `DRIFT_HARNESS_LOG` in the env if you want bridge-side
+    // debug for WebRTC/WebTransport ICE diagnostics.
+    env: {
+      ...process.env,
+      RUST_LOG: process.env.DRIFT_HARNESS_LOG ?? "error",
+    },
   });
 
   // Wait for both the bridge banner pubkey AND (if a webtransport
@@ -216,6 +222,7 @@ export default async function globalSetup(): Promise<void> {
   const wsPort = await pickPort();
   const httpPort = await pickPort();
   const wtPort = await pickPort();
+  const rtcPort = await pickPort();
   const staticPort = await pickPort();
 
   // No tls:// listener — would need a self-signed cert we don't
@@ -228,9 +235,10 @@ export default async function globalSetup(): Promise<void> {
     `ws://127.0.0.1:${wsPort}`,
     `http://127.0.0.1:${httpPort}`,
     `webtransport://127.0.0.1:${wtPort}`,
+    `webrtc://127.0.0.1:${rtcPort}`,
   ];
 
-  console.log(`[harness] starting bridge on UDP=${udpPort} TCP=${tcpPort} WS=${wsPort} HTTP=${httpPort} WT=${wtPort}`);
+  console.log(`[harness] starting bridge on UDP=${udpPort} TCP=${tcpPort} WS=${wsPort} HTTP=${httpPort} WT=${wtPort} RTC=${rtcPort}`);
   const { proc: bridgeProc, pubkey, wtCertHex } = await spawnBridge(driftBin, listeners);
   console.log(`[harness] bridge pubkey: ${pubkey}`);
 
@@ -246,6 +254,7 @@ export default async function globalSetup(): Promise<void> {
     bridgeTlsUrl: "",
     bridgeWebTransportUrl: `https://127.0.0.1:${wtPort}`,
     bridgeWebTransportCertHex: wtCertHex,
+    bridgeWebRtcSignalingUrl: `ws://127.0.0.1:${rtcPort}`,
     bridgePid: bridgeProc.pid!,
     staticServerUrl: `http://127.0.0.1:${staticPort}`,
     staticServerPid: process.pid, // not separately spawned; runs in this Node process
