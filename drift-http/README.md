@@ -50,6 +50,16 @@ drift-http serve --root /var/www \
     --bind ws://0.0.0.0:443
 ```
 
+Any DRIFT transport adapter can stand in for `--bind`. The
+full set of live-validated schemes is **udp / tcp / ws / tls
+/ http / dns** — `tls://` for proxies that demand encrypted
+egress, `http://` for environments where WebSocket upgrades
+get stripped, `dns://` for the truly hostile networks where
+only DNS queries get through. (`tls://` auto-generates a
+self-signed cert; clients use `NoCertVerifier` since DRIFT
+authenticates internally — the TLS layer is only there to
+look like HTTPS on the wire.)
+
 Banner on stdout:
 ```
 DRIFT_HTTP_PUB=<64 hex chars>             # the address — give this to anyone who should connect

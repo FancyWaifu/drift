@@ -235,7 +235,7 @@ real client endpoints.
 Once the inventory above is in place, DRIFT tools that target a
 host *by pubkey* can read it directly from `drift.toml` — no
 need to pass `--server-addr` / `--bridge` / `--target-bridge` on
-every invocation. Two fields drive this:
+every invocation. Three forms drive this:
 
 - `endpoints = [...]` on the target's host entry → tools dial
   it directly (the first endpoint wins).
@@ -243,6 +243,10 @@ every invocation. Two fields drive this:
   that bridge using DRIFT federation. The bridge itself must
   also be in the inventory with `endpoints` so the dialing tool
   can reach it.
+- *Neither* — just `pubkey = "<hex>"` with nothing else — tools
+  fall back to the inventory's `default_bridge` and let federation
+  discovery resolve the route. See "Dynamic discovery" below.
+  `drift-config peer ls` labels this case `discovery`.
 
 ```bash
 # Operator records the server's reachability:
@@ -291,12 +295,38 @@ TTL (~3× the announce interval) — stale entries evict at
 lookup time, so a client whose bridge stops announcing drops
 out of routing within seconds. Only `--federate`'d bridges
 may write to the directory; arbitrary clients can't poison
-it. As of FederationDirectory v2 each announced pubkey is
-backed by a 96-byte XEdDSA presence ticket the client signed
-for the announcing bridge — a malicious federated bridge
-can't announce clients it doesn't actually have a session
-with. (See `drift/tests/adversarial_federation.rs` and
+it. Each announced pubkey is backed by a 96-byte XEdDSA
+presence ticket the client signed for the announcing bridge
+— a malicious federated bridge can't announce clients it
+doesn't actually have a session with. (See
+`drift/tests/adversarial_federation.rs` and
 `drift/tests/adversarial_presence_tickets.rs`.)
+
+When the target isn't in any bridge's *proactive* directory
+(brand-new peer, between announce ticks, partition healing),
+bridges fall back to **reactive `FindPeer` queries** across
+federation. Up to 4 hops with loop prevention, XEdDSA
+bridge-self-signed hop attestations, and `PeerHere` chains
+as replies. Cold-path resolution in ≤2 seconds.
+
+**Wire-format evolution.** Three on-the-wire versions of the
+directory exist; bridges accept all three on receive and emit
+the version matching their `TransportConfig`:
+
+- **v2** — original. Pubkey + presence ticket per entry.
+- **v3** — adds a 1-byte `hops` field for transitive
+  re-announce. A bridge that learns about client X via a peer
+  can re-emit X to its OTHER federation peers (capped at
+  `MAX_ANNOUNCE_HOPS = 2`), spreading the cache one hop
+  further than v2 could.
+- **v4** — adds an optional DP-noised bloom filter section.
+  Originators can locally test "could this bridge host my
+  target?" before sending any query. A bridge whose filter
+  says "definitely not" never sees the query at all. Opt-in
+  via `TransportConfig::bloom_announce_noise = Some(rate)`.
+
+For the full protocol spec see `FEDERATION_DISCOVERY.md` and
+`SPEC.md §10` at the workspace root.
 
 ---
 

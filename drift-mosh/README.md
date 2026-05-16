@@ -148,6 +148,15 @@ path for clients that joined since the last announce. See
 `FEDERATION_DISCOVERY.md` at the workspace root for the protocol
 spec and `SPEC.md §10` for the wire-format reference.
 
+The bridge's discovery layer has opt-in privacy modes (set on the
+bridge process, not drift-mosh): `FindPeerMode::OriginateHashed`
+hashes target pubkeys before sending queries — transit bridges
+see only `SHA-256(target || salt)`. `bloom_announce_noise` adds
+a DP-noised bloom filter to directory announces so originators
+skip bridges whose filter says "definitely not." `cover_traffic_rate_hz`
+emits Poisson-timed decoys to smother real query patterns. All
+three stack; none requires drift-mosh-client to know they're on.
+
 For the **fully zero-config** case, set a `default_bridge` at
 the top of drift.toml instead of recording every individual
 target. `drift-mosh-client --server-pub <X>` then dials the
