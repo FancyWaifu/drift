@@ -65,6 +65,7 @@ use peer_shards::PeerShards;
 use resumption::ResumptionStore;
 pub use resumption::{ClientTicket, EXPORT_BLOB_LEN, TICKET_DEFAULT_TTL};
 use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet as StdHashSet;
 
 /// Runtime configuration for a `Transport`. Every field has a sensible
 /// default suitable for interactive apps; override before `Transport::bind`
@@ -3205,17 +3206,28 @@ impl Inner {
         // traffic. One syscall per federated packet is acceptable:
         // federated peers are a minority, and the bridge is the
         // bottleneck anyway.
+        // Build federation classification with ONE shard lock
+        // per unique peer (was N — same hot-loop issue as the
+        // build loop below).
+        let mut federated_set: StdHashSet<PeerId> = StdHashSet::new();
+        let mut seen: StdHashSet<PeerId> = StdHashSet::new();
+        for it in items {
+            if !seen.insert(it.peer) {
+                continue;
+            }
+            let peers = self.peers.lock_for(&it.peer).await;
+            if peers
+                .get(&it.peer)
+                .map(|p| p.federated_via.is_some())
+                .unwrap_or(false)
+            {
+                federated_set.insert(it.peer);
+            }
+        }
         let mut federated_items: Vec<&BatchItem> = Vec::new();
         let mut direct_items: Vec<&BatchItem> = Vec::with_capacity(items.len());
         for it in items {
-            let is_federated = {
-                let peers = self.peers.lock_for(&it.peer).await;
-                peers
-                    .get(&it.peer)
-                    .map(|p| p.federated_via.is_some())
-                    .unwrap_or(false)
-            };
-            if is_federated {
+            if federated_set.contains(&it.peer) {
                 federated_items.push(it);
             } else {
                 direct_items.push(it);
@@ -3237,41 +3249,48 @@ impl Inner {
             return Ok(sent_fed);
         }
 
-        // Build all the wires for direct peers under per-shard locks.
-        let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(direct_items.len());
+        // Build all the wires for direct peers. Group items by
+        // peer_id so we take ONE shard lock per peer regardless
+        // of batch size; previous code locked the shard N times
+        // for an N-item batch all going to the same peer, which
+        // was the dominant lock-acquire path under iperf-style
+        // saturation. Common case (drift-vpn point-to-point) has
+        // exactly one peer in by_peer — the HashMap is sized
+        // accordingly and the per-batch allocation is tiny.
+        let mut by_peer: StdHashMap<PeerId, Vec<&BatchItem>> =
+            StdHashMap::with_capacity(4);
         for it in &direct_items {
             if it.payload.len() > MAX_PAYLOAD {
                 continue;
             }
-            let mut peers = self.peers.lock_for(&it.peer).await;
-            let Some(peer) = peers.get_mut(&it.peer) else {
+            by_peer.entry(it.peer).or_default().push(it);
+        }
+
+        let mut batch: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::with_capacity(direct_items.len());
+        for (peer_id, items) in &by_peer {
+            let mut peers = self.peers.lock_for(peer_id).await;
+            let Some(peer) = peers.get_mut(peer_id) else {
                 continue;
             };
             if !matches!(peer.handshake, HandshakeState::Established { .. }) {
-                // Skip non-Established peers — the caller
-                // can use `send_data` for handshake-time
-                // queueing.
                 continue;
             }
-            // For via_mesh peers, build_data_packet must set
-            // hop_ttl so a forwarding hop will accept it. The
-            // mesh next-hop addr is already in peer.addr (it
-            // gets set to the relay's addr during handshake).
-            // Direct peers pass None here as before.
             let mesh_next_hop = if peer.via_mesh {
                 Some(peer.addr)
             } else {
                 None
             };
-            if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
-                self.local_peer_id,
-                peer,
-                &it.payload,
-                it.deadline_ms,
-                it.coalesce_group,
-                mesh_next_hop,
-            ) {
-                batch.push((bytes, target, iface));
+            for it in items {
+                if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
+                    self.local_peer_id,
+                    peer,
+                    &it.payload,
+                    it.deadline_ms,
+                    it.coalesce_group,
+                    mesh_next_hop,
+                ) {
+                    batch.push((bytes, target, iface));
+                }
             }
         }
 

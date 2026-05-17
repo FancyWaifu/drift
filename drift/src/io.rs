@@ -141,14 +141,15 @@ impl PacketIO for UdpPacketIO {
         if packets.is_empty() {
             return Ok(0);
         }
-        // For 1- or 2-packet "batches" the syscall savings
-        // don't beat the bookkeeping. Fall through to the
-        // single-send path.
-        if packets.len() <= 2 {
-            for (bytes, dst) in packets {
-                self.socket.send_to(bytes, *dst).await?;
-            }
-            return Ok(packets.len());
+        // 1-packet "batches" can't benefit from sendmmsg/GSO —
+        // skip the bookkeeping. For 2+ packets, GSO collapses
+        // same-dst same-size batches into one syscall + one skb,
+        // and sendmmsg handles the heterogeneous case. Lowered
+        // from <=2 in PERF.4: with GSO landed, even 2-packet
+        // batches are strictly worth one syscall.
+        if packets.len() == 1 {
+            self.socket.send_to(&packets[0].0, packets[0].1).await?;
+            return Ok(1);
         }
         #[cfg(unix)]
         {
