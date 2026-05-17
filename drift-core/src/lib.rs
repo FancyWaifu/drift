@@ -9,6 +9,7 @@ pub mod error;
 pub mod fec;
 pub mod header;
 pub mod identity;
+pub mod pool;
 pub mod pq;
 pub mod rotation;
 pub mod session;

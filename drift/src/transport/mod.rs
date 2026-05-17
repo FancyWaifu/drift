@@ -3316,6 +3316,9 @@ impl Inner {
             let n = self.ifaces.send_batch_for(iface, &group).await?;
             sent_total += n;
             bytes_total += bytes_in_group;
+            for (buf, _) in group {
+                drift_core::pool::return_wire_buf(buf);
+            }
         }
         self.metrics
             .packets_sent
@@ -5331,13 +5334,15 @@ impl Inner {
         match action {
             SendAction::Data(bytes, addr, iface) => {
                 self.ifaces.send_for(iface, &bytes, addr).await?;
+                let n = bytes.len();
                 self.metrics.packets_sent.fetch_add(1, Ordering::Relaxed);
                 self.metrics
                     .bytes_sent
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    .fetch_add(n as u64, Ordering::Relaxed);
                 if let Some(q) = &self.qlog {
-                    q.log_packet_sent("Data", &addr.to_string(), bytes.len(), 0);
+                    q.log_packet_sent("Data", &addr.to_string(), n, 0);
                 }
+                drift_core::pool::return_wire_buf(bytes);
             }
             SendAction::Hello(bytes, addr, iface) => {
                 // Phase PQ-T.11.3: first-HELLO jitter.
@@ -7036,7 +7041,7 @@ fn build_data_packet_with_cid(
 
     let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
-    let mut wire = Vec::with_capacity(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
+    let mut wire = drift_core::pool::take_wire_buf(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
     tx.seal_into(seq, PacketType::Data as u8, &aad, payload, &mut wire)?;
 

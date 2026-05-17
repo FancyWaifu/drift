@@ -96,7 +96,7 @@ pub fn encode_short(cid: u16, seq: u32, tx: &SessionKey, payload: &[u8]) -> Resu
     hdr[1..3].copy_from_slice(&cid.to_be_bytes());
     hdr[3..7].copy_from_slice(&seq.to_be_bytes());
 
-    let mut wire = Vec::with_capacity(SHORT_HEADER_LEN + payload.len() + AUTH_TAG_LEN);
+    let mut wire = crate::pool::take_wire_buf(SHORT_HEADER_LEN + payload.len() + AUTH_TAG_LEN);
     wire.extend_from_slice(&hdr);
 
     // AEAD seal. Use packet_type = Data (3) for the nonce
