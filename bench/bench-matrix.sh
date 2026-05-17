@@ -27,16 +27,23 @@ D2_PUB=f910bce8c3ad800c149a597c8747d2de3faee6dd2937b6bed2eb6e723638db32
 
 DUR=${DUR:-15}
 
+# Per-invocation port base so successive runs don't collide
+# with TIME_WAIT sockets from previous bench cycles. The 14-port
+# span (B..B+13) covers udp+tcp+ws+tls+http+dns (2 ports each
+# = 12, plus 2 of headroom). Range [50000, 63986] keeps us above
+# well-known ports and below the typical ephemeral range.
+B=${PORT_BASE:-$(( 50000 + (RANDOM % 1000) * 14 ))}
+
 # Each entry: "scheme port_d1 port_d2 mtu"
 # MTU 1200 keeps headers under the typical Internet path MTU even
 # through encapsulating wires; same MTU per scheme for apples-to-apples.
 SCHEMES=(
-  "udp  52001 52002 1200"
-  "tcp  52003 52004 1200"
-  "ws   52005 52006 1200"
-  "tls  52007 52008 1200"
-  "http 52009 52010 1200"
-  "dns  52011 52012 1200"
+  "udp  $((B+1))  $((B+2))  1200"
+  "tcp  $((B+3))  $((B+4))  1200"
+  "ws   $((B+5))  $((B+6))  1200"
+  "tls  $((B+7))  $((B+8))  1200"
+  "http $((B+9))  $((B+10)) 1200"
+  "dns  $((B+11)) $((B+12)) 1200"
 )
 
 OUTFILE=${OUTFILE:-bench/bench-matrix-$(date +%Y%m%d-%H%M%S).md}
@@ -67,8 +74,14 @@ EOF
 }
 
 cleanup_both() {
-  ssh root@$D1 'pkill -9 -f cov-test/config.toml 2>/dev/null; sleep 1' >/dev/null 2>&1 &
-  ssh root@$D2 'pkill -9 -f cov-test/config.toml 2>/dev/null; sleep 1' >/dev/null 2>&1 &
+  # Kill drift-vpn AND iperf3 on both sides. Stale TCP sockets
+  # from previous bench cycles sit in CLOSE_WAIT until kernel
+  # times them out (~60s). The randomized $PORT_OFFSET (and the
+  # per-scheme offsets within it) make collisions between
+  # consecutive bench invocations unlikely; if you DO need to
+  # reuse a port range, wait 60s between invocations.
+  ssh root@$D1 'pkill -9 -f cov-test/config.toml 2>/dev/null; pkill -9 iperf3 2>/dev/null; sleep 1' >/dev/null 2>&1 &
+  ssh root@$D2 'pkill -9 -f cov-test/config.toml 2>/dev/null; pkill -9 iperf3 2>/dev/null; sleep 1' >/dev/null 2>&1 &
   wait
 }
 
