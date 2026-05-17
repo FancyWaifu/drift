@@ -47,6 +47,16 @@ pub(crate) async fn send_batch(
 
     #[cfg(target_os = "linux")]
     {
+        // GSO (UDP_SEGMENT cmsg) is dramatically cheaper than
+        // sendmmsg when packets share destination AND size: one
+        // skb, one network-stack traversal, kernel/NIC chunks
+        // into MTU-sized datagrams. Common case for drift-vpn
+        // (one peer, MTU-bounded TUN packets) hits this fast
+        // path. Mixed-size or multi-dest batches fall through
+        // to sendmmsg (still one syscall, just N skbs).
+        if linux::try_send_batch_gso(socket, packets).await? {
+            return Ok(packets.len());
+        }
         linux::send_batch_mmsg(socket, packets).await
     }
     #[cfg(not(target_os = "linux"))]
@@ -73,7 +83,143 @@ mod linux {
     use super::*;
     use std::mem::MaybeUninit;
     use std::os::unix::io::AsRawFd;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::Interest;
+
+    /// Process-wide flag: once GSO returns EOPNOTSUPP /
+    /// ENOTSUPP, never try it again (kernel too old, or
+    /// IPv6-on-some-veth quirks). Atomic so multiple worker
+    /// tasks can read it lock-free.
+    static GSO_BROKEN: AtomicBool = AtomicBool::new(false);
+
+    /// Try to ship the whole batch via UDP_SEGMENT (GSO) in a
+    /// single sendmsg. Requirements:
+    ///   * ≥ 2 packets
+    ///   * all packets to the same destination
+    ///   * all packets the same size, EXCEPT optionally the
+    ///     last (kernel's GSO contract)
+    ///   * segment size fits in u16 (≤ 65535 bytes)
+    ///   * total size ≤ 64 KiB (kernel UDP_SEGMENT limit)
+    ///
+    /// Returns Ok(true) if the GSO call succeeded (caller can
+    /// skip sendmmsg), Ok(false) if conditions not met or GSO
+    /// is broken on this kernel.
+    pub(super) async fn try_send_batch_gso(
+        socket: &UdpSocket,
+        packets: &[(Vec<u8>, SocketAddr)],
+    ) -> io::Result<bool> {
+        if GSO_BROKEN.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        if packets.len() < 2 {
+            return Ok(false);
+        }
+        let dst = packets[0].1;
+        let seg_size = packets[0].0.len();
+        if seg_size == 0 || seg_size > u16::MAX as usize {
+            return Ok(false);
+        }
+        // All-but-last must equal seg_size; last must be ≤ seg_size.
+        let last_idx = packets.len() - 1;
+        for (i, (b, d)) in packets.iter().enumerate() {
+            if *d != dst {
+                return Ok(false);
+            }
+            if i < last_idx && b.len() != seg_size {
+                return Ok(false);
+            }
+            if i == last_idx && b.len() > seg_size {
+                return Ok(false);
+            }
+        }
+        let total_len: usize = packets.iter().map(|(b, _)| b.len()).sum();
+        if total_len > 65_535 {
+            return Ok(false);
+        }
+
+        // Concatenate into one contiguous buffer. (We can avoid
+        // this with iovec-per-segment + UDP_SEGMENT, but kernel
+        // wants iov_len == total_len for a single skb; multi-iov
+        // forces N skbs which defeats the point.)
+        let mut buf = Vec::with_capacity(total_len);
+        for (b, _) in packets {
+            buf.extend_from_slice(b);
+        }
+        let nsent = packets.len();
+
+        let result: io::Result<()> = socket
+            .async_io(Interest::WRITABLE, || {
+                let mut addr_storage: libc::sockaddr_storage =
+                    unsafe { MaybeUninit::zeroed().assume_init() };
+                let addr_len = encode_sockaddr(&mut addr_storage, &dst);
+
+                let mut iov = libc::iovec {
+                    iov_base: buf.as_ptr() as *mut _,
+                    iov_len: buf.len(),
+                };
+
+                // Control message buffer for one UDP_SEGMENT
+                // cmsg carrying a u16 segment size.
+                let cmsg_space =
+                    unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) }
+                        as usize;
+                let mut cmsg_buf = vec![0u8; cmsg_space];
+
+                let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+                msg.msg_name = &mut addr_storage as *mut _ as *mut _;
+                msg.msg_namelen = addr_len;
+                msg.msg_iov = &mut iov;
+                msg.msg_iovlen = 1;
+                msg.msg_control = cmsg_buf.as_mut_ptr() as *mut _;
+                msg.msg_controllen = cmsg_buf.len() as _;
+
+                unsafe {
+                    let cmsg_ptr = libc::CMSG_FIRSTHDR(&msg);
+                    if cmsg_ptr.is_null() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "CMSG_FIRSTHDR returned null",
+                        ));
+                    }
+                    (*cmsg_ptr).cmsg_level = libc::SOL_UDP;
+                    (*cmsg_ptr).cmsg_type = libc::UDP_SEGMENT;
+                    (*cmsg_ptr).cmsg_len =
+                        libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as _;
+                    let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *mut u16;
+                    *data_ptr = seg_size as u16;
+                }
+
+                let fd = socket.as_raw_fd();
+                let rc = unsafe { libc::sendmsg(fd, &msg, 0) };
+                if rc < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+
+        match result {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                // Mark GSO as permanently broken on persistent
+                // kernel-side errors so we stop paying the per-call
+                // detection cost. Transient errors (EAGAIN handled
+                // by async_io, EINTR, ENOBUFS) shouldn't get here.
+                let kind = e.raw_os_error();
+                if matches!(kind, Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) | Some(libc::EINVAL)) {
+                    GSO_BROKEN.store(true, Ordering::Relaxed);
+                    tracing::warn!(
+                        error = %e,
+                        "UDP GSO failed; falling back to sendmmsg for this and future batches"
+                    );
+                    Ok(false)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
 
     pub(super) async fn send_batch_mmsg(
         socket: &UdpSocket,
