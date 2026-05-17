@@ -5356,136 +5356,149 @@ impl Inner {
             Some(io) => io.clone(),
             None => return,
         };
-        let mut buf = vec![0u8; MAX_PACKET];
+        // 64 KiB so UDP_GRO can coalesce up to ~45 MTU-sized
+        // datagrams into one recvmsg. Non-UDP adapters and
+        // pre-5.0 Linux UDP still get one packet per call —
+        // the extra slack is cheap.
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut segs: Vec<(usize, usize, std::net::SocketAddr)> =
+            Vec::with_capacity(32);
         loop {
-            let (n, src, ecn_ce) = match iface.recv_from(&mut buf).await {
-                Ok((n, src)) => (n, src, false),
-                Err(e) => {
-                    // Recv error means the underlying I/O died —
-                    // for connection-oriented adapters (TCP, TLS, WS)
-                    // this is end-of-connection. Drop our reference
-                    // by removing the slot from InterfaceSet so the
-                    // socket actually closes. Universal: works for
-                    // any adapter whose recv_from returns Err on
-                    // connection death.
-                    //
-                    // The primary interface (index 0) is special:
-                    // it backs the whole Transport's send path. If
-                    // it dies the Transport is effectively dead;
-                    // removing the slot would just make subsequent
-                    // sends fail differently. We keep iface_idx==0
-                    // as a soft-fail (log + break) without removal
-                    // so a UDP socket hiccup doesn't permanently
-                    // disable the transport (it gets a fresh recv
-                    // attempt only if the caller decides to restart).
-                    if iface_idx != 0 {
-                        self.ifaces.remove(iface_idx);
+            segs.clear();
+            if let Err(e) = iface.recv_from_batch(&mut buf, &mut segs).await {
+                // Recv error means the underlying I/O died —
+                // for connection-oriented adapters (TCP, TLS,
+                // WS) this is end-of-connection. Drop our
+                // reference by removing the slot so the socket
+                // actually closes. The primary interface (idx
+                // 0) backs the whole Transport's send path —
+                // log and break without removal so a UDP
+                // socket hiccup doesn't permanently disable
+                // the transport.
+                if iface_idx != 0 {
+                    self.ifaces.remove(iface_idx);
+                }
+                warn!(error = %e, iface_idx, "recv_from failed; evicting interface");
+                break;
+            }
+            for &(off, n, src) in segs.iter() {
+                // GRO doesn't surface per-segment ECN; the
+                // kernel exposes a TOS/ECN cmsg but our parser
+                // only looks at UDP_GRO today. Treat as
+                // ecn_ce=false until we wire IP_TOS/IPV6_TCLASS.
+                let ecn_ce = false;
+                self.metrics
+                    .packets_received
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .bytes_received
+                    .fetch_add(n as u64, Ordering::Relaxed);
+                if ecn_ce {
+                    self.metrics
+                        .ecn_ce_received
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                let received_at = Instant::now();
+                let data = &buf[off..off + n];
+
+                // qlog: emit a structured packet_received event
+                // before dispatch. We peek the header type for
+                // the category tag but let `process_incoming`
+                // do the actual auth + dispatch.
+                if let Some(q) = &self.qlog {
+                    if let Ok(h) = Header::decode(&data[..data.len().min(HEADER_LEN)]) {
+                        q.log_packet_received(
+                            format!("{:?}", h.packet_type).as_str(),
+                            &src.to_string(),
+                            n,
+                            h.seq,
+                        );
                     }
-                    warn!(error = %e, iface_idx, "recv_from failed; evicting interface");
-                    break;
                 }
-            };
 
-            self.metrics
-                .packets_received
-                .fetch_add(1, Ordering::Relaxed);
-            self.metrics
-                .bytes_received
-                .fetch_add(n as u64, Ordering::Relaxed);
-            if ecn_ce {
-                self.metrics.ecn_ce_received.fetch_add(1, Ordering::Relaxed);
-            }
-            let received_at = Instant::now();
-            let data = &buf[..n];
-
-            // qlog: emit a structured packet_received event
-            // before dispatch. We peek the header type for the
-            // category tag but let `process_incoming` do the
-            // actual auth + dispatch.
-            if let Some(q) = &self.qlog {
-                if let Ok(h) = Header::decode(&data[..data.len().min(HEADER_LEN)]) {
-                    q.log_packet_received(
-                        format!("{:?}", h.packet_type).as_str(),
-                        &src.to_string(),
-                        n,
-                        h.seq,
-                    );
+                // Short-header fast path: if the version nibble
+                // is 0x2, this is a compact DATA packet from an
+                // established direct session. Look up the CID →
+                // peer, decrypt, and deliver without touching
+                // the full long-header parser.
+                if crate::short_header::is_short_header(data) {
+                    match self
+                        .process_short_header(data, src, received_at, ecn_ce)
+                        .await
+                    {
+                        Ok(Some(r)) => {
+                            if tx.send(r).await.is_err() {
+                                debug!("recv channel closed (short)");
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            if matches!(e, DriftError::AuthFailed) {
+                                self.metrics
+                                    .auth_failures
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            if let Some(suppressed) =
+                                self.drop_warn_throttle.tick_or_count()
+                            {
+                                warn!(
+                                    error = %e,
+                                    ?src,
+                                    suppressed,
+                                    "dropped invalid short-header packet"
+                                );
+                            }
+                        }
+                    }
+                    continue;
                 }
-            }
 
-            // Short-header fast path: if the version nibble
-            // is 0x2, this is a compact DATA packet from an
-            // established direct session. Look up the CID →
-            // peer, decrypt, and deliver without touching the
-            // full long-header parser.
-            if crate::short_header::is_short_header(data) {
                 match self
-                    .process_short_header(data, src, received_at, ecn_ce)
+                    .process_incoming(data, src, received_at, ecn_ce, iface_idx)
                     .await
                 {
                     Ok(Some(r)) => {
                         if tx.send(r).await.is_err() {
-                            debug!("recv channel closed (short)");
-                            break;
+                            debug!("recv channel closed");
+                            return;
                         }
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        if matches!(e, DriftError::AuthFailed) {
-                            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                        match &e {
+                            DriftError::Replay(_) => {
+                                self.metrics
+                                    .replays_caught
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            DriftError::AuthFailed => {
+                                self.metrics
+                                    .auth_failures
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            DriftError::DeadlineExpired => {
+                                self.metrics
+                                    .deadline_dropped
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            DriftError::UnknownPeer => {
+                                self.metrics
+                                    .unknown_peer_drops
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {}
                         }
-                        if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
+                        if let Some(suppressed) =
+                            self.drop_warn_throttle.tick_or_count()
+                        {
                             warn!(
                                 error = %e,
                                 ?src,
                                 suppressed,
-                                "dropped invalid short-header packet"
+                                "dropped invalid packet"
                             );
                         }
-                    }
-                }
-                continue;
-            }
-
-            match self
-                .process_incoming(data, src, received_at, ecn_ce, iface_idx)
-                .await
-            {
-                Ok(Some(r)) => {
-                    if tx.send(r).await.is_err() {
-                        debug!("recv channel closed");
-                        break;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    // Classify the error for metrics
-                    match &e {
-                        DriftError::Replay(_) => {
-                            self.metrics.replays_caught.fetch_add(1, Ordering::Relaxed);
-                        }
-                        DriftError::AuthFailed => {
-                            self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-                        }
-                        DriftError::DeadlineExpired => {
-                            self.metrics
-                                .deadline_dropped
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        DriftError::UnknownPeer => {
-                            self.metrics
-                                .unknown_peer_drops
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        _ => {}
-                    }
-                    if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
-                        warn!(
-                            error = %e,
-                            ?src,
-                            suppressed,
-                            "dropped invalid packet"
-                        );
                     }
                 }
             }

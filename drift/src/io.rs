@@ -67,6 +67,28 @@ pub trait PacketIO: Send + Sync + 'static {
     /// packet is available.
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)>;
 
+    /// Receive a batch of packets. `buf` must be sized for
+    /// the coalesced case (UDP_GRO returns up to ~64 KiB
+    /// of concatenated segments per call); 64 KiB is the
+    /// recommended size on Linux. On return, `out` contains
+    /// one `(offset, length, source)` tuple per packet
+    /// extracted from `buf` — segments live in-place in
+    /// `buf` and the caller dispatches each without copying.
+    ///
+    /// Default implementation: one `recv_from`, push a
+    /// single segment tuple. Linux UDP override uses
+    /// `recvmsg` with `UDP_GRO` cmsg parsing to coalesce.
+    /// Callers must `out.clear()` before each invocation.
+    async fn recv_from_batch(
+        &self,
+        buf: &mut [u8],
+        out: &mut Vec<(usize, usize, SocketAddr)>,
+    ) -> io::Result<()> {
+        let (n, src) = self.recv_from(buf).await?;
+        out.push((0, n, src));
+        Ok(())
+    }
+
     /// The local address this transport is bound to.
     /// Returns a placeholder for mediums where "local
     /// address" isn't meaningful (serial, BLE).
@@ -147,6 +169,29 @@ impl PacketIO for UdpPacketIO {
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.socket.recv_from(buf).await
+    }
+
+    /// On Linux, use `recvmsg` and parse the `UDP_GRO` cmsg
+    /// (if present) to split the kernel-coalesced super-buffer
+    /// into one tuple per original packet. Caller-owned `buf`
+    /// must be sized for coalesced reads (64 KiB recommended).
+    /// Without UDP_GRO support this still works — just yields
+    /// one segment per call, same as the default.
+    async fn recv_from_batch(
+        &self,
+        buf: &mut [u8],
+        out: &mut Vec<(usize, usize, SocketAddr)>,
+    ) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::transport::batch::recv_batch_gro(&self.socket, buf, out).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (n, src) = self.socket.recv_from(buf).await?;
+            out.push((0, n, src));
+            Ok(())
+        }
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -902,6 +947,7 @@ pub struct UdpListenerIO {
 impl UdpListenerIO {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         let sock = UdpSocket::bind(addr).await?;
+        try_enable_udp_gro(&sock);
         let local = sock.local_addr()?;
         Ok(Self {
             socket: Some(Arc::new(sock)),
@@ -921,11 +967,48 @@ impl UdpListenerIO {
         if let Some(want) = recv_buffer_bytes {
             apply_udp_recv_buffer(&sock, want);
         }
+        try_enable_udp_gro(&sock);
         let local = sock.local_addr()?;
         Ok(Self {
             socket: Some(Arc::new(sock)),
             addr: local,
         })
+    }
+}
+
+/// Enable `UDP_GRO` on the socket if available (Linux ≥ 5.0).
+/// Best-effort: failures are silently ignored — older kernels
+/// just keep doing one packet per recvmsg. When enabled, the
+/// kernel coalesces same-flow packets into a single recvmsg
+/// up to ~64 KiB; per-packet segment size lands in a
+/// `SOL_UDP / UDP_GRO` control message.
+fn try_enable_udp_gro(sock: &UdpSocket) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = sock.as_raw_fd();
+        let on: libc::c_int = 1;
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_UDP,
+                libc::UDP_GRO,
+                &on as *const _ as *const _,
+                std::mem::size_of_val(&on) as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            tracing::debug!(
+                error = %io::Error::last_os_error(),
+                "UDP_GRO setsockopt unavailable (kernel < 5.0 or unsupported)"
+            );
+        } else {
+            tracing::debug!("UDP_GRO enabled — recv may coalesce same-flow packets");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sock;
     }
 }
 

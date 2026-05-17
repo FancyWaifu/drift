@@ -37,6 +37,133 @@ use tokio::net::UdpSocket;
 /// large batches Linux gets one syscall per call; small
 /// batches still use the per-packet path because the
 /// sendmmsg setup overhead dominates below ~3 items.
+/// Receive into `buf` and split the result into per-packet
+/// `(offset, length, src)` tuples in `out`. On Linux this
+/// reads via `recvmsg` and parses the `UDP_GRO` cmsg (if
+/// the kernel coalesced same-flow packets) to recover each
+/// original segment. Without GRO (kernel < 5.0, or no cmsg
+/// returned because no coalescing happened) the call yields
+/// a single segment — same behavior as `recv_from`.
+///
+/// Caller must `out.clear()` before each invocation; this
+/// function only pushes.
+#[cfg(target_os = "linux")]
+pub(crate) async fn recv_batch_gro(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+    out: &mut Vec<(usize, usize, std::net::SocketAddr)>,
+) -> std::io::Result<()> {
+    use std::mem::MaybeUninit;
+    use std::net::SocketAddr;
+    use std::os::unix::io::AsRawFd;
+    use tokio::io::Interest;
+
+    let (n, src, gso_size) = socket
+        .async_io(Interest::READABLE, || {
+            let mut addr_storage: libc::sockaddr_storage =
+                unsafe { MaybeUninit::zeroed().assume_init() };
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr() as *mut _,
+                iov_len: buf.len(),
+            };
+            // Enough cmsg space for one UDP_GRO segment-size
+            // entry (u16). 64 bytes is plenty.
+            let mut cmsg_buf = [0u8; 64];
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_name = &mut addr_storage as *mut _ as *mut _;
+            msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as _;
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = cmsg_buf.as_mut_ptr() as *mut _;
+            msg.msg_controllen = cmsg_buf.len() as _;
+
+            let fd = socket.as_raw_fd();
+            let rc = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+            if rc < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let n = rc as usize;
+            let src = decode_sockaddr(&addr_storage, msg.msg_namelen)?;
+
+            // Walk cmsgs to find UDP_GRO. If found, every
+            // segment in `buf[..n]` is `gso_size` bytes
+            // except possibly the last (which is the
+            // remainder n % gso_size).
+            let mut gso_size: Option<u16> = None;
+            unsafe {
+                let mut cmsg_ptr = libc::CMSG_FIRSTHDR(&msg);
+                while !cmsg_ptr.is_null() {
+                    let level = (*cmsg_ptr).cmsg_level;
+                    let typ = (*cmsg_ptr).cmsg_type;
+                    if level == libc::SOL_UDP && typ == libc::UDP_GRO {
+                        let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *const u16;
+                        let sz = std::ptr::read_unaligned(data_ptr);
+                        if sz > 0 {
+                            gso_size = Some(sz);
+                        }
+                    }
+                    cmsg_ptr = libc::CMSG_NXTHDR(&msg, cmsg_ptr);
+                }
+            }
+            Ok((n, src, gso_size))
+        })
+        .await?;
+
+    // Split buf[..n] into segments and push tuples.
+    match gso_size {
+        Some(sz) if (sz as usize) < n => {
+            let sz = sz as usize;
+            let mut off = 0usize;
+            while off + sz <= n {
+                out.push((off, sz, src));
+                off += sz;
+            }
+            if off < n {
+                out.push((off, n - off, src));
+            }
+        }
+        _ => {
+            // No GRO cmsg, or single segment ≤ sz: one packet.
+            out.push((0, n, src));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn decode_sockaddr(
+    storage: &libc::sockaddr_storage,
+    namelen: libc::socklen_t,
+) -> std::io::Result<std::net::SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+    let _ = namelen;
+    match storage.ss_family as libc::c_int {
+        libc::AF_INET => {
+            let sin: &libc::sockaddr_in =
+                unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
+            let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            let port = u16::from_be(sin.sin_port);
+            Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
+        }
+        libc::AF_INET6 => {
+            let sin6: &libc::sockaddr_in6 =
+                unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
+            let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            let port = u16::from_be(sin6.sin6_port);
+            Ok(SocketAddr::V6(SocketAddrV6::new(
+                ip,
+                port,
+                sin6.sin6_flowinfo,
+                sin6.sin6_scope_id,
+            )))
+        }
+        f => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown sockaddr family {}", f),
+        )),
+    }
+}
+
 pub(crate) async fn send_batch(
     socket: &UdpSocket,
     packets: &[(Vec<u8>, SocketAddr)],
