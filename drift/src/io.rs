@@ -280,11 +280,23 @@ impl PacketIO for TcpPacketIO {
                 "packet too large for TCP framing (max 65535)",
             ));
         }
-        let len_bytes = (buf.len() as u16).to_be_bytes();
+        // Build one contiguous buffer so the kernel sees a single
+        // write (one syscall, one TCP segment in the common MTU-
+        // bounded case). Drift packets are ≤ 64 KiB; the alloc is
+        // small. Was two write_all calls + a flush, all three of
+        // which yield to the runtime — net 4 awaits per packet
+        // for what should be one syscall.
+        //
+        // TCP_NODELAY is already enabled (new_inner) so Nagle
+        // isn't pooling small writes; explicit flush() per packet
+        // was forcing an unneeded kernel-level commit on every
+        // send_to. Without it, the kernel autoflushes when the
+        // socket buffer fills or the next write triggers it.
+        let mut framed = Vec::with_capacity(2 + buf.len());
+        framed.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+        framed.extend_from_slice(buf);
         let mut writer = self.writer.lock().await;
-        writer.write_all(&len_bytes).await?;
-        writer.write_all(buf).await?;
-        writer.flush().await?;
+        writer.write_all(&framed).await?;
         Ok(buf.len())
     }
 
