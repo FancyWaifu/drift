@@ -959,8 +959,68 @@ async fn try_endpoints(
     const PROBE_BASE: Duration = Duration::from_millis(1500);
     const PROBE_JITTER_MAX_MS: u64 = 500;
 
-    let first_addr = resolve_endpoint(&endpoints[0]).await?;
-    transport.add_peer(peer_pub, first_addr, dir).await?;
+    // Connection-oriented schemes need a dedicated outbound
+    // connection per peer — the daemon's primary listener can't
+    // dial out for them (it accepts inbound only). UDP/DNS are
+    // datagram-style: one socket sends to any addr statelessly,
+    // so the listener doubles as the egress path.
+    //
+    // `connect_federate` is the right primitive for stream wires:
+    // it opens the outbound, attaches it as an interface, and pins
+    // the peer's interface_id to it so sends go out the new socket
+    // rather than the primary listener. Same helper used on the
+    // via_bridge path above (line ~252).
+    let first_scheme = scheme_of(&endpoints[0]);
+    if is_datagram_scheme(first_scheme) {
+        let first_addr = resolve_endpoint(&endpoints[0]).await?;
+        transport.add_peer(peer_pub, first_addr, dir).await?;
+    } else {
+        // Stream wire: open outbound now. If the peer's listener
+        // isn't up yet (symmetric parallel startup race),
+        // connect_federate returns ConnectionRefused; register a
+        // placeholder so the inbound side still has somewhere to
+        // land HELLOs, AND spawn a background retrier that keeps
+        // trying until either (a) we successfully dial out, or
+        // (b) the peer became Established via an inbound HELLO.
+        match transport.connect_federate(&endpoints[0], peer_pub).await {
+            Ok(_) => {}
+            Err(e) => {
+                // "Unsupported" means the scheme has no native
+                // connector (webtransport://, webrtc://). Retrying
+                // can never help — those schemes are listener-only
+                // on native; a remote browser client must dial us.
+                let is_unsupported = format!("{}", e).contains("Unsupported")
+                    || format!("{}", e).contains("no native")
+                    || format!("{}", e).contains("no programmatic");
+                if is_unsupported {
+                    warn!(
+                        endpoint = %endpoints[0],
+                        error = %e,
+                        "scheme has no native connector — tunnel is listener-only; \
+                         remote client must dial us"
+                    );
+                } else {
+                    warn!(
+                        endpoint = %endpoints[0],
+                        error = %e,
+                        "stream-wire connect_federate failed at startup; \
+                         scheduling background retries"
+                    );
+                }
+                let placeholder = resolve_endpoint(&endpoints[0]).await
+                    .unwrap_or_else(|_| "0.0.0.0:0".parse().expect("constant addr parses"));
+                transport.add_peer(peer_pub, placeholder, dir).await?;
+                if !is_unsupported {
+                    tokio::spawn(retry_stream_connect(
+                        transport.clone(),
+                        peer_pub,
+                        *peer_pid,
+                        endpoints[0].clone(),
+                    ));
+                }
+            }
+        }
+    }
 
     // Per-peer probe timeout with random jitter. Symmetric
     // peers (same configs, started together) would otherwise
@@ -971,6 +1031,20 @@ async fn try_endpoints(
         + Duration::from_millis(rand::thread_rng().gen_range(0..PROBE_JITTER_MAX_MS));
 
     for (i, url) in endpoints.iter().enumerate() {
+        let scheme = scheme_of(url);
+
+        // Happy-eyeballs across multiple stream endpoints is not
+        // implemented yet — would need teardown of the previous
+        // connector + reconnect, plus interface cleanup. For now
+        // we use the first endpoint that was opened above.
+        if !is_datagram_scheme(scheme) && i > 0 {
+            warn!(
+                endpoint = %url,
+                "stream-wire endpoint fallback not supported yet — skipping"
+            );
+            continue;
+        }
+
         let addr = match resolve_endpoint(url).await {
             Ok(a) => a,
             Err(e) => {
@@ -1004,13 +1078,21 @@ async fn try_endpoints(
         // we're probing. We only attribute "winner" to the
         // current endpoint if BOTH the session is Established
         // AND `peer.addr` still matches the addr we set.
+        //
+        // For stream wires the connect_federate path resolves
+        // internally (in make_connector); peer.addr is set to the
+        // resolved SocketAddr. We don't insist on a match here
+        // since the resolver may pick a different A record than
+        // ours — only the Established check matters.
         let deadline = tokio::time::Instant::now() + probe_timeout;
         let mut completed = false;
+        let strict_addr = is_datagram_scheme(scheme);
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if transport.peer_is_established(peer_pid).await
-                && transport.peer_addr(peer_pid).await == Some(addr)
-            {
+            let est = transport.peer_is_established(peer_pid).await;
+            let addr_ok = !strict_addr
+                || transport.peer_addr(peer_pid).await == Some(addr);
+            if est && addr_ok {
                 completed = true;
                 break;
             }
@@ -1033,6 +1115,72 @@ async fn try_endpoints(
          tunnel may be one-sided until peer connects"
     );
     Ok(endpoints[0].clone())
+}
+
+fn scheme_of(url: &str) -> &str {
+    url.find("://").map(|i| &url[..i]).unwrap_or("udp")
+}
+
+fn is_datagram_scheme(scheme: &str) -> bool {
+    matches!(scheme, "udp" | "dns")
+}
+
+/// Background retrier for stream-wire peers whose startup
+/// `connect_federate` failed. Two daemons brought up in parallel
+/// each try to dial the other before the other's listener is bound;
+/// without retries both fall to placeholder state and the tunnel is
+/// stuck forever (no inbound HELLO arrives because neither dialed).
+///
+/// Cadence: probe every 750ms for up to 60s. Exits early if the
+/// peer reaches Established via an inbound HELLO from the remote
+/// side — at that point our outbound is redundant.
+async fn retry_stream_connect(
+    transport: Arc<Transport>,
+    peer_pub: [u8; 32],
+    peer_pid: PeerId,
+    url: String,
+) {
+    use std::time::Duration;
+    const RETRY_INTERVAL: Duration = Duration::from_millis(750);
+    const MAX_ATTEMPTS: u32 = 80; // ~60s
+    for attempt in 1..=MAX_ATTEMPTS {
+        tokio::time::sleep(RETRY_INTERVAL).await;
+        if transport.peer_is_established(&peer_pid).await {
+            info!(
+                peer = %hex::encode(peer_pid),
+                attempt,
+                "stream-wire peer established via inbound; stopping retrier"
+            );
+            return;
+        }
+        match transport.connect_federate(&url, peer_pub).await {
+            Ok(_) => {
+                info!(
+                    peer = %hex::encode(peer_pid),
+                    endpoint = %url,
+                    attempt,
+                    "stream-wire connect_federate succeeded on retry"
+                );
+                let _ = transport.send_data(&peer_pid, b".", 0, 0).await;
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    peer = %hex::encode(peer_pid),
+                    endpoint = %url,
+                    error = %e,
+                    attempt,
+                    "stream-wire connect_federate retry failed"
+                );
+            }
+        }
+    }
+    warn!(
+        peer = %hex::encode(peer_pid),
+        endpoint = %url,
+        max_attempts = MAX_ATTEMPTS,
+        "stream-wire connect_federate gave up; tunnel won't come up unless peer dials in"
+    );
 }
 
 /// Per-peer state held by the (single) failover supervisor task.
