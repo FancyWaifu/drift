@@ -28,16 +28,16 @@
 
 use crate::crypto::PeerId;
 use crate::session::{Peer, PeerTable};
-// parking_lot::Mutex is dramatically cheaper than
-// tokio::sync::Mutex on uncontended critical sections (no
-// waker setup, no async state machine, no futex syscall when
-// the lock is free). The hot path takes peers.lock_for(id)
-// for short HashMap ops with no await points inside — exactly
-// the scenario parking_lot is built for. Held guards stay
-// inside one synchronous code region by construction; the
-// compiler enforces this since parking_lot::MutexGuard is
-// !Send and our async fns are spawned across runtime threads.
-use parking_lot::{Mutex, MutexGuard};
+// tokio::sync::Mutex chosen over parking_lot::Mutex despite
+// the per-acquire overhead. parking_lot was tried in PERF.3
+// (commit 337eb2c) for ~12% throughput on single-peer iperf;
+// reverted because the elimination of implicit-yield-on-lock
+// caused the loopback_full_mesh test (4 peers in one process,
+// same tokio runtime, all racing the same recv loop) to drop
+// from 80% pass to 0% pass — the recv loops were starving each
+// other on shared workers. The async-mutex's per-acquire yield
+// was load-bearing for fairness across many in-process peers.
+use tokio::sync::{Mutex, MutexGuard};
 
 /// Number of shards. Must be a power of two so we can use a
 /// bit mask for the modulo.
@@ -70,16 +70,11 @@ fn shard_index(id: &PeerId) -> usize {
 
 impl PeerShards {
     /// Lock just the shard that owns `id` and return a guard.
-    /// The returned guard is a `parking_lot::MutexGuard<PeerTable>`,
+    /// The returned guard is a normal `MutexGuard<PeerTable>`,
     /// so all the existing `.get/.get_mut/.insert/.remove` call
     /// sites compile unchanged.
-    ///
-    /// Kept as `async fn` so the 75+ existing
-    /// `peers.lock_for(&id).await` call sites compile without
-    /// edits. The .await yields immediately because the body
-    /// is a sync parking_lot acquire.
     pub(crate) async fn lock_for(&self, id: &PeerId) -> MutexGuard<'_, PeerTable> {
-        self.shards[shard_index(id)].lock()
+        self.shards[shard_index(id)].lock().await
     }
 
     /// Lock every shard in deterministic index order. Used by
@@ -92,7 +87,7 @@ impl PeerShards {
     pub(crate) async fn lock_all(&self) -> AllPeersGuard<'_> {
         let mut guards: Vec<MutexGuard<'_, PeerTable>> = Vec::with_capacity(PEER_SHARD_COUNT);
         for shard in &self.shards {
-            guards.push(shard.lock());
+            guards.push(shard.lock().await);
         }
         AllPeersGuard { guards }
     }
