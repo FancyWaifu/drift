@@ -288,25 +288,34 @@ impl Inner {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let (wire, addr) = {
+        // First scope: snap session key + client pub so we can
+        // compute the PSK and update the (async-locked)
+        // resumption_store without holding the !Send parking_lot
+        // peer guard across the await.
+        let (session_key_bytes, client_static_pub) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let session_key_bytes = match &peer.handshake {
+            let key = match &peer.handshake {
                 HandshakeState::Established { key_bytes, .. } => key_bytes.clone(),
                 _ => return Err(DriftError::UnknownPeer),
             };
-            let client_static_pub = peer.peer_static_pub;
+            (key, peer.peer_static_pub)
+        };
 
-            // Compute per-ticket PSK locally and stash it
-            // server-side. The client will independently derive
-            // the same PSK on receipt.
-            let psk = derive_psk(&session_key_bytes, &ticket_id);
-            self.resumption_store
-                .lock()
-                .await
-                .insert(ticket_id, psk, expiry, client_static_pub);
+        let psk = derive_psk(&session_key_bytes, &ticket_id);
+        self.resumption_store
+            .lock()
+            .await
+            .insert(ticket_id, psk, expiry, client_static_pub);
 
-            // Build the sealed payload.
+        // Second scope: build the wire packet. Re-lock the peer
+        // for seq allocation + tx-side seal. Worst case if
+        // the peer state changed in the meantime: next_seq_checked
+        // returns None and we bail with SessionExhausted — same
+        // outcome the original single-lock path would have had.
+        let (wire, addr) = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
             let seq = peer
                 .next_seq_checked()
                 .ok_or(DriftError::SessionExhausted)?;

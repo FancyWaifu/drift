@@ -6266,6 +6266,7 @@ impl Inner {
         // arrives, silently dropping it).
         let mut flushed_bytes = 0u64;
         let mut flushed_packets = 0u64;
+        let mut to_send: Vec<(usize, Vec<u8>, std::net::SocketAddr)> = Vec::new();
         let mesh_next_hop = self.routes.lock().unwrap().lookup(&peer_id);
         {
             let mut peers = self.peers.lock_for(&peer_id).await;
@@ -6420,13 +6421,16 @@ impl Inner {
             }
             cid_key_for_install = Some(session_key_bytes);
 
-            // Flush pending. We do this WHILE STILL HOLDING
-            // the peer lock — see the race note above. The
-            // sends are serialized with any concurrent
-            // close_peer call on this same peer, which
-            // guarantees all queued DATAs hit the wire before
-            // any Close that the app layer issues immediately
-            // after the handshake completes.
+            // Build the to-send list (Data wire bytes + iface +
+            // target) WHILE STILL HOLDING the peer lock. This
+            // serializes pending-drain with any concurrent
+            // close_peer mutation. We release the lock BEFORE
+            // doing the sendmsg syscalls because (a) parking_lot
+            // guards are !Send and can't cross await, (b) the
+            // ordering guarantee (DATAs hit the wire before
+            // any app-issued Close) is preserved: app code
+            // doesn't see handle_helloack complete until this
+            // function returns, and we send before returning.
             let pending = std::mem::take(&mut peer.pending);
             for ps in pending {
                 if let SendAction::Data(bytes, target, iface) = build_data_packet(
@@ -6437,11 +6441,17 @@ impl Inner {
                     ps.coalesce_group,
                     mesh_next_hop,
                 )? {
-                    self.ifaces.send_for(iface, &bytes, target).await?;
-                    flushed_packets += 1;
-                    flushed_bytes += bytes.len() as u64;
+                    to_send.push((iface, bytes, target));
                 }
             }
+        }
+
+        // Lock released — issue the syscalls.
+        for (iface, bytes, target) in to_send.drain(..) {
+            let n = bytes.len() as u64;
+            self.ifaces.send_for(iface, &bytes, target).await?;
+            flushed_packets += 1;
+            flushed_bytes += n;
         }
 
         // Install CIDs for short-header send/recv now that the
@@ -6822,38 +6832,47 @@ impl Inner {
             return Err(DriftError::UnknownPeer);
         }
         let peer_id = header.src_id;
-        let mut peers = self.peers.lock_for(&peer_id).await;
-        let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-        let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+        // Block-scoped peer-table mutation so the !Send
+        // parking_lot guard ends lexically before any await.
+        // Explicit `drop(peers)` is not enough for Rust's async
+        // non-Send analysis — must close the lexical scope.
+        let (disconnected_pub, was_awaiting_data) = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
-        let mut hbuf = [0u8; HEADER_LEN];
-        hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
-        let aad = canonical_aad(&hbuf);
-        // AEAD-authenticated: attacker can't forge a Close without
-        // the session key, so this is safe to act on immediately.
-        let _ = rx.open(header.seq, PacketType::Close as u8, &aad, body)?;
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            // AEAD-authenticated: attacker can't forge a Close
+            // without the session key, so this is safe to act
+            // on immediately.
+            let _ = rx.open(header.seq, PacketType::Close as u8, &aad, body)?;
 
-        // Capture the disconnecting peer's pubkey before we mutate
-        // their entry — needed for PeerGone emission below.
-        let disconnected_pub = peer.peer_static_pub;
+            // Capture the disconnecting peer's pubkey before we
+            // mutate their entry — needed for PeerGone emission
+            // below.
+            let disconnected_pub = peer.peer_static_pub;
 
-        let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
-        if peer.auto_registered {
-            debug!(peer_id = ?peer_id, "peer closed; removing auto-registered entry");
-            peers.remove(&peer_id);
-        } else {
-            debug!(peer_id = ?peer_id, "peer closed; resetting explicit entry");
-            peer.handshake = HandshakeState::Pending;
-            peer.pending.clear();
-            peer.session_epoch = None;
-            peer.probing = None;
-        }
+            let was_awaiting_data =
+                matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+            if peer.auto_registered {
+                debug!(peer_id = ?peer_id, "peer closed; removing auto-registered entry");
+                peers.remove(&peer_id);
+            } else {
+                debug!(peer_id = ?peer_id, "peer closed; resetting explicit entry");
+                peer.handshake = HandshakeState::Pending;
+                peer.pending.clear();
+                peer.session_epoch = None;
+                peer.probing = None;
+            }
+            (disconnected_pub, was_awaiting_data)
+        };
         if was_awaiting_data {
             self.metrics
                 .handshakes_inflight
                 .fetch_sub(1, Ordering::Relaxed);
         }
-        drop(peers);
 
         // PeerGone emission: if the disconnected peer was a local
         // client (not a federation bridge) AND we had a presence
