@@ -39,7 +39,7 @@ What's NOT yet there:
 - **No coordination service.** Peers find each other via static config — no Tailscale-style coordinator.
 - **NAT hole-punching is via-bridge only.** v0.13 added `via_bridge` for peers behind unrelated NATs to find each other through a federation bridge. UDP-hole-punching (STUN-style direct path discovery) isn't yet implemented; if both sides have NATs that block inbound, all traffic flows through the bridge.
 - **Lost-laptop identity rotation** still requires manual config edits on every peer (same as WireGuard/Tailscale today). **Owner-driven rotation** (you still have the old secret — routine key hygiene, hardware swap, planned roll) is automated as of v0.14 via `drift-vpn rotate` + `rotate-verify`; see [ROTATION.md](ROTATION.md).
-- **Userspace, not kernel.** With UDP GSO/GRO + parking_lot (v0.15), single-stream TCP on Proxmox-LXC iperf3 reaches **2.18 Gbps vs WireGuard kernel's 1.85 Gbps** on the same fabric (+18% raw throughput at +6% per-Gbps CPU tax). See `bench/drift-vpn-vs-wireguard.md`. Earlier builds were closer to ~1.3 Gbps.
+- **Userspace, not kernel.** With UDP GSO/GRO (v0.15), single-stream TCP on Proxmox-LXC iperf3 reaches **1.96 Gbps vs WireGuard kernel's 1.85 Gbps** on the same fabric (+6% raw throughput, near-parity per-Gbps CPU). See `bench/drift-vpn-vs-wireguard.md`. Earlier builds were closer to ~1.3 Gbps.
 
 ## How it differs from WireGuard
 
@@ -52,7 +52,7 @@ What's NOT yet there:
 | Mesh (no direct path) | Manual routing tables | **Native, beacon-driven** |
 | Health monitoring | None | Per-peer SRTT, last-seen, failover counters |
 | Operator UI | `wg show` | `drift-vpn status` + Prometheus `/metrics` |
-| Throughput (1-stream LXC iperf3) | 1.85 Gbps (kernel) | **2.18 Gbps** (userspace, post-GSO/GRO) |
+| Throughput (1-stream LXC iperf3) | 1.85 Gbps (kernel) | **1.96 Gbps** (userspace, post-GSO/GRO) |
 | Platforms | Linux/Windows kernel; userspace on Mac/iOS/Android | Linux + macOS daemon (Windows: keygen/show; daemon via WSL2) |
 | Maturity | Years of audits + production use | New project, 16-test suite |
 
@@ -340,23 +340,22 @@ Counter names follow Prometheus conventions (`_total` suffix, snake_case labels)
 
 ## Performance
 
-Current numbers (v0.15 with UDP GSO/GRO + parking_lot peer locks) — Proxmox LXCs on Ryzen 7 6800H, iperf3 TCP, MTU 1200:
+Current numbers (v0.15 with UDP GSO/GRO) — Proxmox LXCs on Ryzen 7 6800H, iperf3 TCP, MTU 1200:
 
 | | Throughput | System CPU |
 |---|---|---|
 | Host-to-host LXC veth (no tunnel — the ceiling) | ~28 Gbps | — |
-| **drift-vpn UDP tunnel** | **2.18 Gbps** | 75% |
+| **drift-vpn UDP tunnel** | **1.96 Gbps** | 66% |
 | WireGuard kernel, same fabric | 1.85 Gbps | 60% |
 
-drift-vpn pulls ahead of WG kernel by +18% raw throughput, at +6% per-Gbps CPU. For a userspace Rust implementation vs kernel C with hand-tuned crypto, the per-Gbps tax is small enough to be a real choice on perf grounds, not just on features.
+drift-vpn nudges ahead of WG kernel by +6% raw throughput at near-parity per-Gbps CPU (33.7% vs 32.4%). For a userspace Rust implementation vs kernel C with hand-tuned crypto, getting to per-Gbps parity is the meaningful result.
 
 How we got there in v0.15:
 
 - **UDP GSO sender** (`UDP_SEGMENT` cmsg) — one syscall + one skb segments to N MTU-sized packets at the NIC. Was the dominant cost pre-Phase 2.
 - **UDP GRO receiver** (`UDP_GRO` sockopt + recvmsg cmsg parsing) — symmetric move; one recvmsg returns up to 64 KiB of coalesced packets.
-- **parking_lot peer-shard mutex** — `tokio::sync::Mutex` was futex-heavy even uncontended; parking_lot's adaptive-spinning fast path eliminated the per-packet acquire cost.
 
-Three Linux-specific cfg-gated changes; macOS and Windows builds keep the existing paths. See [`bench/drift-vpn-vs-wireguard.md`](../bench/drift-vpn-vs-wireguard.md) for the full progression, syscall histograms, and what's left to chase next.
+Both are Linux-specific cfg-gated changes; macOS and Windows builds keep the existing paths. See [`bench/drift-vpn-vs-wireguard.md`](../bench/drift-vpn-vs-wireguard.md) for the full progression, what was tried and reverted, and what's left to chase next.
 
 For >2 Gbps single-stream you currently still want WireGuard kernel or a multi-core deployment of drift-vpn (multi-core scaling via `SO_REUSEPORT` is a future direction, not yet implemented).
 

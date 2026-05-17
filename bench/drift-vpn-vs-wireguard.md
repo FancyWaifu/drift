@@ -10,28 +10,40 @@ two LXCs (no bridge in the middle). MTU 1200 on drift-vpn,
 | | Throughput | System CPU | CPU per Gbps |
 |---|---|---|---|
 | WireGuard (kernel) | 1.85 Gbps | 60% | 32.4% |
-| **drift-vpn (userspace, GSO+GRO+parking_lot)** | **2.18 Gbps** | 75% | 34.4% |
+| **drift-vpn (userspace, GSO+GRO)** | **1.96 Gbps** | 66% | 33.7% |
 
-drift-vpn pushes **+18% raw throughput** over WireGuard kernel on
-this fabric, at a **6% per-Gbps efficiency tax**. A userspace Rust
-implementation matching kernel-space wirelock-step on a per-Gbps
-basis isn't realistic; pulling ahead on raw bandwidth and landing
-within 6% per-Gbps is.
+drift-vpn pushes **+6% raw throughput** over WireGuard kernel on
+this fabric, at near-parity (+1.3 percentage points) per-Gbps CPU.
+A userspace Rust implementation landing within striking distance
+of kernel-space on per-Gbps efficiency is meaningful.
 
 ## Progression in this session
 
-Starting from the v0.14 baseline (sendmmsg + tokio::sync::Mutex peer
-shards), three orthogonal changes landed:
+Starting from the v0.14 baseline (sendmmsg only), two orthogonal
+changes landed:
 
 | stage | throughput | stime/utime | commit |
 |---|---|---|---|
 | Baseline (sendmmsg only) | 1.19 Gbps | 5.00 | — |
 | + UDP GSO sender (`UDP_SEGMENT` cmsg) | 1.36 Gbps | 2.30 | `10a65c2` |
-| + UDP GRO receiver (`UDP_GRO` sockopt + cmsg parsing) | 1.98 Gbps | 2.20 | `956517e` |
-| + parking_lot peer-shard mutex | **2.21 Gbps** | 2.48 | `337eb2c` |
+| + UDP GRO receiver (`UDP_GRO` sockopt + cmsg parsing) | **1.96 Gbps** | 2.20 | `956517e` |
 
-**Cumulative: +86% throughput in one session.** Sub-second
+**Cumulative: +65% throughput in one session.** Sub-millisecond
 average ping unchanged across all stages (0.30 ms).
+
+### What was tried and reverted
+
+`parking_lot::Mutex` for `PeerShards` (commit `337eb2c`) bought
+~12% additional throughput in this bench (2.21 Gbps), but caused
+a starvation regression in `loopback_full_mesh.rs`: pass rate
+dropped from 80% to 0% on the 4-peer same-process scenario, because
+parking_lot's fast-path acquire skips the runtime yield that
+tokio::sync::Mutex provides on every acquire. That yield was
+load-bearing for fairness when multiple Transports share a tokio
+runtime. Reverted in commit `012cba0`; the 12% throughput delta
+is real but the test regression isn't worth it. Future direction:
+hybrid scheme that uses parking_lot for the inner per-packet
+locks plus explicit periodic yields. Not done here.
 
 Each change is Linux-specific; macOS/Windows builds keep their
 existing paths via cfg gates. None of them touch the wire format,
@@ -57,15 +69,15 @@ MTU        = 1420
 
 ## Detailed numbers (current)
 
-iperf3 -t 15 -J, drift-vpn 0.14+PERF.1..4 vs WG-kernel-6.8.12:
+iperf3 -t 15 -J, drift-vpn 0.14+PERF.1+PERF.2 vs WG-kernel-6.8.12:
 
 | Run | drift-vpn (Gbps) | WireGuard (Gbps) |
 |---|---|---|
-| 1 | 2.17 | 1.87 |
-| 2 | 2.15 | 1.84 |
-| 3 | 2.21 | 1.83 |
-| **avg** | **2.18** | **1.85** |
-| stdev | 0.03 | 0.02 |
+| 1 | 1.95 | 1.87 |
+| 2 | 1.96 | 1.84 |
+| 3 | 1.97 | 1.83 |
+| **avg** | **1.96** | **1.85** |
+| stdev | 0.01 | 0.02 |
 
 ## Syscall mix (drift-vpn, post-PERF.4)
 
