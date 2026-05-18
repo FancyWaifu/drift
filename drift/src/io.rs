@@ -1372,11 +1372,18 @@ impl PacketIO for TlsPacketIO {
                 "packet too large for TLS framing (max 65535)",
             ));
         }
-        let len_bytes = (buf.len() as u16).to_be_bytes();
+        // Same optimization as TcpPacketIO::send_to: one contiguous
+        // write_all, no explicit flush. rustls' write path encrypts
+        // and forwards to the underlying TCP socket; the inner
+        // TcpStream already has TCP_NODELAY enabled. Forcing flush
+        // here was making rustls flush its TLS record buffer per
+        // packet, which serializes record building + TCP send
+        // pointlessly when the next packet would have batched.
+        let mut framed = Vec::with_capacity(2 + buf.len());
+        framed.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+        framed.extend_from_slice(buf);
         let mut writer = self.writer.lock().await;
-        writer.write_all(&len_bytes).await?;
-        writer.write_all(buf).await?;
-        writer.flush().await?;
+        writer.write_all(&framed).await?;
         Ok(buf.len())
     }
 
