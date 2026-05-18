@@ -158,14 +158,22 @@ drift bridge --listen udp://0.0.0.0:51820 \
 
 Each `--listen` accepts inbound connections from clients on that wire — phones, browsers, IoT devices, drift-vpn endpoints, anything.
 
-**Federation adapters** — restricted to `h2://` / `h2s://` / `webtransport://` by default:
+**Federation adapters** — restricted to `h2://` / `h2s://` / `webtransport://` for public targets, but **LAN targets are exempted**:
 
 ```
+# Public peer — must use h2/h2s/webtransport
 drift bridge ... \
     --federate h2s://other-bridge.example.com:51827@<other-bridge-pubkey>
+
+# LAN peer — any scheme works (the strict gate is skipped for
+# RFC1918 / loopback / link-local / ULA / CGNAT addresses).
+# UDP federation is genuinely faster on a LAN; this is the
+# right answer for homelab and same-VPC setups.
+drift bridge ... \
+    --federate udp://192.168.50.1:51820@<lan-bridge-pubkey>
 ```
 
-The strict default refuses `--federate udp://...` etc. The three modern schemes give you:
+The strict default refuses `--federate <legacy-scheme>://` only when the target resolves to a public IP. The three modern schemes give you:
 
 - **Multiplexing** — one TCP/QUIC connection per federation link, not one per packet
 - **Middlebox-friendly** — any HTTPS-aware infra (caddy, nginx, Cloudflare, ALBs) just works
