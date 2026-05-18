@@ -1,4 +1,4 @@
-//! `http://` — DRIFT shaped as plain HTTP/1.1.
+//! `http://` — DRIFT shaped as plain HTTP/1.1, server backed by hyper.
 //!
 //! For environments where every other DRIFT transport (UDP /
 //! TCP / WS / TLS) gets blocked by aggressive proxies but plain
@@ -32,12 +32,18 @@
 //! the server's only key for routing inbound POSTs to the right
 //! SSE stream.
 //!
-//! ## Why hand-rolled HTTP
+//! ## Server backend: hyper
 //!
-//! Hyper would do the parsing for us, but we only need GET +
-//! POST + content-length, no chunked encoding, no compression.
-//! Hand-rolling keeps `drift`'s dep tree small and the wire
-//! transparent — easy to debug with `curl` and `nc`.
+//! The server side uses `hyper::server::conn::http1` for request
+//! parsing. We get RFC-compliant header handling, proper
+//! Content-Length vs Transfer-Encoding semantics, header size
+//! limits, and the largest fuzz corpus in the Rust HTTP
+//! ecosystem — all for free. Per-IP connection caps and the
+//! `header_read_timeout` close out slowloris-style stalls.
+//!
+//! Pre-hyper, this file hand-rolled a small HTTP/1.1 parser
+//! (~250 LOC). It worked, but it was us-vs-the-RFC; the hyper
+//! port closes that gap.
 //!
 //! ## Browser pairing
 //!
@@ -46,18 +52,61 @@
 //! for upstream. Either side can be replaced independently as
 //! long as the wire shape above stays the same.
 
-use crate::io::{parse_ip_addr, Listener, PacketIO, SchemeRegistration};
+use crate::io::{parse_ip_addr, ConnGuard, Listener, PacketIO, SchemeRegistration};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
+use bytes::Bytes;
+use http_body_util::{combinators::BoxBody, BodyExt, Empty, StreamBody};
+use hyper::body::{Frame, Incoming};
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
+
+/// SEC.PEN.HIGH-1 hardening for the http:// listener — bound the
+/// time hyper waits for the request head and cap concurrent
+/// connections per source IP. Mirrors the WS / TLS adapter
+/// constants from `crate::io`.
+const HTTP_HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DEFAULT_HTTP_CONNS_PER_IP: usize = 32;
+/// Hard cap on a single POST body. DRIFT packets are well under
+/// 64 KiB; anything larger is rejected before we allocate.
+const MAX_POST_BODY: usize = 65 * 1024;
+
+/// HTTP.OPT2 — when set, the http:// listener trusts upstream
+/// reverse-proxy headers (X-Forwarded-For / X-Real-IP) for log
+/// context and SKIPS the TCP-peer-based per-IP cap (because
+/// every connection now comes from the proxy's IP, and the
+/// per-IP cap would either let through far too many real users
+/// or block them all). The reverse proxy is expected to do its
+/// own per-source-IP rate limiting / connection management.
+///
+/// Toggled by `drift bridge --trust-proxy-headers`. Process-wide
+/// because the scheme-registry factory signature
+/// `fn(String) -> ...` doesn't carry config; an atomic flipped
+/// before bind() is the simplest plumbing.
+static TRUST_PROXY_HEADERS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// HTTP.OPT2 — operator hook to enable proxy-header trust before
+/// any `bind()` call. Set by `drift bridge` when the operator
+/// passes `--trust-proxy-headers`.
+pub fn set_trust_proxy_headers(v: bool) {
+    TRUST_PROXY_HEADERS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn trust_proxy_headers() -> bool {
+    TRUST_PROXY_HEADERS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 // ─── Per-client queues ────────────────────────────────────────────
 //
@@ -131,7 +180,12 @@ impl HttpListenerIO {
         let actual = listener.local_addr()?;
         let (nct, ncr) = mpsc::channel::<Arc<dyn PacketIO>>(16);
         let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
-        let handle = tokio::spawn(accept_loop(listener, nct, registry));
+        let per_ip: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cap_per_ip = DEFAULT_HTTP_CONNS_PER_IP;
+        let handle = tokio::spawn(accept_loop(
+            listener, actual, nct, registry, per_ip, cap_per_ip,
+        ));
         Ok(Self {
             addr: actual,
             new_clients_rx: Mutex::new(ncr),
@@ -156,13 +210,27 @@ impl Listener for HttpListenerIO {
     }
 }
 
+/// Body type returned by every hyper service branch. Boxed so
+/// the streaming SSE branch and the empty / error branches share
+/// a single return type.
+type RespBody = BoxBody<Bytes, io::Error>;
+
+fn empty_body() -> RespBody {
+    Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed()
+}
+
 async fn accept_loop(
     listener: TcpListener,
+    local: SocketAddr,
     new_clients_tx: mpsc::Sender<Arc<dyn PacketIO>>,
     registry: Registry,
+    per_ip: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>,
+    cap_per_ip: usize,
 ) {
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let (tcp, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "HTTP accept failed");
@@ -170,105 +238,115 @@ async fn accept_loop(
                 continue;
             }
         };
-        let _ = stream.set_nodelay(true);
+        let ip = peer.ip();
+        // Per-IP connection cap (mirror TcpListenerIO). When
+        // running behind a trusted reverse proxy
+        // (`--trust-proxy-headers`), skip — every connection
+        // comes from the proxy's IP and the proxy is expected
+        // to enforce its own rate limits.
+        let admitted = if trust_proxy_headers() {
+            true
+        } else {
+            let mut map = per_ip.lock().unwrap();
+            let count = map.entry(ip).or_insert(0);
+            if *count >= cap_per_ip {
+                false
+            } else {
+                *count += 1;
+                true
+            }
+        };
+        if !admitted {
+            drop(tcp);
+            tracing::debug!(
+                src = %ip,
+                cap = cap_per_ip,
+                "http accept: per-ip cap reached, refusing connection"
+            );
+            continue;
+        }
+        let _ = tcp.set_nodelay(true);
+        let guard = ConnGuard::new(per_ip.clone(), ip);
         let registry = registry.clone();
         let nct = new_clients_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_request(stream, peer, registry, nct).await {
-                tracing::debug!(error = %e, "HTTP request handler exited");
+            let io = TokioIo::new(tcp);
+            let svc = service_fn(move |req: Request<Incoming>| {
+                let registry = registry.clone();
+                let nct = nct.clone();
+                async move {
+                    Ok::<_, Infallible>(
+                        handle_request(req, peer, local, registry, nct).await,
+                    )
+                }
+            });
+            // SEC.PEN.HIGH-1: header_read_timeout bounds the
+            // time hyper waits for the request line + headers.
+            // A client that opens a TCP connection and stalls
+            // before sending the first request will be dropped.
+            // The per-IP cap above is the second line of defense.
+            let conn = hyper::server::conn::http1::Builder::new()
+                .keep_alive(true)
+                .timer(TokioTimer::new())
+                .header_read_timeout(HTTP_HEADER_READ_TIMEOUT)
+                .serve_connection(io, svc);
+            if let Err(e) = conn.await {
+                tracing::debug!(?peer, error = ?e, "http1 connection ended");
             }
+            drop(guard);
         });
     }
-}
-
-// ─── HTTP request parsing ─────────────────────────────────────────
-
-struct RequestHead {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-}
-
-async fn parse_request_head<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> io::Result<RequestHead> {
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    let mut parts = line.trim_end().split(' ');
-    let method = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing method"))?
-        .to_string();
-    let path = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing path"))?
-        .to_string();
-    let mut headers = Vec::new();
-    loop {
-        let mut hl = String::new();
-        let n = reader.read_line(&mut hl).await?;
-        if n == 0 {
-            break;
-        }
-        let hl = hl.trim_end();
-        if hl.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = hl.split_once(':') {
-            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
-        }
-    }
-    Ok(RequestHead {
-        method,
-        path,
-        headers,
-    })
-}
-
-fn header<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    headers.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
 // ─── Request dispatch ─────────────────────────────────────────────
 
 async fn handle_request(
-    stream: TcpStream,
-    peer: SocketAddr,
-    registry: Registry,
-    new_clients_tx: mpsc::Sender<Arc<dyn PacketIO>>,
-) -> io::Result<()> {
-    let local = stream.local_addr()?;
-    let (read_half, write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
-    let head = parse_request_head(&mut reader).await?;
-
-    // Split path from optional query string.
-    let (path, query) = match head.path.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (head.path.clone(), String::new()),
-    };
-
-    match (head.method.as_str(), path.as_str()) {
-        ("GET", "/drift-sse") => {
-            handle_sse(write_half, peer, local, registry, new_clients_tx).await
-        }
-        ("POST", "/drift-send") => {
-            handle_post(reader, write_half, &head, &query, registry).await
-        }
-        ("OPTIONS", _) => write_cors_preflight(write_half).await,
-        _ => write_404(write_half).await,
-    }
-}
-
-// ─── Server-sent events stream (downstream) ──────────────────────
-
-async fn handle_sse(
-    mut write: tokio::net::tcp::OwnedWriteHalf,
+    req: Request<Incoming>,
     peer: SocketAddr,
     local: SocketAddr,
     registry: Registry,
     new_clients_tx: mpsc::Sender<Arc<dyn PacketIO>>,
-) -> io::Result<()> {
+) -> Response<RespBody> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/drift-sse") => handle_sse(peer, local, registry, new_clients_tx).await,
+        ("POST", "/drift-send") => handle_post(req, query, registry).await,
+        ("OPTIONS", _) => cors_preflight(),
+        _ => stock_response(StatusCode::NOT_FOUND),
+    }
+}
+
+fn cors_preflight() -> Response<RespBody> {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Content-Length", "0")
+        .body(empty_body())
+        .unwrap()
+}
+
+fn stock_response(status: StatusCode) -> Response<RespBody> {
+    Response::builder()
+        .status(status)
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Content-Length", "0")
+        .body(empty_body())
+        .unwrap()
+}
+
+
+// ─── Server-sent events stream (downstream) ──────────────────────
+
+async fn handle_sse(
+    peer: SocketAddr,
+    local: SocketAddr,
+    registry: Registry,
+    new_clients_tx: mpsc::Sender<Arc<dyn PacketIO>>,
+) -> Response<RespBody> {
     let sid: u64 = rand::random();
     let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(64);
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(16);
@@ -278,10 +356,6 @@ async fn handle_sse(
         reg.insert(sid, ClientQueues { inbound_tx: in_tx });
     }
 
-    // Build the per-client PacketIO and hand it to the listener
-    // via the new-clients channel before we start streaming —
-    // otherwise we might deliver inbound bytes to a recv_from
-    // that nobody's calling yet.
     let io_handle: Arc<dyn PacketIO> = Arc::new(HttpPacketIO {
         inbound_rx: Mutex::new(in_rx),
         outbound_tx: out_tx,
@@ -289,123 +363,103 @@ async fn handle_sse(
         local_addr: local,
     });
     if new_clients_tx.send(io_handle).await.is_err() {
-        // Listener dropped; clean up registry.
         registry.lock().await.remove(&sid);
-        return Ok(());
+        return stock_response(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    // SSE response head.
-    let head = "HTTP/1.1 200 OK\r\n\
-                Content-Type: text/event-stream\r\n\
-                Cache-Control: no-cache\r\n\
-                Connection: keep-alive\r\n\
-                Access-Control-Allow-Origin: *\r\n\
-                \r\n";
-    write.write_all(head.as_bytes()).await?;
-
-    // First event tells the client its sid.
-    let sid_event = format!("data: SID:{:016x}\n\n", sid);
-    write.write_all(sid_event.as_bytes()).await?;
-    write.flush().await?;
-
-    // Drain outbound queue → SSE events. Coalesce multiple
-    // ready-packets into one write+flush cycle (the t2d-style
-    // opportunistic-drain pattern). Without batching, every
-    // drift packet became one write_all + one flush, which on
-    // a TCP_NODELAY socket is a syscall per packet AND a
-    // forced kernel commit per packet — exactly the cost we
-    // killed in the TCP/TLS/WS adapters.
+    // SSE response body: a stream of `Frame<Bytes>` chunks. The
+    // formatter task below drains `out_rx` (packets from
+    // HttpPacketIO::send_to), encodes each as one `data:
+    // <base64>\n\n` SSE event, and forwards through `body_tx`.
+    // Hyper drives the response body by pulling frames out of
+    // the receiver as the underlying socket has buffer space.
     //
-    // Strategy: block for the first packet, then drain any
-    // packets already queued (try_recv loop) into one
-    // contiguous buffer, single write_all, single flush. The
-    // flush at the end of the batch keeps SSE clients (which
-    // expect prompt delivery) responsive at the boundary of
-    // each natural send-burst.
-    let mut scratch = Vec::with_capacity(8192);
-    while let Some(first) = out_rx.recv().await {
-        scratch.clear();
-        let mut append = |pkt: &[u8], buf: &mut Vec<u8>| {
-            let encoded = general_purpose::STANDARD_NO_PAD.encode(pkt);
-            buf.extend_from_slice(b"data: ");
-            buf.extend_from_slice(encoded.as_bytes());
-            buf.extend_from_slice(b"\n\n");
-        };
-        append(&first, &mut scratch);
-        // Opportunistic drain — at most 32 packets per write
-        // so a slow client doesn't see one enormous send_all
-        // build up.
-        for _ in 0..31 {
-            match out_rx.try_recv() {
-                Ok(next) => append(&next, &mut scratch),
-                Err(_) => break,
+    // When `body_tx` is dropped (the formatter task exits OR the
+    // client disconnects so hyper drops the receiver), the
+    // ReceiverStream ends and hyper closes the response.
+    let (body_tx, body_rx) = mpsc::channel::<Result<Frame<Bytes>, io::Error>>(8);
+
+    let registry_cleanup = registry.clone();
+    tokio::spawn(async move {
+        // First event: SID handshake — paired with the client's
+        // `drain_events` SID parse on the connector side.
+        let sid_event = Bytes::from(format!("data: SID:{:016x}\n\n", sid));
+        if body_tx.send(Ok(Frame::data(sid_event))).await.is_err() {
+            registry_cleanup.lock().await.remove(&sid);
+            return;
+        }
+
+        // Drain outbound queue → batched SSE events. Same
+        // opportunistic-drain pattern the hand-rolled version
+        // used: block for the first packet, drain any pending
+        // packets up to 32 into one buffer, send as one Frame.
+        // Hyper takes care of the TCP-level flush.
+        let mut scratch = Vec::with_capacity(8192);
+        while let Some(first) = out_rx.recv().await {
+            scratch.clear();
+            let mut append = |pkt: &[u8], buf: &mut Vec<u8>| {
+                let encoded = general_purpose::STANDARD_NO_PAD.encode(pkt);
+                buf.extend_from_slice(b"data: ");
+                buf.extend_from_slice(encoded.as_bytes());
+                buf.extend_from_slice(b"\n\n");
+            };
+            append(&first, &mut scratch);
+            for _ in 0..31 {
+                match out_rx.try_recv() {
+                    Ok(next) => append(&next, &mut scratch),
+                    Err(_) => break,
+                }
+            }
+            let frame = Frame::data(Bytes::copy_from_slice(&scratch));
+            if body_tx.send(Ok(frame)).await.is_err() {
+                break; // client disconnected
             }
         }
-        if write.write_all(&scratch).await.is_err() {
-            break;
-        }
-        if write.flush().await.is_err() {
-            break;
-        }
-    }
+        // Stale sid would otherwise accept POSTs forever.
+        registry_cleanup.lock().await.remove(&sid);
+    });
 
-    // Clean up so a stale sid doesn't accept POSTs forever.
-    registry.lock().await.remove(&sid);
-    Ok(())
+    let body = StreamBody::new(ReceiverStream::new(body_rx)).boxed();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(body)
+        .unwrap()
 }
 
 // ─── POST upstream ────────────────────────────────────────────────
 
 async fn handle_post(
-    mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-    mut write: tokio::net::tcp::OwnedWriteHalf,
-    head: &RequestHead,
-    query: &str,
+    req: Request<Incoming>,
+    query: String,
     registry: Registry,
-) -> io::Result<()> {
-    let sid = parse_sid(query).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "POST missing or bad ?sid=")
-    })?;
-    let len: usize = header(&head.headers, "content-length")
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "POST missing Content-Length")
-        })?;
-    if len > 65 * 1024 {
-        // DRIFT packets are well under 64 KiB; reject anything
-        // huge to avoid DoS via giant POST bodies.
-        return write_413(write).await;
-    }
-    let mut body = vec![0u8; len];
-    reader.read_exact(&mut body).await?;
-
-    let queues = {
-        let reg = registry.lock().await;
-        reg.get(&sid).cloned()
+) -> Response<RespBody> {
+    let Some(sid) = parse_sid(&query) else {
+        return stock_response(StatusCode::BAD_REQUEST);
     };
+    // Bound the body read at MAX_POST_BODY. http_body_util's
+    // `Limited` errors out cleanly once the limit is exceeded,
+    // which we translate to 413.
+    let limited = http_body_util::Limited::new(req.into_body(), MAX_POST_BODY);
+    let body_bytes = match limited.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return stock_response(StatusCode::PAYLOAD_TOO_LARGE),
+    };
+
+    let queues = { registry.lock().await.get(&sid).cloned() };
     let Some(queues) = queues else {
-        return write_404(write).await;
+        return stock_response(StatusCode::NOT_FOUND);
     };
-
-    // Push into the inbound queue; the application's
-    // `recv_from` will pick it up.
-    let _ = queues.inbound_tx.send(body).await;
-
-    let resp = "HTTP/1.1 200 OK\r\n\
-                Content-Length: 0\r\n\
-                Access-Control-Allow-Origin: *\r\n\
-                \r\n";
-    write.write_all(resp.as_bytes()).await?;
-    // Explicit flush IS needed here: reqwest on the client side
-    // is blocked waiting for this response before issuing the next
-    // POST. Without flush, the 50-byte response can sit in the
-    // kernel send buffer (TCP_NODELAY notwithstanding, the kernel
-    // doesn't always push tiny writes immediately when the socket
-    // is keepalive-reused), stalling the client's send loop. The
-    // flush cost is real but it's unblocking a serialized request/
-    // response handshake, not optional latency padding.
-    write.flush().await?;
-    Ok(())
+    let _ = queues.inbound_tx.send(body_bytes.to_vec()).await;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Length", "0")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(empty_body())
+        .unwrap()
 }
 
 fn parse_sid(query: &str) -> Option<u64> {
@@ -415,39 +469,6 @@ fn parse_sid(query: &str) -> Option<u64> {
         }
     }
     None
-}
-
-// ─── Stock responses ──────────────────────────────────────────────
-
-async fn write_cors_preflight(
-    mut write: tokio::net::tcp::OwnedWriteHalf,
-) -> io::Result<()> {
-    let resp = "HTTP/1.1 204 No Content\r\n\
-                Access-Control-Allow-Origin: *\r\n\
-                Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-                Access-Control-Allow-Headers: Content-Type\r\n\
-                Content-Length: 0\r\n\
-                \r\n";
-    write.write_all(resp.as_bytes()).await?;
-    write.flush().await
-}
-
-async fn write_404(mut write: tokio::net::tcp::OwnedWriteHalf) -> io::Result<()> {
-    let resp = "HTTP/1.1 404 Not Found\r\n\
-                Content-Length: 0\r\n\
-                Access-Control-Allow-Origin: *\r\n\
-                \r\n";
-    write.write_all(resp.as_bytes()).await?;
-    write.flush().await
-}
-
-async fn write_413(mut write: tokio::net::tcp::OwnedWriteHalf) -> io::Result<()> {
-    let resp = "HTTP/1.1 413 Payload Too Large\r\n\
-                Content-Length: 0\r\n\
-                Access-Control-Allow-Origin: *\r\n\
-                \r\n";
-    write.write_all(resp.as_bytes()).await?;
-    write.flush().await
 }
 
 // ─── Native HTTP connector ───────────────────────────────────────
