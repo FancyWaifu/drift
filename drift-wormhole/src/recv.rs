@@ -216,3 +216,54 @@ fn sanitize_filename(name: &str) -> String {
 fn short_pub(p: &[u8; 32]) -> String {
     p.iter().take(4).map(|b| format!("{:02x}", b)).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_filename;
+
+    // SEC.PEN.MED — drift-wormhole filename traversal.
+    //
+    // sanitize_filename keeps only the final basename via
+    // Path::file_name(). file_name() returns None for paths
+    // ending in `..` or for empty paths, so the fallback
+    // "received-file" kicks in.
+    #[test]
+    fn sanitize_strips_path_traversal() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename("/etc/shadow"), "shadow");
+        assert_eq!(sanitize_filename("a/b/c/d.txt"), "d.txt");
+    }
+
+    #[test]
+    fn sanitize_falls_back_for_dotdot_only_paths() {
+        assert_eq!(sanitize_filename(".."), "received-file");
+        assert_eq!(sanitize_filename("../.."), "received-file");
+        assert_eq!(sanitize_filename(""), "received-file");
+        assert_eq!(sanitize_filename("/"), "received-file");
+    }
+
+    #[test]
+    fn sanitize_preserves_safe_names() {
+        assert_eq!(sanitize_filename("photo.jpg"), "photo.jpg");
+        assert_eq!(
+            sanitize_filename("annual-report.2026-05.pdf"),
+            "annual-report.2026-05.pdf"
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_unicode_and_hidden() {
+        assert_eq!(sanitize_filename(".hidden"), ".hidden");
+        assert_eq!(sanitize_filename("résumé.pdf"), "résumé.pdf");
+        // file_name on Windows-style backslashes returns the
+        // whole string on Unix (backslash is a valid filename
+        // char). Document this — the OS layer is the second
+        // line of defense.
+        let win = sanitize_filename(r"..\..\etc\passwd");
+        assert!(
+            win.contains("..\\") || win == r"..\..\etc\passwd",
+            "windows-style traversal returned: {:?}",
+            win
+        );
+    }
+}
