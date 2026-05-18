@@ -30,7 +30,10 @@
 //! drift bridge stays h2c on the backend, the proxy handles TLS.
 //! (Same pattern as `http://` + reverse proxy from docs/reverse-proxy.md.)
 
-use crate::io::{parse_ip_addr, Listener, PacketIO, SchemeRegistration};
+use crate::io::{
+    generate_self_signed_cert, install_default_crypto_provider, parse_ip_addr, Listener,
+    NoCertVerifier, PacketIO, SchemeRegistration,
+};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
@@ -224,6 +227,56 @@ impl H2ListenerIO {
             _accept_task: accept_task,
         })
     }
+
+    /// `h2s://` listener — same as `bind` but TLS-terminates each
+    /// accepted connection before handing it to the HTTP/2 server.
+    /// Cert is freshly self-signed (the cert is checked by NoCert-
+    /// Verifier on the client; auth is at the DRIFT AEAD layer).
+    pub async fn bind_tls(addr: SocketAddr) -> io::Result<Self> {
+        install_default_crypto_provider();
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+        let (certs, key) = generate_self_signed_cert()?;
+        let mut server_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| io::Error::other(format!("rustls server config: {}", e)))?;
+        server_cfg.alpn_protocols = vec![b"h2".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+
+        let (ready_tx, ready_rx) = mpsc::channel::<Arc<dyn PacketIO>>(16);
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let (tcp, peer) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "h2s accept failed");
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let _ = tcp.set_nodelay(true);
+                let acceptor = acceptor.clone();
+                let ready_tx = ready_tx.clone();
+                tokio::spawn(async move {
+                    let tls = match acceptor.accept(tcp).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::debug!(?peer, error = %e, "h2s TLS handshake failed");
+                            return;
+                        }
+                    };
+                    serve_one_h2_connection(tls, peer, ready_tx).await;
+                });
+            }
+        });
+
+        Ok(Self {
+            local_addr,
+            ready_rx: Mutex::new(ready_rx),
+            _accept_task: accept_task,
+        })
+    }
 }
 
 #[async_trait]
@@ -242,12 +295,14 @@ impl Listener for H2ListenerIO {
     }
 }
 
-async fn serve_one_h2_connection(
-    tcp: TcpStream,
+async fn serve_one_h2_connection<S>(
+    stream: S,
     peer: SocketAddr,
     ready_tx: mpsc::Sender<Arc<dyn PacketIO>>,
-) {
-    let io = TokioIo::new(tcp);
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
     let svc = service_fn(move |req: Request<Incoming>| {
         let ready_tx = ready_tx.clone();
         async move {
@@ -316,7 +371,51 @@ async fn connect_h2_client(
 ) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     let tcp = TcpStream::connect(addr).await?;
     let _ = tcp.set_nodelay(true);
-    let io = TokioIo::new(tcp);
+    finish_h2_client_handshake(tcp, addr).await
+}
+
+/// h2s — like `h2://` but the underlying TCP is wrapped in a TLS
+/// client connection negotiated with ALPN h2. Server uses a
+/// self-signed cert; client uses NoCertVerifier — DRIFT's own
+/// AEAD is the actual auth, the TLS layer is just hop-to-hop
+/// confidentiality + middlebox compat.
+async fn connect_h2s_client(
+    addr: SocketAddr,
+) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+    install_default_crypto_provider();
+    let tcp = TcpStream::connect(addr).await?;
+    let _ = tcp.set_nodelay(true);
+    let mut cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+        .with_no_client_auth();
+    // Require h2 — drop http/1.1. The server-side cert verifier
+    // doesn't care about hostname (NoCertVerifier accepts all),
+    // so the SNI value is arbitrary.
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    // Use the connect-target IP as the SNI value so reverse
+    // proxies that pick certs by SNI (caddy `tls internal`,
+    // multi-tenant TLS terminators) can route correctly. The
+    // NoCertVerifier doesn't care what the server's cert says,
+    // so the actual SNI string only matters for the server's
+    // host-routing.
+    let server_name = rustls::pki_types::ServerName::IpAddress(addr.ip().into());
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(io::Error::other)?;
+    finish_h2_client_handshake(tls, addr).await
+}
+
+async fn finish_h2_client_handshake<S>(
+    stream: S,
+    addr: SocketAddr,
+) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
 
     // Set up the HTTP/2 client connection. http2::handshake gives
     // us the SendRequest handle to issue our single POST.
@@ -395,6 +494,32 @@ inventory::submit! {
         scheme: "h2",
         listener: h2_listener_factory,
         connector: h2_connector_factory,
+    }
+}
+
+fn h2s_listener_factory(
+    addr_str: String,
+) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str).await?;
+        Ok(Box::new(H2ListenerIO::bind_tls(addr).await?) as Box<dyn Listener>)
+    })
+}
+
+fn h2s_connector_factory(
+    addr_str: String,
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
+    Box::pin(async move {
+        let addr = parse_ip_addr(&addr_str).await?;
+        connect_h2s_client(addr).await
+    })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "h2s",
+        listener: h2s_listener_factory,
+        connector: h2s_connector_factory,
     }
 }
 
