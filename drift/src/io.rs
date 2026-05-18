@@ -439,6 +439,11 @@ pub struct WsPacketIO<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 
         futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
     >,
     addr: SocketAddr,
+    /// SEC.PEN.HIGH-1: per-IP slot guard for server-accepted
+    /// connections. Released when the PacketIO Arc drops.
+    /// `None` for client-side wraps.
+    #[allow(dead_code)]
+    _conn_guard: Option<ConnGuard>,
 }
 
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> WsPacketIO<S> {
@@ -448,12 +453,29 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> W
     /// peer address; for client connections, use the server's
     /// address.
     pub fn new(ws: tokio_tungstenite::WebSocketStream<S>, addr: SocketAddr) -> Self {
+        Self::new_inner(ws, addr, None)
+    }
+
+    pub(crate) fn new_with_guard(
+        ws: tokio_tungstenite::WebSocketStream<S>,
+        addr: SocketAddr,
+        guard: ConnGuard,
+    ) -> Self {
+        Self::new_inner(ws, addr, Some(guard))
+    }
+
+    fn new_inner(
+        ws: tokio_tungstenite::WebSocketStream<S>,
+        addr: SocketAddr,
+        guard: Option<ConnGuard>,
+    ) -> Self {
         use futures_util::StreamExt;
         let (writer, reader) = ws.split();
         Self {
             writer: tokio::sync::Mutex::new(writer),
             reader: tokio::sync::Mutex::new(reader),
             addr,
+            _conn_guard: guard,
         }
     }
 }
@@ -1167,6 +1189,31 @@ impl Drop for ConnGuard {
 
 const DEFAULT_TCP_CONNS_PER_IP: usize = 32;
 
+/// SEC.PEN.HIGH-1 — handshake-stall hardening for WS and TLS.
+///
+/// WS and TLS listeners run a user-space handshake (HTTP upgrade
+/// for WS; ClientHello/Finished round-trip for TLS) after the
+/// TCP accept. An attacker who completes the TCP three-way then
+/// stalls indefinitely before sending the next protocol layer
+/// can pile up unbounded in-flight handshakes — exhausting FDs
+/// and tokio tasks. The mitigation has two parts:
+///
+///   1. A wall-clock deadline (`WS_TLS_HANDSHAKE_TIMEOUT`) on
+///      the user-space handshake. After the timeout the
+///      handshake task drops the socket and releases its
+///      per-IP slot.
+///   2. A per-source-IP cap (`DEFAULT_WS_TLS_CONNS_PER_IP`) on
+///      in-flight + accepted connections, just like TCP. The
+///      ConnGuard pattern releases the slot when the PacketIO
+///      Arc drops (or when the handshake times out).
+///
+/// The handshake itself is spawned in a dedicated task so the
+/// accept loop never blocks behind a slow one — without that,
+/// even a per-IP cap leaves a serialized accept loop vulnerable
+/// to head-of-line blocking from the first stuck connection.
+const WS_TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DEFAULT_WS_TLS_CONNS_PER_IP: usize = 32;
+
 impl TcpListenerIO {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1245,30 +1292,107 @@ impl Listener for TcpListenerIO {
 /// such environments, drift-http traffic is indistinguishable
 /// from a normal HTTPS WebSocket app.
 pub struct WsListenerIO {
-    listener: tokio::net::TcpListener,
+    local_addr: SocketAddr,
+    ready_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Arc<dyn PacketIO>>>,
+    _accept_task: tokio::task::JoinHandle<()>,
 }
 
 impl WsListenerIO {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        Ok(Self { listener })
+        let local_addr = listener.local_addr()?;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Arc<dyn PacketIO>>(32);
+        let per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cap_per_ip = DEFAULT_WS_TLS_CONNS_PER_IP;
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "ws accept failed");
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let ip = peer.ip();
+                let admitted = {
+                    let mut map = per_ip.lock().unwrap();
+                    let count = map.entry(ip).or_insert(0);
+                    if *count >= cap_per_ip {
+                        false
+                    } else {
+                        *count += 1;
+                        true
+                    }
+                };
+                if !admitted {
+                    drop(stream);
+                    tracing::debug!(
+                        src = %ip,
+                        cap = cap_per_ip,
+                        "ws accept: per-ip cap reached, refusing connection"
+                    );
+                    continue;
+                }
+                let guard = ConnGuard {
+                    per_ip: per_ip.clone(),
+                    ip,
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    // SEC.PEN.HIGH-1: wall-clock deadline so a
+                    // half-open TCP connection that never sends an
+                    // HTTP upgrade is dropped after WS_TLS_HANDSHAKE_TIMEOUT
+                    // instead of pinning a task forever.
+                    match tokio::time::timeout(
+                        WS_TLS_HANDSHAKE_TIMEOUT,
+                        tokio_tungstenite::accept_async(stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(ws)) => {
+                            let io: Arc<dyn PacketIO> =
+                                Arc::new(WsPacketIO::new_with_guard(ws, peer, guard));
+                            let _ = tx.send(io).await;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!(?peer, error = %e, "ws upgrade failed");
+                            drop(guard);
+                        }
+                        Err(_elapsed) => {
+                            tracing::debug!(
+                                ?peer,
+                                timeout_ms = WS_TLS_HANDSHAKE_TIMEOUT.as_millis(),
+                                "ws upgrade timed out — possible slowloris (SEC.PEN.HIGH-1)"
+                            );
+                            drop(guard);
+                        }
+                    }
+                });
+            }
+        });
+        Ok(Self {
+            local_addr,
+            ready_rx: tokio::sync::Mutex::new(rx),
+            _accept_task: accept_task,
+        })
     }
 }
 
 #[async_trait]
 impl Listener for WsListenerIO {
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        Ok(self.local_addr)
     }
     fn is_multi(&self) -> bool {
         true
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
-        let (stream, peer) = self.listener.accept().await?;
-        let ws = tokio_tungstenite::accept_async(stream)
-            .await
-            .map_err(|e| io::Error::other(e))?;
-        Ok(Arc::new(WsPacketIO::new(ws, peer)))
+        let mut rx = self.ready_rx.lock().await;
+        rx.recv().await.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "ws listener closed")
+        })
     }
 }
 
@@ -1364,6 +1488,10 @@ pub struct TlsPacketIO {
     >,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    /// SEC.PEN.HIGH-1: per-IP slot guard for server-accepted
+    /// connections. Released when the PacketIO Arc drops.
+    #[allow(dead_code)]
+    _conn_guard: Option<ConnGuard>,
 }
 
 impl TlsPacketIO {
@@ -1384,7 +1512,24 @@ impl TlsPacketIO {
             writer: tokio::sync::Mutex::new(boxed_w),
             peer_addr,
             local_addr,
+            _conn_guard: None,
         }
+    }
+}
+
+impl TlsPacketIO {
+    pub(crate) fn new_with_guard<S>(
+        stream: S,
+        peer_addr: SocketAddr,
+        local_addr: SocketAddr,
+        guard: ConnGuard,
+    ) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        let mut io = Self::new(stream, peer_addr, local_addr);
+        io._conn_guard = Some(guard);
+        io
     }
 }
 
@@ -1437,8 +1582,9 @@ impl PacketIO for TlsPacketIO {
 /// TLS listener — wraps a `tokio::net::TcpListener` and runs
 /// the TLS handshake on each accept with a self-signed cert.
 pub struct TlsListenerIO {
-    listener: tokio::net::TcpListener,
-    acceptor: tokio_rustls::TlsAcceptor,
+    local_addr: SocketAddr,
+    ready_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Arc<dyn PacketIO>>>,
+    _accept_task: tokio::task::JoinHandle<()>,
 }
 
 impl TlsListenerIO {
@@ -1448,34 +1594,115 @@ impl TlsListenerIO {
         // builders that don't take an explicit provider.
         install_default_crypto_provider();
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
         let (certs, key) = generate_self_signed_cert()?;
         let server_cfg = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|e| io::Error::other(format!("rustls server config: {}", e)))?;
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
-        Ok(Self { listener, acceptor })
+        let (tx, rx) = tokio::sync::mpsc::channel::<Arc<dyn PacketIO>>(32);
+        let per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cap_per_ip = DEFAULT_WS_TLS_CONNS_PER_IP;
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let (tcp, peer) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "tls accept failed");
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let ip = peer.ip();
+                let admitted = {
+                    let mut map = per_ip.lock().unwrap();
+                    let count = map.entry(ip).or_insert(0);
+                    if *count >= cap_per_ip {
+                        false
+                    } else {
+                        *count += 1;
+                        true
+                    }
+                };
+                if !admitted {
+                    drop(tcp);
+                    tracing::debug!(
+                        src = %ip,
+                        cap = cap_per_ip,
+                        "tls accept: per-ip cap reached, refusing connection"
+                    );
+                    continue;
+                }
+                let guard = ConnGuard {
+                    per_ip: per_ip.clone(),
+                    ip,
+                };
+                let acceptor = acceptor.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let _ = tcp.set_nodelay(true);
+                    let local = match tcp.local_addr() {
+                        Ok(a) => a,
+                        Err(_) => {
+                            drop(guard);
+                            return;
+                        }
+                    };
+                    // SEC.PEN.HIGH-1: bound the TLS handshake so a
+                    // peer that completes TCP but never sends a
+                    // ClientHello (or sends it byte-by-byte) is
+                    // dropped after WS_TLS_HANDSHAKE_TIMEOUT.
+                    match tokio::time::timeout(
+                        WS_TLS_HANDSHAKE_TIMEOUT,
+                        acceptor.accept(tcp),
+                    )
+                    .await
+                    {
+                        Ok(Ok(tls)) => {
+                            let io: Arc<dyn PacketIO> = Arc::new(
+                                TlsPacketIO::new_with_guard(tls, peer, local, guard),
+                            );
+                            let _ = tx.send(io).await;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!(?peer, error = %e, "tls handshake failed");
+                            drop(guard);
+                        }
+                        Err(_elapsed) => {
+                            tracing::debug!(
+                                ?peer,
+                                timeout_ms = WS_TLS_HANDSHAKE_TIMEOUT.as_millis(),
+                                "tls handshake timed out — possible slowloris (SEC.PEN.HIGH-1)"
+                            );
+                            drop(guard);
+                        }
+                    }
+                });
+            }
+        });
+        Ok(Self {
+            local_addr,
+            ready_rx: tokio::sync::Mutex::new(rx),
+            _accept_task: accept_task,
+        })
     }
 }
 
 #[async_trait]
 impl Listener for TlsListenerIO {
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        Ok(self.local_addr)
     }
     fn is_multi(&self) -> bool {
         true
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
-        let (tcp, peer) = self.listener.accept().await?;
-        let local = tcp.local_addr()?;
-        let _ = tcp.set_nodelay(true);
-        let tls = self
-            .acceptor
-            .accept(tcp)
-            .await
-            .map_err(|e| io::Error::other(format!("TLS handshake: {}", e)))?;
-        Ok(Arc::new(TlsPacketIO::new(tls, peer, local)))
+        let mut rx = self.ready_rx.lock().await;
+        rx.recv().await.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "tls listener closed")
+        })
     }
 }
 
