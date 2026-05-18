@@ -19,3 +19,5 @@ sec/docker/http-proxy-demo/keys/*.key
 sec/docker/http-proxy-demo/keys/*.hex
 # Per-run bench-matrix outputs from bench/bench-matrix.sh
 bench/bench-matrix-*.md
+sec/docker/http-mesh-demo/keys/*.key
+sec/docker/http-mesh-demo/keys/*.hex
