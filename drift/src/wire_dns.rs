@@ -575,13 +575,22 @@ impl PacketIO for DnsPacketIO {
             ));
         }
         let frag_id: u16 = rand::random();
+        // Build all fragment messages first, then ship the whole
+        // batch via sendmmsg. Was a loop of N sequential `send_to`
+        // awaits (one syscall per fragment); with batched send,
+        // it's one syscall for the whole drift packet. For a
+        // 1200-byte drift packet at MAX_FRAG_PAYLOAD = 113, that's
+        // 11 fragments → 1 syscall instead of 11.
+        let mut fragments: Vec<(Vec<u8>, std::net::SocketAddr)> =
+            Vec::with_capacity(total_frags);
         for (idx, chunk) in buf.chunks(MAX_FRAG_PAYLOAD).enumerate() {
             let qname =
                 qname_for_fragment(frag_id, idx as u8, total_frags as u8, chunk);
             let txid: u16 = rand::random();
             let msg = build_query_message(txid, &qname);
-            self.socket.send_to(&msg, dest).await?;
+            fragments.push((msg, dest));
         }
+        crate::transport::batch::send_batch(&self.socket, &fragments).await?;
         Ok(buf.len())
     }
 
