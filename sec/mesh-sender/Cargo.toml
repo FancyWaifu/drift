@@ -1,0 +1,13 @@
+[package]
+name = "mesh-sender"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The 'remote peer' side of the http+mesh demo. Connects to a remote drift bridge via the configured URL, sends one packet addressed to the target peer's pubkey, and exits. Used to prove that a peer on the bridge's mesh can reach the client-machine listener via federation."
+
+[dependencies]
+drift = { path = "../../drift" }
+drift-core = { path = "../../drift-core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+hex = "0.4"
+anyhow = "1"

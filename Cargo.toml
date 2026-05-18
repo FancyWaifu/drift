@@ -1,4 +1,4 @@
 [workspace]
-members = ["drift-core", "drift", "drift-bench", "drift-ffi", "drift-mosh", "drift-http", "drift-wormhole", "drift-git", "drift-vpn", "drift-config", "sec/attack-relay", "sec/http-probe"]
+members = ["drift-core", "drift", "drift-bench", "drift-ffi", "drift-mosh", "drift-http", "drift-wormhole", "drift-git", "drift-vpn", "drift-config", "sec/attack-relay", "sec/http-probe", "sec/mesh-listener", "sec/mesh-sender"]
 exclude = ["fuzz", "drift-wasm"]
 resolver = "2"

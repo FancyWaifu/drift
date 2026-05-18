@@ -18,6 +18,8 @@ COPY drift-mosh-server    /usr/local/bin/
 COPY drift-mosh-client    /usr/local/bin/
 COPY attack-relay         /usr/local/bin/
 COPY http-probe           /usr/local/bin/
+COPY mesh-listener        /usr/local/bin/
+COPY mesh-sender          /usr/local/bin/
 RUN chmod +x /usr/local/bin/*
 
 WORKDIR /work
