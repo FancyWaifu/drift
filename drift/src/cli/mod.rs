@@ -261,6 +261,20 @@ pub struct BridgeArgs {
     /// can spoof X-Forwarded-For to bypass the cap.
     #[arg(long = "trust-proxy-headers", default_value_t = false)]
     pub trust_proxy_headers: bool,
+
+    /// HTTP.FED.STRICT — by default `drift bridge` only allows
+    /// federation links over h2:// / h2s:// / webtransport://.
+    /// These three are multiplexed, middlebox-friendly, and
+    /// reverse-proxy-friendly — the modern federation backbone.
+    /// Client connections via `--listen` still accept any wire
+    /// scheme; this gate is only on outbound `--federate` URLs.
+    ///
+    /// Set this flag to bypass the gate and allow `--federate`
+    /// over legacy schemes (udp / tcp / tls / ws / http / dns).
+    /// Use only for backwards compatibility with peers that
+    /// haven't upgraded yet, or for tests.
+    #[arg(long = "allow-legacy-federation", default_value_t = false)]
+    pub allow_legacy_federation: bool,
 }
 
 #[derive(clap::Args)]

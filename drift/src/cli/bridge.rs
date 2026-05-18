@@ -154,6 +154,29 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         eprintln!("│ federation peers:");
         for spec in &args.federates {
             let (url, pubkey) = parse_federate_spec(spec)?;
+            // HTTP.FED.STRICT — federation links default to the
+            // modern HTTP/2-family backbone (h2 / h2s /
+            // webtransport). These are multiplexed,
+            // middlebox-friendly, and reverse-proxy-ready. Client
+            // connections via `--listen` still accept any wire
+            // scheme; only outbound `--federate` URLs are gated.
+            // Opt out with `--allow-legacy-federation`.
+            let scheme = url
+                .split_once("://")
+                .map(|(s, _)| s)
+                .unwrap_or(&url);
+            let preferred = matches!(scheme, "h2" | "h2s" | "webtransport");
+            if !preferred && !args.allow_legacy_federation {
+                bail!(
+                    "refusing to federate over `{}://` — drift bridge \
+                     restricts federation to h2:// / h2s:// / \
+                     webtransport://. Use one of those schemes on the \
+                     remote bridge, OR pass `--allow-legacy-federation` \
+                     to bypass this gate. (See SPEC.md §federation for \
+                     the rationale.)",
+                    scheme
+                );
+            }
             match transport.connect_federate(&url, pubkey).await {
                 Ok(handle) => {
                     outbound_handles.push(handle);

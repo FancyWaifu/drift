@@ -138,8 +138,44 @@ drift's `tls://` and `--trust-proxy-headers` are complementary, not alternatives
 - Peer authentication — every connection still needs the bridge's pubkey + a DRIFT identity
 - The `accept_any_peer` semantics — if your bridge accepts any peer, anyone reaching the bridge through the proxy can also be a peer
 
+## Client adapters vs federation adapters
+
+`drift bridge` distinguishes two roles for its wire schemes:
+
+**Client adapters** — every scheme drift speaks (`udp://`, `tcp://`, `tls://`, `ws://`, `http://`, `dns://`, `webrtc://`, `h2://`, `h2s://`, `webtransport://`). Use whatever your clients need:
+
+```
+drift bridge --listen udp://0.0.0.0:51820 \
+             --listen tcp://0.0.0.0:51820 \
+             --listen ws://0.0.0.0:51821 \
+             --listen tls://0.0.0.0:51822 \
+             --listen http://0.0.0.0:51823 \
+             --listen webrtc://0.0.0.0:51825 \
+             --listen h2://0.0.0.0:51826 \
+             --listen h2s://0.0.0.0:51827 \
+             --listen webtransport://0.0.0.0:51828
+```
+
+Each `--listen` accepts inbound connections from clients on that wire — phones, browsers, IoT devices, drift-vpn endpoints, anything.
+
+**Federation adapters** — restricted to `h2://` / `h2s://` / `webtransport://` by default:
+
+```
+drift bridge ... \
+    --federate h2s://other-bridge.example.com:51827@<other-bridge-pubkey>
+```
+
+The strict default refuses `--federate udp://...` etc. The three modern schemes give you:
+
+- **Multiplexing** — one TCP/QUIC connection per federation link, not one per packet
+- **Middlebox-friendly** — any HTTPS-aware infra (caddy, nginx, Cloudflare, ALBs) just works
+- **Reverse-proxy-ready** — terminate TLS at your proxy, speak `h2://` (h2c) to the bridge backend
+- **Per-stream flow control** — h2 streams and QUIC streams both backpressure independently
+
+To bridge with an older drift that doesn't support these schemes, pass `--allow-legacy-federation`. Use sparingly; the gate exists for a reason.
+
 ## See also
 
 - `drift bridge --help` — full bridge CLI reference
-- `wire_http.rs` — the http:// adapter source, for protocol details
-- `attack_open_relay.rs`, `attack_slowloris.rs` — security regression tests for the http:// listener
+- `wire_http.rs`, `wire_h2.rs`, `wire_webtransport.rs` — adapter sources
+- `attack_open_relay.rs`, `attack_slowloris.rs` — security regression tests for the listeners
