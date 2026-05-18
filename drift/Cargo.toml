@@ -43,7 +43,7 @@ webrtc = "0.11"
 # generate ephemeral ECDSA-P256 certificates per process — the
 # browser pins them via `serverCertificateHashes`, so no real CA
 # is needed.
-wtransport = { version = "0.6", features = ["self-signed"] }
+wtransport = { version = "0.6", features = ["self-signed", "dangerous-configuration"] }
 bytes = "1"
 # Low-level socket options for SO_RCVBUF tuning on UDP listeners.
 # Bridges expecting bursts of large (e.g. hybrid PQ) HELLOs need

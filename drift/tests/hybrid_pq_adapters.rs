@@ -131,6 +131,13 @@ async fn pq_over_h2s() {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pq_over_webtransport() {
+    pq_handshake_over("webtransport://127.0.0.1:0", "webtransport://__BOUND__")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn pq_over_dns() {
     // dns:// is the most likely failure point — EDNS0 default
