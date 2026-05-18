@@ -470,6 +470,32 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'st
         Ok(buf.len())
     }
 
+    /// Batched send for WebSocket: feed all messages into the
+    /// sink, then a single flush. `Sink::send` (used by the
+    /// default `send_to_batch` loop) flushes after every message,
+    /// which means N flushes for an N-packet batch. With `feed`
+    /// + one terminal `flush`, the underlying TCP socket sees
+    /// one logical write with all the WS frames concatenated —
+    /// matching what the TCP and TLS adapter already do.
+    async fn send_to_batch(
+        &self,
+        packets: &[(Vec<u8>, SocketAddr)],
+    ) -> io::Result<usize> {
+        use futures_util::SinkExt;
+        if packets.is_empty() {
+            return Ok(0);
+        }
+        let mut writer = self.writer.lock().await;
+        let mut sent = 0;
+        for (bytes, _) in packets {
+            let msg = tokio_tungstenite::tungstenite::Message::Binary(bytes.clone());
+            writer.feed(msg).await.map_err(io::Error::other)?;
+            sent += 1;
+        }
+        writer.flush().await.map_err(io::Error::other)?;
+        Ok(sent)
+    }
+
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         use futures_util::StreamExt;
         let mut reader = self.reader.lock().await;
