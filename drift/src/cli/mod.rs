@@ -233,6 +233,20 @@ pub struct BridgeArgs {
     /// herd robustness.
     #[arg(long = "handshake-jitter-ms", default_value_t = 334)]
     pub handshake_jitter_ms: u64,
+
+    /// SEC.FIX.1 escape hatch — disable the open-relay guard.
+    /// By default `drift bridge` drops forward requests whose
+    /// source IP doesn't match an established peer (closes a
+    /// reflection / amplification primitive: without it, any
+    /// host on the internet can send raw UDP with a victim's
+    /// dst_id and have the bridge re-emit those bytes to the
+    /// victim with our IP as source).
+    ///
+    /// Only set this for trusted-mesh test fixtures where you
+    /// genuinely need legacy open forwarding. NEVER on an
+    /// internet-facing bridge.
+    #[arg(long = "allow-open-relay", default_value_t = false)]
+    pub allow_open_relay: bool,
 }
 
 #[derive(clap::Args)]

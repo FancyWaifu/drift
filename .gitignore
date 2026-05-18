@@ -12,3 +12,8 @@ Cargo.lock
 bench/docker/results/
 # drift-ffi C example binary — rebuild with `make hello`
 drift-ffi/examples/hello
+# SEC testbed identity material — regenerate per sec/docker/README
+sec/docker/keys/*.key
+sec/docker/keys/*.hex
+# Per-run bench-matrix outputs from bench/bench-matrix.sh
+bench/bench-matrix-*.md

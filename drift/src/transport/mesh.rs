@@ -561,11 +561,82 @@ impl Inner {
         }
     }
 
+    /// Compat shim: pre-SEC.FIX.1 entry point. Forwards without a
+    /// source-addr gate. Used by paths that genuinely don't have
+    /// a network source (internal mesh repeats during testing).
+    /// New callers should prefer `forward_packet_with_src`.
+    #[allow(dead_code)]
+    pub(crate) async fn forward_packet(&self, data: &[u8], header: &Header) -> Result<()> {
+        self.forward_packet_inner(data, header, None).await
+    }
+
+    /// Forward variant that knows the network source addr. SEC.FIX.1:
+    /// when `require_src_for_forward` is set (default on for
+    /// `drift bridge`), drop the forward unless `src` matches a
+    /// known peer's tracked addr. Closes the open-relay primitive
+    /// — without this, an unauthenticated UDP packet with a victim
+    /// dst_id gets reflected onto the victim with the bridge's IP
+    /// as source.
+    pub(crate) async fn forward_packet_with_src(
+        &self,
+        data: &[u8],
+        header: &Header,
+        src: SocketAddr,
+    ) -> Result<()> {
+        self.forward_packet_inner(data, header, Some(src)).await
+    }
+
     /// Decrement hop_ttl in the wire header and forward the packet to the
     /// next hop looked up from the routing table. Does not touch the
     /// ciphertext — end-to-end crypto is preserved because hop_ttl is
     /// zeroed in the canonical AAD.
-    pub(crate) async fn forward_packet(&self, data: &[u8], header: &Header) -> Result<()> {
+    async fn forward_packet_inner(
+        &self,
+        data: &[u8],
+        header: &Header,
+        src: Option<SocketAddr>,
+    ) -> Result<()> {
+        // SEC.FIX.1 — open-relay guard. Gates BOTH the routing-table-hit
+        // path and the peer-table fallback. Route entries themselves are
+        // authenticated (populated by signed BEACONs), but possession of
+        // a valid route entry doesn't authenticate the SENDER. A bridge
+        // accepting unauthenticated UDP must verify that the inbound
+        // datagram came from one of its established peers before
+        // re-emitting it; otherwise any host on the internet can use
+        // the bridge as a reflector / amplifier with the bridge's IP
+        // as the apparent source.
+        //
+        // Off by default in TransportConfig so mesh-chain stress tests
+        // that manually wire routes via `add_route` (without companion
+        // `add_peer` entries on intermediate hops) keep working. On by
+        // default in `drift bridge`'s CLI config.
+        if self.config.require_src_for_forward {
+            if let Some(src_addr) = src {
+                let src_is_known_peer = {
+                    let all = self.peers.lock_all().await;
+                    let mut hit = false;
+                    for p in all.iter() {
+                        if p.addr == src_addr {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    hit
+                };
+                if !src_is_known_peer {
+                    self.metrics
+                        .forward_unauth_drops
+                        .fetch_add(1, Ordering::Relaxed);
+                    debug!(
+                        ?src_addr,
+                        dst = ?header.dst_id,
+                        "dropping forward request from unrecognized source addr (SEC.FIX.1: open-relay guard)"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         // Two-tier lookup: first check the routing table (mesh
         // routes learned from beacons), then fall back to the
         // peer table (direct sessions). The peer-table fallback
@@ -574,13 +645,6 @@ impl Inner {
         // direct sessions with every peer it handshook, so it
         // can immediately forward to any of them regardless of
         // whether beacons have propagated the route yet.
-        //
-        // This is the key insight: the bridge's adapters hand
-        // off bytes, the bridge checks "who is this addressed
-        // to?", finds the destination in its peer table, picks
-        // the right interface, and sends. The destination peer
-        // receives the bytes on their adapter and processes
-        // them as if they arrived directly.
         // Try routing table first (has mesh cost info). Scope
         // the std::sync Mutex guard tightly so it's released
         // before any await — `MutexGuard` isn't Send, and
@@ -595,9 +659,6 @@ impl Inner {
         let (next_hop, fwd_iface) = match route_hit {
             Some(v) => v,
             None => {
-                // Fall back to peer table: if we have a direct
-                // session with the destination, forward to
-                // their addr via their interface.
                 let peers = self.peers.lock_for(&header.dst_id).await;
                 match peers.get(&header.dst_id) {
                     Some(peer) if peer.handshake.is_ready_for_data() => {
