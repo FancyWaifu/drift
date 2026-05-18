@@ -109,6 +109,18 @@ pub struct TransportConfig {
     /// and other services that accept anonymous connections. Default:
     /// false — only pre-registered peers are accepted.
     pub accept_any_peer: bool,
+    /// SEC.FIX.1: when true, drop forwarding requests whose source
+    /// IP doesn't match any known peer's tracked addr. Closes the
+    /// open-relay primitive (an unauthenticated host can otherwise
+    /// send raw UDP with a victim's dst_id and have the bridge
+    /// forward bytes to the victim with our IP as source).
+    ///
+    /// Default: true for `drift bridge` (set via the bridge CLI),
+    /// false elsewhere. In-process mesh-chain tests that build
+    /// relay chains via `add_route` without `add_peer` set this
+    /// to false to keep their topology working — those scenarios
+    /// trust the entire mesh and don't face open-internet input.
+    pub require_src_for_forward: bool,
     /// If true, always require clients to echo a stateless DoS cookie
     /// before the server does any X25519 or peer allocation. Useful for
     /// tests and high-risk deployments. Default: false.
@@ -370,6 +382,7 @@ impl Default for TransportConfig {
             beacon_interval_ms: 2000,
             recv_channel_capacity: 1024,
             accept_any_peer: false,
+            require_src_for_forward: false,
             cookie_always: false,
             cookie_threshold: 1000,
             cookie_max_age_secs: 60,
@@ -422,6 +435,7 @@ impl TransportConfig {
             beacon_interval_ms: 60_000,
             recv_channel_capacity: 64,
             accept_any_peer: false,
+            require_src_for_forward: false,
             cookie_always: false,
             cookie_threshold: 1000,
             cookie_max_age_secs: 60,
@@ -473,6 +487,7 @@ impl TransportConfig {
             beacon_interval_ms: 1000,
             recv_channel_capacity: 4096,
             accept_any_peer: false,
+            require_src_for_forward: false,
             cookie_always: false,
             cookie_threshold: 1000,
             cookie_max_age_secs: 60,
@@ -564,6 +579,11 @@ pub(crate) struct MetricsInner {
     pub(crate) coalesce_dropped: AtomicU64,
     pub(crate) auth_failures: AtomicU64,
     pub(crate) forwarded: AtomicU64,
+    /// Packets dropped at the mesh-forward path because the
+    /// source IP didn't match any known peer's addr. Bumped
+    /// by the SEC.FIX.1 guard. Watch this to detect open-relay
+    /// scan/abuse attempts.
+    pub(crate) forward_unauth_drops: AtomicU64,
     pub(crate) beacons_sent: AtomicU64,
     pub(crate) challenges_issued: AtomicU64,
     pub(crate) cookies_accepted: AtomicU64,
@@ -629,6 +649,11 @@ pub struct Metrics {
     pub coalesce_dropped: u64,
     pub auth_failures: u64,
     pub forwarded: u64,
+    /// SEC.FIX.1: forwards dropped because the source IP didn't
+    /// match any established peer. Bumped on the open-relay
+    /// guard path; zero on bridges with `require_src_for_forward
+    /// = false`.
+    pub forward_unauth_drops: u64,
     pub beacons_sent: u64,
     pub challenges_issued: u64,
     pub cookies_accepted: u64,
@@ -1566,6 +1591,7 @@ impl Transport {
             coalesce_dropped: m.coalesce_dropped.load(Ordering::Relaxed),
             auth_failures: m.auth_failures.load(Ordering::Relaxed),
             forwarded: m.forwarded.load(Ordering::Relaxed),
+            forward_unauth_drops: m.forward_unauth_drops.load(Ordering::Relaxed),
             beacons_sent: m.beacons_sent.load(Ordering::Relaxed),
             challenges_issued: m.challenges_issued.load(Ordering::Relaxed),
             cookies_accepted: m.cookies_accepted.load(Ordering::Relaxed),
@@ -3338,6 +3364,7 @@ impl Inner {
         let peers = self.peers.lock_for(peer_id).await;
         peers.get(peer_id).map(|p| p.interface_id).unwrap_or(0)
     }
+
 
     /// received. `local_is_initiator` is true on the side
     /// that sent HELLO (the Initiator).
@@ -5670,7 +5697,15 @@ impl Inner {
                 );
                 return Ok(None);
             }
-            self.forward_packet(data, &header).await?;
+            // SECURITY (SEC.FIX.1): pass the source addr to
+            // forward_packet so it can gate forwarding by source
+            // when `require_src_for_forward` is set (default on
+            // for `drift bridge`). Without this gate, an
+            // unauthenticated UDP packet with `dst_id` = some
+            // peer reachable through us (via either the routing
+            // table or our peer table) would be re-emitted by us
+            // to that peer with our IP as source — open relay.
+            self.forward_packet_with_src(data, &header, src).await?;
             return Ok(None);
         }
 

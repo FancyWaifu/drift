@@ -50,6 +50,14 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         // can connect, like a public website. Peer authorization
         // happens via the application layer above.
         accept_any_peer: true,
+        // SEC.FIX.1: open-relay guard. Drop forward requests whose
+        // source IP isn't one of our established peers. Default-off
+        // in TransportConfig so in-process mesh-chain tests keep
+        // working; default-on here because bridges are internet-
+        // facing and must not reflect unauthenticated traffic.
+        // CLI escape hatch: `--allow-open-relay` (legacy behaviour;
+        // intended only for trusted-mesh test scenarios).
+        require_src_for_forward: !args.allow_open_relay,
         // Faster beacon interval (500 ms instead of the 2 s
         // default). Bridges are the route advertisers in the
         // mesh; quicker beacons mean cross-bridge mesh routes
