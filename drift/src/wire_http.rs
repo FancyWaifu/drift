@@ -308,13 +308,40 @@ async fn handle_sse(
     write.write_all(sid_event.as_bytes()).await?;
     write.flush().await?;
 
-    // Drain outbound queue → SSE events. Loop ends when the
-    // PacketIO's `out_tx` is dropped (peer side closed) or the
-    // TCP stream errors (client disconnected).
-    while let Some(packet) = out_rx.recv().await {
-        let encoded = general_purpose::STANDARD_NO_PAD.encode(&packet);
-        let event = format!("data: {}\n\n", encoded);
-        if write.write_all(event.as_bytes()).await.is_err() {
+    // Drain outbound queue → SSE events. Coalesce multiple
+    // ready-packets into one write+flush cycle (the t2d-style
+    // opportunistic-drain pattern). Without batching, every
+    // drift packet became one write_all + one flush, which on
+    // a TCP_NODELAY socket is a syscall per packet AND a
+    // forced kernel commit per packet — exactly the cost we
+    // killed in the TCP/TLS/WS adapters.
+    //
+    // Strategy: block for the first packet, then drain any
+    // packets already queued (try_recv loop) into one
+    // contiguous buffer, single write_all, single flush. The
+    // flush at the end of the batch keeps SSE clients (which
+    // expect prompt delivery) responsive at the boundary of
+    // each natural send-burst.
+    let mut scratch = Vec::with_capacity(8192);
+    while let Some(first) = out_rx.recv().await {
+        scratch.clear();
+        let mut append = |pkt: &[u8], buf: &mut Vec<u8>| {
+            let encoded = general_purpose::STANDARD_NO_PAD.encode(pkt);
+            buf.extend_from_slice(b"data: ");
+            buf.extend_from_slice(encoded.as_bytes());
+            buf.extend_from_slice(b"\n\n");
+        };
+        append(&first, &mut scratch);
+        // Opportunistic drain — at most 32 packets per write
+        // so a slow client doesn't see one enormous send_all
+        // build up.
+        for _ in 0..31 {
+            match out_rx.try_recv() {
+                Ok(next) => append(&next, &mut scratch),
+                Err(_) => break,
+            }
+        }
+        if write.write_all(&scratch).await.is_err() {
             break;
         }
         if write.flush().await.is_err() {
@@ -369,6 +396,14 @@ async fn handle_post(
                 Access-Control-Allow-Origin: *\r\n\
                 \r\n";
     write.write_all(resp.as_bytes()).await?;
+    // Explicit flush IS needed here: reqwest on the client side
+    // is blocked waiting for this response before issuing the next
+    // POST. Without flush, the 50-byte response can sit in the
+    // kernel send buffer (TCP_NODELAY notwithstanding, the kernel
+    // doesn't always push tiny writes immediately when the socket
+    // is keepalive-reused), stalling the client's send loop. The
+    // flush cost is real but it's unblocking a serialized request/
+    // response handshake, not optional latency padding.
     write.flush().await?;
     Ok(())
 }
