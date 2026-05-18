@@ -1424,7 +1424,7 @@ impl Listener for WsListenerIO {
 /// One-shot constructor of a self-signed cert + key for the TLS
 /// listener. Generated fresh on each `bind`. The client side
 /// won't validate it (see [`NoCertVerifier`]).
-fn generate_self_signed_cert() -> io::Result<(
+pub(crate) fn generate_self_signed_cert() -> io::Result<(
     Vec<rustls::pki_types::CertificateDer<'static>>,
     rustls::pki_types::PrivateKeyDer<'static>,
 )> {
@@ -1442,7 +1442,7 @@ fn generate_self_signed_cert() -> io::Result<(
 /// the client side because DRIFT auth happens at the AEAD layer,
 /// not the TLS layer.
 #[derive(Debug)]
-struct NoCertVerifier;
+pub(crate) struct NoCertVerifier;
 
 impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
     fn verify_server_cert(
@@ -1717,7 +1717,7 @@ impl Listener for TlsListenerIO {
 
 /// Install the default rustls crypto provider once per process.
 /// Safe to call multiple times; subsequent calls are no-ops.
-fn install_default_crypto_provider() {
+pub(crate) fn install_default_crypto_provider() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
