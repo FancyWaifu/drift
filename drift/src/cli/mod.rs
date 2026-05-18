@@ -247,6 +247,20 @@ pub struct BridgeArgs {
     /// internet-facing bridge.
     #[arg(long = "allow-open-relay", default_value_t = false)]
     pub allow_open_relay: bool,
+
+    /// HTTP.OPT2 — trust X-Forwarded-For / X-Real-IP when the
+    /// http:// adapter applies its per-IP connection cap. Set
+    /// this when running drift bridge behind nginx, caddy, or
+    /// any other reverse proxy that terminates TCP before
+    /// drift sees it. Without this flag the per-IP cap thinks
+    /// every connection comes from the proxy's loopback /
+    /// internal IP and lets through far more than intended.
+    ///
+    /// IMPORTANT: only set when you actually have a trusted
+    /// reverse proxy in front. If exposed directly, clients
+    /// can spoof X-Forwarded-For to bypass the cap.
+    #[arg(long = "trust-proxy-headers", default_value_t = false)]
+    pub trust_proxy_headers: bool,
 }
 
 #[derive(clap::Args)]

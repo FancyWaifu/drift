@@ -1172,6 +1172,15 @@ pub(crate) struct ConnGuard {
     ip: std::net::IpAddr,
 }
 
+impl ConnGuard {
+    pub(crate) fn new(
+        per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
+        ip: std::net::IpAddr,
+    ) -> Self {
+        Self { per_ip, ip }
+    }
+}
+
 impl Drop for ConnGuard {
     fn drop(&mut self) {
         if let Ok(mut map) = self.per_ip.lock() {

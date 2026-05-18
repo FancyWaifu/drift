@@ -41,6 +41,15 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         );
     }
 
+    // HTTP.OPT2: enable proxy-header trust on the http://
+    // adapter before binding. Operators behind nginx / caddy /
+    // any reverse proxy set this so the per-IP cap doesn't fire
+    // on the proxy's loopback IP — the proxy is expected to do
+    // its own per-source rate limiting. See docs/reverse-proxy.md.
+    if args.trust_proxy_headers {
+        drift::wire_http::set_trust_proxy_headers(true);
+    }
+
     let secret = load_identity(&expand_path(identity_path))?;
     let id = Identity::from_secret_bytes(secret);
     let pubkey_hex = hex::encode(id.public_bytes());

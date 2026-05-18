@@ -50,6 +50,16 @@ bytes = "1"
 # more than the OS default ~200 KB recv buffer or they drop
 # under thundering-herd reconnects. See PQ-T.10.4 / PQ-T.11.1.
 socket2 = "0.5"
+# Hyper as the HTTP server backend for `http://`. Replaces the
+# hand-rolled HTTP/1.1 parser. We get RFC-compliant parsing,
+# Content-Length vs Transfer-Encoding handling, header limits, and
+# years of real-world fuzzing for free. hyper-util gives us
+# TokioIo for bridging tokio I/O to hyper's poll-based interface;
+# http-body-util provides StreamBody for SSE response streaming.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-stream = "0.1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -110,13 +120,6 @@ tokio = { version = "1", features = ["full"] }
 proptest = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["async_tokio"] }
-# Mock relay used only by `tests/wire_doh.rs` — stands in for the
-# real Cloudflare Worker so the DoH adapter's wire format can be
-# exercised without an internet round-trip. Hyper 1.x with the
-# explicit body/util crates that come with the modular split.
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 # Re-enable wtransport with `dangerous-configuration` for tests
 # (unlocks with_no_cert_validation, avoiding cert-hash plumbing
 # for self-signed localhost certs). Production code uses the
