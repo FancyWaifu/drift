@@ -15,5 +15,7 @@ drift-ffi/examples/hello
 # SEC testbed identity material — regenerate per sec/docker/README
 sec/docker/keys/*.key
 sec/docker/keys/*.hex
+sec/docker/http-proxy-demo/keys/*.key
+sec/docker/http-proxy-demo/keys/*.hex
 # Per-run bench-matrix outputs from bench/bench-matrix.sh
 bench/bench-matrix-*.md

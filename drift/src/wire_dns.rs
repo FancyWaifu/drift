@@ -683,20 +683,17 @@ impl Listener for DnsListenerIO {
 
 // ─── Scheme registration ──────────────────────────────────────────
 
-fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
-    addr_str.parse().map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a valid host:port {:?}: {}", addr_str, e),
-        )
-    })
+/// Thin async wrapper that defers to the shared
+/// `crate::io::parse_ip_addr` (which handles IP literals + DNS).
+async fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
+    crate::io::parse_ip_addr(addr_str).await
 }
 
 fn dns_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         Ok(Box::new(DnsListenerIO::bind(addr).await?) as Box<dyn Listener>)
     })
 }
@@ -705,7 +702,7 @@ fn dns_connector_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
         let io: Arc<dyn PacketIO> = Arc::new(DnsPacketIO::new(Arc::new(sock))?);
         Ok((io, addr))

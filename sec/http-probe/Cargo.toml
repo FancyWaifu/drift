@@ -1,0 +1,13 @@
+[package]
+name = "http-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "End-to-end smoke client for drift http:// behind a reverse proxy. Reads DRIFT_URL + DRIFT_BRIDGE_PUB from env, opens a DRIFT session through the URL, asserts handshake completes. Exits 0 on success, non-zero on failure."
+
+[dependencies]
+drift = { path = "../../drift" }
+drift-core = { path = "../../drift-core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+hex = "0.4"
+anyhow = "1"

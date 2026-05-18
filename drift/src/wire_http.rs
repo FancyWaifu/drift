@@ -649,7 +649,7 @@ fn http_connector_factory(
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         let base = format!("http://{}", addr);
         let sse_url = format!("{}/drift-sse", base);
 

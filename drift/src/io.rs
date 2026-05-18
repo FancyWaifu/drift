@@ -1825,11 +1825,32 @@ pub async fn make_connector(url: &str) -> io::Result<(Arc<dyn PacketIO>, SocketA
 /// Helper: parse a `host:port` address string for IP-addressed
 /// transports (UDP, TCP, TLS, WS). Non-IP adapters skip this and
 /// parse their own address shape.
-pub(crate) fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
-    addr_str.parse().map_err(|e| {
+/// Parse an `addr_str` of the form `host:port` (IPv4 / IPv6
+/// literal OR a DNS hostname) into a SocketAddr.
+///
+/// First tries fast-path string parsing — if `host` is already an
+/// IP literal, we avoid a resolver round-trip. Falls back to
+/// `tokio::net::lookup_host` (uses the OS resolver) and returns
+/// the first resolved address.
+pub(crate) async fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
+    // Fast path: literal IP.
+    if let Ok(sa) = addr_str.parse::<SocketAddr>() {
+        return Ok(sa);
+    }
+    // Slow path: DNS resolve via the OS resolver. Returns an
+    // iterator of resolved addrs; we take the first. Most
+    // hostnames resolve to one A or one AAAA record; multi-record
+    // hosts fall back to OS-side ordering.
+    let mut iter = tokio::net::lookup_host(addr_str).await.map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("not a valid host:port {:?}: {}", addr_str, e),
+        )
+    })?;
+    iter.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{:?} resolved to zero addresses", addr_str),
         )
     })
 }
@@ -1854,7 +1875,7 @@ fn udp_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         Ok(Box::new(UdpListenerIO::bind(addr).await?) as Box<dyn Listener>)
     })
 }
@@ -1865,7 +1886,7 @@ fn udp_connector_factory(
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
         let io: Arc<dyn PacketIO> = Arc::new(UdpPacketIO::new(Arc::new(sock)));
         Ok((io, addr))
@@ -1884,7 +1905,7 @@ fn tcp_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         Ok(Box::new(TcpListenerIO::bind(addr).await?) as Box<dyn Listener>)
     })
 }
@@ -1895,7 +1916,7 @@ fn tcp_connector_factory(
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         let stream = tokio::net::TcpStream::connect(addr).await?;
         let io: Arc<dyn PacketIO> = Arc::new(TcpPacketIO::new(stream)?);
         Ok((io, addr))
@@ -1914,7 +1935,7 @@ fn ws_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         Ok(Box::new(WsListenerIO::bind(addr).await?) as Box<dyn Listener>)
     })
 }
@@ -1925,7 +1946,7 @@ fn ws_connector_factory(
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         // tokio-tungstenite's connect_async expects a full
         // ws:// URL — synthesize one from the host:port.
         let url = format!("ws://{}/", addr);
@@ -1949,7 +1970,7 @@ fn tls_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         Ok(Box::new(TlsListenerIO::bind(addr).await?) as Box<dyn Listener>)
     })
 }
@@ -1960,7 +1981,7 @@ fn tls_connector_factory(
     Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
 > {
     Box::pin(async move {
-        let addr = parse_ip_addr(&addr_str)?;
+        let addr = parse_ip_addr(&addr_str).await?;
         install_default_crypto_provider();
         let tcp = tokio::net::TcpStream::connect(addr).await?;
         let _ = tcp.set_nodelay(true);

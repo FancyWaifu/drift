@@ -149,7 +149,7 @@ fn webtransport_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
     Box::pin(async move {
-        let addr = crate::io::parse_ip_addr(&addr_str)?;
+        let addr = crate::io::parse_ip_addr(&addr_str).await?;
         Ok(Box::new(WebTransportListenerIO::bind(addr).await?) as Box<dyn Listener>)
     })
 }

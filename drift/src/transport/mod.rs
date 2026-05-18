@@ -1352,7 +1352,7 @@ impl Transport {
         let mut listener: Box<dyn crate::io::Listener> = if scheme == "udp"
             && config.udp_recv_buffer_bytes.is_some()
         {
-            let addr = crate::io::parse_ip_addr(addr_str).map_err(DriftError::Io)?;
+            let addr = crate::io::parse_ip_addr(addr_str).await.map_err(DriftError::Io)?;
             let udp = crate::io::UdpListenerIO::bind_with_recv_buffer(
                 addr,
                 config.udp_recv_buffer_bytes,
