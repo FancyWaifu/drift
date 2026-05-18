@@ -56,8 +56,8 @@ socket2 = "0.5"
 # years of real-world fuzzing for free. hyper-util gives us
 # TokioIo for bridging tokio I/O to hyper's poll-based interface;
 # http-body-util provides StreamBody for SSE response streaming.
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http2"] }
 http-body-util = "0.1"
 tokio-stream = "0.1"
 clap = { version = "4", features = ["derive"] }

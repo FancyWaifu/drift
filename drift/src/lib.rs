@@ -23,6 +23,7 @@ pub mod streams;
 pub mod transport;
 pub mod wire_dns;
 pub mod wire_doh;
+pub mod wire_h2;
 pub mod wire_http;
 pub mod wire_webrtc;
 pub mod wire_webtransport;

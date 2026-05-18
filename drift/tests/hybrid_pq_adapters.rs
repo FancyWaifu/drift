@@ -117,6 +117,13 @@ async fn pq_over_http() {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pq_over_h2() {
+    pq_handshake_over("h2://127.0.0.1:0", "h2://__BOUND__")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn pq_over_dns() {
     // dns:// is the most likely failure point — EDNS0 default
