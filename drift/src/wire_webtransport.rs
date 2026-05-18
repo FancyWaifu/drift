@@ -139,11 +139,9 @@ async fn load_or_generate_identity(addr: SocketAddr) -> io::Result<Identity> {
 
 // ─── Scheme registration ───────────────────────────────────────────
 //
-// `webtransport://host:port` URLs route here. No connector — the
-// native side has no WebTransport client; browser is the only
-// implementer. The factory returns the listener; the connector
-// errors out with an explanatory message so callers don't silently
-// get a misleading scheme-not-found.
+// `webtransport://host:port` URLs route here. Both server and
+// client sides are now implemented; the browser-side
+// `drift-wasm::wire_webtransport` shares the same wire shape.
 
 fn webtransport_listener_factory(
     addr_str: String,
@@ -155,19 +153,46 @@ fn webtransport_listener_factory(
 }
 
 fn webtransport_connector_factory(
-    _addr_str: String,
+    addr_str: String,
 ) -> Pin<
     Box<
         dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send,
     >,
 > {
     Box::pin(async move {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no native WebTransport client implemented; \
-             use the browser-side `drift-wasm::wire_webtransport` instead",
-        ))
+        let addr = crate::io::parse_ip_addr(&addr_str).await?;
+        connect_webtransport(addr).await
     })
+}
+
+/// Native WebTransport client: opens a QUIC + WebTransport
+/// session to a drift bridge listening on `webtransport://`.
+/// Uses `with_no_cert_validation()` because DRIFT's own AEAD is
+/// the actual peer auth — the TLS / cert layer is just hop-to-
+/// hop confidentiality. Same trust model as `tls://` and `h2s://`.
+///
+/// Returns a `WebTransportPacketIO` ready to plug into the drift
+/// transport, matching the listener side.
+async fn connect_webtransport(
+    addr: SocketAddr,
+) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+    use wtransport::{ClientConfig, Endpoint};
+    let client_config = ClientConfig::builder()
+        .with_bind_default()
+        .with_no_cert_validation()
+        .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
+        .build();
+    let client = Endpoint::client(client_config)
+        .map_err(|e| io::Error::other(format!("wtransport client endpoint: {}", e)))?;
+    // wtransport expects an https:// URL with a hostname or IP.
+    let url = format!("https://{}:{}/drift-fed", addr.ip(), addr.port());
+    let connection = client
+        .connect(url)
+        .await
+        .map_err(|e| io::Error::other(format!("wtransport connect: {}", e)))?;
+    let remote = connection.remote_address();
+    let io_handle: Arc<dyn PacketIO> = Arc::new(WebTransportPacketIO::new(connection, remote));
+    Ok((io_handle, remote))
 }
 
 inventory::submit! {
