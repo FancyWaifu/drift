@@ -78,6 +78,39 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(8);
 /// the runtime.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// When measured handshake times are within this window of each
+/// other, treat them as a tie and fall back to scheme priority
+/// (see `scheme_default_rank`). Without this, two healthy wires
+/// that finish within typical network jitter (~30 ms on home
+/// Wi-Fi to a remote WAN bridge) get ranked by noise. The first
+/// live run on home Wi-Fi clustered all 9 healthy wires in a
+/// 32 ms band; DNS came out on top by 2 ms despite being the
+/// worst steady-state wire. 250 ms is "wider than jitter,
+/// narrower than a meaningful adapter difference."
+const TIE_BREAK_WINDOW: Duration = Duration::from_millis(250);
+
+/// Scheme priority used to break ties within `TIE_BREAK_WINDOW`.
+/// Lower number = better. The order reflects steady-state cost
+/// (header overhead, framing, crypto cost on top of TLS, etc.)
+/// — *not* handshake-time. UDP and webtransport are cheapest;
+/// dns is the most expensive per-byte and exists only as a
+/// stealth/last-resort fallback.
+fn scheme_default_rank(spec: &str) -> u8 {
+    let scheme = spec.split("://").next().unwrap_or("");
+    match scheme {
+        "udp" => 0,
+        "webtransport" => 1,
+        "h2s" => 2,
+        "tls" => 3,
+        "h2" => 4,
+        "ws" => 5,
+        "tcp" => 6,
+        "http" => 7,
+        "dns" => 8,
+        _ => 100,
+    }
+}
+
 /// Register + probe each bridge spec in parallel; return
 /// measurements sorted by total time-to-Established ascending.
 ///
@@ -168,15 +201,45 @@ pub async fn register_and_probe(
         }
     }
 
-    // Sort: established first (by ascending handshake time);
-    // failed last (preserving relative input order among failed
-    // entries so operators still see configured fallbacks).
-    results.sort_by(|a, b| match (a.handshake_time, b.handshake_time) {
-        (Some(ta), Some(tb)) => ta.cmp(&tb),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    // Rank: established first, failed last.
+    //
+    // For established entries we want a non-noisy ordering. On
+    // a healthy network all wires cluster within tens of ms
+    // (the bottleneck is the bridge's response latency, not the
+    // adapter), so raw handshake-time ordering is dominated by
+    // jitter — DNS can "win" on home Wi-Fi by 2 ms despite
+    // being the worst steady-state wire.
+    //
+    // Strategy: bucket established entries into tiers, where a
+    // tier contains all wires within TIE_BREAK_WINDOW of the
+    // tier's fastest member. Within each tier, sort by
+    // scheme_default_rank (UDP cheap → DNS expensive). Across
+    // tiers, ordering follows tier-min time (faster tier first).
+    //
+    // A pairwise sort_by would be non-transitive (a within b's
+    // window, b within c's window, but a outside c's window
+    // forms a cycle), so we bucket explicitly.
+    let (mut established, failed): (Vec<_>, Vec<_>) = results
+        .into_iter()
+        .partition(|m| m.handshake_time.is_some());
+    established.sort_by_key(|m| m.handshake_time.unwrap());
+    let mut tiered: Vec<AdapterMeasurement> = Vec::with_capacity(established.len());
+    let mut i = 0;
+    while i < established.len() {
+        let tier_min = established[i].handshake_time.unwrap();
+        let mut j = i;
+        while j < established.len()
+            && established[j].handshake_time.unwrap() - tier_min <= TIE_BREAK_WINDOW
+        {
+            j += 1;
+        }
+        let tier = &mut established[i..j];
+        tier.sort_by_key(|m| scheme_default_rank(&m.spec));
+        tiered.extend_from_slice(tier);
+        i = j;
+    }
+    let mut results = tiered;
+    results.extend(failed);
 
     let total_elapsed = started.elapsed();
     let succeeded = results.iter().filter(|m| m.handshake_time.is_some()).count();
@@ -250,46 +313,117 @@ mod tests {
         assert!(PROBE_DEADLINE.as_secs() <= 10);
     }
 
+    /// Helper: apply the same tier-sort logic the live probe uses,
+    /// without spinning up a Transport.
+    fn rank(measurements: Vec<AdapterMeasurement>) -> Vec<AdapterMeasurement> {
+        let (mut established, failed): (Vec<_>, Vec<_>) = measurements
+            .into_iter()
+            .partition(|m| m.handshake_time.is_some());
+        established.sort_by_key(|m| m.handshake_time.unwrap());
+        let mut tiered: Vec<AdapterMeasurement> = Vec::with_capacity(established.len());
+        let mut i = 0;
+        while i < established.len() {
+            let tier_min = established[i].handshake_time.unwrap();
+            let mut j = i;
+            while j < established.len()
+                && established[j].handshake_time.unwrap() - tier_min <= TIE_BREAK_WINDOW
+            {
+                j += 1;
+            }
+            let tier = &mut established[i..j];
+            tier.sort_by_key(|m| scheme_default_rank(&m.spec));
+            tiered.extend_from_slice(tier);
+            i = j;
+        }
+        let mut out = tiered;
+        out.extend(failed);
+        out
+    }
+
+    fn m(spec: &str, ms: Option<u64>) -> AdapterMeasurement {
+        AdapterMeasurement {
+            spec: spec.into(),
+            bridge_pid: [0u8; 8],
+            bridge_pub: [0u8; 32],
+            handshake_time: ms.map(Duration::from_millis),
+        }
+    }
+
     #[test]
-    fn measurement_ordering_established_before_failed() {
-        let mut v = vec![
-            AdapterMeasurement {
-                spec: "fail-a".into(),
-                bridge_pid: [0u8; 8],
-                bridge_pub: [0u8; 32],
-                handshake_time: None,
-            },
-            AdapterMeasurement {
-                spec: "slow".into(),
-                bridge_pid: [1u8; 8],
-                bridge_pub: [1u8; 32],
-                handshake_time: Some(Duration::from_secs(3)),
-            },
-            AdapterMeasurement {
-                spec: "fail-b".into(),
-                bridge_pid: [2u8; 8],
-                bridge_pub: [2u8; 32],
-                handshake_time: None,
-            },
-            AdapterMeasurement {
-                spec: "fast".into(),
-                bridge_pid: [3u8; 8],
-                bridge_pub: [3u8; 32],
-                handshake_time: Some(Duration::from_millis(80)),
-            },
-        ];
-        v.sort_by(|a, b| match (a.handshake_time, b.handshake_time) {
-            (Some(ta), Some(tb)) => ta.cmp(&tb),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
-        assert_eq!(v[0].spec, "fast", "fastest established first");
-        assert_eq!(v[1].spec, "slow", "next-fastest second");
+    fn ranking_established_before_failed() {
+        let v = rank(vec![
+            m("fail-a://x", None),
+            m("udp://x", Some(3000)),
+            m("fail-b://x", None),
+            m("udp://y", Some(80)),
+        ]);
+        assert_eq!(v[0].spec, "udp://y", "fastest established first");
+        assert_eq!(v[1].spec, "udp://x", "next-fastest second");
         assert!(
             v[2].handshake_time.is_none() && v[3].handshake_time.is_none(),
             "failed entries land at the end: {:?}",
             v
         );
+    }
+
+    #[test]
+    fn tie_break_picks_udp_over_dns_when_clustered() {
+        // Reproduces the live home-Wi-Fi observation: 9 wires
+        // cluster within ~30 ms because the bottleneck is the
+        // bridge's cold-start latency, not the adapter. Without
+        // tie-break, DNS "wins" by jitter. With tie-break, UDP
+        // wins as it should.
+        let v = rank(vec![
+            m("dns://x", Some(2015)),
+            m("udp://x", Some(2015)),
+            m("tcp://x", Some(2020)),
+            m("http://x", Some(2031)),
+            m("h2://x", Some(2031)),
+            m("tls://x", Some(2031)),
+            m("ws://x", Some(2032)),
+            m("h2s://x", Some(2047)),
+            m("webtransport://x", Some(2047)),
+        ]);
+        assert_eq!(v[0].spec, "udp://x", "UDP wins the tie-break");
+        assert_eq!(v[1].spec, "webtransport://x", "webtransport second");
+        assert_eq!(v[2].spec, "h2s://x", "h2s third");
+        assert_eq!(v[8].spec, "dns://x", "DNS sorts last in the tier");
+    }
+
+    #[test]
+    fn outside_window_measurement_dominates() {
+        // If a wire is meaningfully slower (e.g. corporate
+        // network where TLS takes 5 s and UDP times out), the
+        // measurement should dominate — we don't want the
+        // tie-break to mask real adapter differences.
+        let v = rank(vec![
+            m("tls://x", Some(5000)),
+            m("udp://x", None), // timed out
+            m("h2s://x", Some(1200)),
+            m("ws://x", Some(800)),
+        ]);
+        assert_eq!(v[0].spec, "ws://x", "actually-fastest established");
+        assert_eq!(v[1].spec, "h2s://x");
+        assert_eq!(v[2].spec, "tls://x");
+        assert_eq!(v[3].spec, "udp://x", "timed-out drops to last");
+    }
+
+    #[test]
+    fn tier_chaining_does_not_overreach() {
+        // Three wires at 0/200/450 ms with TIE_BREAK_WINDOW=250.
+        // Without bucketing-by-tier-min, the algorithm could
+        // chain all three into one tier (each within 250 of its
+        // neighbor). We want 0/200 in tier A and 450 alone in
+        // tier B, because 450-0 > 250.
+        let v = rank(vec![
+            m("dns://x", Some(0)),
+            m("tcp://x", Some(200)),
+            m("udp://x", Some(450)),
+        ]);
+        // Tier A (0..=200): tcp beats dns by scheme priority.
+        assert_eq!(v[0].spec, "tcp://x");
+        assert_eq!(v[1].spec, "dns://x");
+        // Tier B: udp alone, even though it has best scheme rank.
+        assert_eq!(v[2].spec, "udp://x");
     }
 }
