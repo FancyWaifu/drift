@@ -201,6 +201,27 @@ pub struct Peer {
     /// drift-vpn-side wiring is the only missing piece).
     #[serde(default)]
     pub via_bridge: Option<String>,
+    /// Fallback list of `via_bridge` URLs in priority order.
+    /// drift-vpn tries each at startup and uses the first that
+    /// reaches Established. The single-string `via_bridge` is
+    /// treated as the highest-priority entry (same back-compat
+    /// pattern as `endpoint`/`endpoints`).
+    ///
+    /// Use case: roaming clients on hostile networks. Try the
+    /// fast wire first (UDP), fall back through TCP-based wires
+    /// (h2s / tls / ws), end with the SSH-tunneled localhost
+    /// path for networks that filter every drift port. Each
+    /// entry is a full `<scheme>://host:port@<bridge-pub-hex>`
+    /// spec — the bridge pubkey can differ between entries
+    /// (multiple bridges, multiple wires) or repeat (same
+    /// bridge, different wire).
+    ///
+    /// Failover semantics today: pick-at-startup. The active
+    /// bridge is chosen once and held for the daemon's lifetime.
+    /// Runtime failover (switch when active bridge drops) is a
+    /// future feature.
+    #[serde(default, deserialize_with = "one_or_many_opt")]
+    pub via_bridges: Option<Vec<String>>,
     /// Pubkey of the bridge the *peer* is connected to (the
     /// federation routing target). Optional — defaults to the
     /// pubkey embedded in `via_bridge`, which is correct when
@@ -224,6 +245,27 @@ impl Peer {
         let mut k = [0u8; 32];
         k.copy_from_slice(&raw);
         Ok(k)
+    }
+
+    /// Resolve `via_bridge` (single) and `via_bridges` (array)
+    /// into one prioritized list of bridge specs in
+    /// `<scheme>://host:port@<bridge-pubkey-hex>` form. Same
+    /// back-compat pattern as `endpoint_list`: the single form
+    /// is the highest-priority entry; the array follows;
+    /// duplicates are removed.
+    pub fn via_bridge_list(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(s) = &self.via_bridge {
+            out.push(s.clone());
+        }
+        if let Some(list) = &self.via_bridges {
+            for spec in list {
+                if !out.contains(spec) {
+                    out.push(spec.clone());
+                }
+            }
+        }
+        out
     }
 
     /// Resolve `endpoint` (single, v0.1) and `endpoints` (array,
@@ -274,7 +316,10 @@ impl Config {
         // with a clear error so the operator never sees the runtime
         // symptom. Leave 16 bytes of headroom for future protocol
         // overhead.
-        let any_via_bridge = self.peers.iter().any(|p| p.via_bridge.is_some());
+        let any_via_bridge = self
+            .peers
+            .iter()
+            .any(|p| !p.via_bridge_list().is_empty());
         if any_via_bridge {
             let max_safe_mtu = (drift::transport::MAX_PAYLOAD
                 .saturating_sub(drift::transport::FED_HEADER_LEN)
@@ -317,6 +362,16 @@ impl Config {
                 parse_bridge_spec(spec).with_context(|| {
                     format!("peer #{} via_bridge {:?}", i, spec)
                 })?;
+            }
+            // v0.1.2: validate each entry in `via_bridges` too.
+            // Same parse_bridge_spec check; bad entries are
+            // rejected before the daemon tries to use them.
+            if let Some(list) = &p.via_bridges {
+                for (j, spec) in list.iter().enumerate() {
+                    parse_bridge_spec(spec).with_context(|| {
+                        format!("peer #{} via_bridges[{}] {:?}", i, j, spec)
+                    })?;
+                }
             }
             if let Some(tb) = &p.target_bridge {
                 let raw = hex::decode(tb)
@@ -647,5 +702,139 @@ via_bridge  = "udp://192.0.2.1:51820@{bridge}"
                 .unwrap_or_else(|e| panic!("{} should parse: {}", scheme, e));
             assert!(url.starts_with(scheme));
         }
+    }
+
+    // ─── via_bridges fallback chain (v0.1.2) ────────────────────
+
+    #[test]
+    fn peer_via_bridges_accepts_string_form() {
+        // Back-compat: a single-string `via_bridges` should
+        // parse as a one-element list.
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+via_bridges = "udp://192.0.2.1:51820@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        assert_eq!(
+            cfg.peers[0].via_bridges.as_deref(),
+            Some(&[format!("udp://192.0.2.1:51820@{}", BRIDGE_PUB_HEX)][..])
+        );
+    }
+
+    #[test]
+    fn peer_via_bridges_accepts_array_form() {
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+mtu         = 1200
+via_bridges = [
+  "udp://192.0.2.1:51820@{bridge}",
+  "h2s://192.0.2.1:51827@{bridge}",
+  "tls://127.0.0.1:51822@{bridge}",
+]
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let list = cfg.peers[0].via_bridges.as_deref().expect("via_bridges set");
+        assert_eq!(list.len(), 3);
+        assert!(list[0].starts_with("udp://"));
+        assert!(list[1].starts_with("h2s://"));
+        assert!(list[2].starts_with("tls://"));
+    }
+
+    #[test]
+    fn via_bridge_list_combines_single_and_array() {
+        // The single `via_bridge` is the highest-priority entry;
+        // `via_bridges` follows; duplicates are stripped.
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+via_bridge  = "udp://192.0.2.1:51820@{bridge}"
+via_bridges = [
+  "udp://192.0.2.1:51820@{bridge}",
+  "h2s://192.0.2.1:51827@{bridge}",
+]
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let list = cfg.peers[0].via_bridge_list();
+        // udp:// appears once even though it's in both fields
+        // (single via_bridge becomes #0; the array's first entry
+        // is identical and de-duped).
+        assert_eq!(list.len(), 2);
+        assert!(list[0].starts_with("udp://"));
+        assert!(list[1].starts_with("h2s://"));
+    }
+
+    #[test]
+    fn validate_rejects_via_bridges_entry_with_bad_format() {
+        // `mtu = 1200` keeps us under the via_bridge MTU cap so
+        // this test focuses on the per-entry parse error, not
+        // the (separately-tested) MTU validation.
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+via_bridges = ["malformed-no-scheme"]
+"#,
+            peer = PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg
+            .validate()
+            .expect_err("malformed via_bridges entry must fail validate");
+        let chain = format!("{:#}", err);
+        assert!(
+            chain.contains("via_bridges"),
+            "expected error to mention via_bridges; got: {}",
+            chain
+        );
+    }
+
+    #[test]
+    fn validate_accepts_via_bridges_with_mixed_schemes() {
+        // The exact use case from the session: hostile-network
+        // fallback chain.
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+via_bridges = [
+  "udp://192.0.2.1:51820@{bridge}",
+  "h2s://192.0.2.1:51827@{bridge}",
+  "tls://127.0.0.1:51822@{bridge}",
+]
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        cfg.validate()
+            .expect("well-formed multi-scheme via_bridges must pass");
     }
 }
