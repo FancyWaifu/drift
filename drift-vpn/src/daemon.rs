@@ -441,6 +441,32 @@ pub async fn run(
                 ?dir,
                 "federated peer registered (reached via bridge)"
             );
+
+            // Spawn the runtime bridge-failover supervisor if
+            // the peer has 2+ bridges to choose from. Single-
+            // bridge peers can't fail over (nothing to swap to).
+            // The supervisor watches the active bridge's health
+            // and swaps to the next healthy entry in the list
+            // on sustained failure, with opportunistic re-
+            // elevation back to the preferred wire when it
+            // recovers.
+            if bridge_list.len() >= 2 {
+                let active_idx = bridge_list
+                    .iter()
+                    .position(|s| s == chosen_spec)
+                    .unwrap_or(0);
+                crate::bridge_failover::spawn(
+                    transport.clone(),
+                    crate::bridge_failover::BridgeSupervisor {
+                        federated_peer_pub: peer_pub,
+                        federated_peer_pid: peer_pid,
+                        bridge_specs: bridge_list.clone(),
+                        bridge_handles: bridge_handles.clone(),
+                        active_idx,
+                        failover: cfg.failover.clone(),
+                    },
+                );
+            }
             None
         } else if endpoints.is_empty() {
             // v0.8 mesh-only peer: no direct endpoint, will be

@@ -21,6 +21,8 @@ mod status;
 // Windows Wintun is on the roadmap.
 #[cfg(unix)]
 mod daemon;
+#[cfg(unix)]
+mod bridge_failover;
 
 #[derive(Parser)]
 #[clap(
