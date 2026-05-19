@@ -1,5 +1,12 @@
 # drift-vpn performance — optimization plan
 
+> **Current numbers:** drift-vpn post-GSO/GRO reaches **1.96 Gbps**
+> vs WireGuard kernel's **1.85 Gbps** on the same Proxmox-LXC fabric
+> (+6% raw, near-parity per-Gbps CPU). See
+> [`bench/drift-vpn-vs-wireguard.md`](../bench/drift-vpn-vs-wireguard.md).
+> The 1.31 Gbps figure below is the pre-optimization baseline that
+> motivated the plan; it is not the current state.
+
 ## Design constraint up front
 
 **drift-vpn is wire-agnostic by design.** It uses
