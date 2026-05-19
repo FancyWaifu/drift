@@ -250,13 +250,18 @@ pub async fn run(
     // table aligned with a single client session.
     let mut bridge_handles: std::collections::HashMap<String, (PeerId, [u8; 32])> =
         std::collections::HashMap::new();
+    // v0.1.2 fallback chain: register every entry in each peer's
+    // `via_bridge_list()` (single `via_bridge` + array
+    // `via_bridges` combined). Per-peer selection picks the
+    // first that establishes, but we pre-register all bridges so
+    // the selection check has something to test against. Bridges
+    // that never establish remain registered but unused.
     for peer_cfg in cfg.peers.iter() {
-        let Some(spec) = peer_cfg.via_bridge.as_deref() else {
-            continue;
-        };
-        if bridge_handles.contains_key(spec) {
-            continue;
-        }
+        for spec_owned in peer_cfg.via_bridge_list() {
+            let spec = spec_owned.as_str();
+            if bridge_handles.contains_key(spec) {
+                continue;
+            }
         let (url, bridge_pub) = crate::config::parse_bridge_spec(spec)
             .context("parsing via_bridge")?;
         let scheme = url.split("://").next().unwrap_or("");
@@ -303,13 +308,14 @@ pub async fn run(
                 .await
                 .with_context(|| format!("connect_federate({})", url))?
         };
-        bridge_handles.insert(spec.to_string(), (bridge_pid, bridge_pub));
-        info!(
-            bridge = %url,
-            scheme = %scheme,
-            bridge_pub = %hex::encode(bridge_pub),
-            "bridge registered for via_bridge peer reach"
-        );
+            bridge_handles.insert(spec.to_string(), (bridge_pid, bridge_pub));
+            info!(
+                bridge = %url,
+                scheme = %scheme,
+                bridge_pub = %hex::encode(bridge_pub),
+                "bridge registered for via_bridge peer reach"
+            );
+        }
     }
     // Wait for each bridge handshake to actually complete before
     // registering the federated peers that ride on top of it.
@@ -367,23 +373,43 @@ pub async fn run(
         // Initiator side stays in Established with stale keys.
         // Always-Initiator avoids that deadlock.
         let dir = Direction::Initiator;
-        let chosen_for_supervisor: Option<String> = if let Some(spec) =
-            peer_cfg.via_bridge.as_deref()
-        {
+        let bridge_list = peer_cfg.via_bridge_list();
+        let chosen_for_supervisor: Option<String> = if !bridge_list.is_empty() {
             // v0.13 bridge-fallback path: peer is reachable through
             // a federation bridge. The bridge itself was registered
             // above (deduped per unique spec). Here we register the
             // *peer* as a federated-route target hanging off that
             // bridge.
             //
-            // target_bridge defaults to the via_bridge's pubkey —
-            // the symmetric "two peers share the same bridge" case.
-            // Set `target_bridge` explicitly in a multi-bridge mesh
-            // where the peer's on-ramp bridge differs from ours.
+            // v0.1.2 fallback chain: walk `via_bridge_list()` in
+            // priority order, pick the first bridge whose handshake
+            // has reached Established. If none have yet (slow WAN,
+            // bridge process still warming up), fall back to the
+            // first spec — the watchdog + supervisor will keep
+            // retrying. Operators see which bridge was selected via
+            // the info log line below.
+            //
+            // target_bridge defaults to the chosen via_bridge's
+            // pubkey — the symmetric "two peers share a bridge"
+            // case. Set `target_bridge` explicitly in a multi-bridge
+            // mesh where the peer's on-ramp bridge differs from
+            // ours.
+            let mut chosen_spec: Option<&str> = None;
+            for candidate in bridge_list.iter() {
+                if let Some((bridge_pid, _)) = bridge_handles.get(candidate) {
+                    if transport.peer_is_established(bridge_pid).await {
+                        chosen_spec = Some(candidate);
+                        break;
+                    }
+                }
+            }
+            let chosen_spec = chosen_spec.unwrap_or_else(|| bridge_list[0].as_str());
             let (bridge_handle, default_target_bridge_pub) = bridge_handles
-                .get(spec)
+                .get(chosen_spec)
                 .copied()
-                .ok_or_else(|| anyhow!("internal: bridge {} not pre-registered", spec))?;
+                .ok_or_else(|| {
+                    anyhow!("internal: bridge {} not pre-registered", chosen_spec)
+                })?;
             let target_bridge_pub = match peer_cfg.target_bridge.as_deref() {
                 Some(hex_pub) => {
                     let raw = hex::decode(hex_pub)
@@ -408,7 +434,8 @@ pub async fn run(
                 })?;
             info!(
                 peer = %hex::encode(peer_pid),
-                via_bridge = %spec,
+                via_bridge = %chosen_spec,
+                via_bridges_total = bridge_list.len(),
                 target_bridge = %hex::encode(target_bridge_pub),
                 allowed_ips = ?peer_cfg.allowed_ips,
                 ?dir,
@@ -456,7 +483,7 @@ pub async fn run(
         // tx=0 rx=0"). Internal routing is identical.
         let peer_kind = if !peer_cfg.endpoint_list().is_empty() {
             crate::status::PeerKind::Direct
-        } else if peer_cfg.via_bridge.is_some() {
+        } else if !peer_cfg.via_bridge_list().is_empty() {
             crate::status::PeerKind::Federation
         } else {
             crate::status::PeerKind::Mesh
