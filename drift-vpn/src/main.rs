@@ -38,9 +38,17 @@ enum Cmd {
     /// Bring up the VPN. Reads a TOML config and runs the
     /// daemon in the foreground; SIGINT to stop.
     Up {
-        /// Path to TOML config.
-        #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
-        config: PathBuf,
+        /// Path to TOML config. When omitted, drift-vpn walks a
+        /// list of candidate paths and uses the first one that
+        /// exists: on macOS `~/Library/Application Support/
+        /// drift-vpn/config.toml` then `~/.config/drift-vpn/
+        /// config.toml`; on Linux `$XDG_CONFIG_HOME/drift-vpn/
+        /// config.toml` (defaults to `~/.config/drift-vpn/
+        /// config.toml`); then `/etc/drift-vpn/config.toml` as
+        /// the system-level fallback. Pass `--config` to bypass
+        /// the auto-discovery.
+        #[clap(short, long)]
+        config: Option<PathBuf>,
         /// Override the status-socket path. Default is
         /// `/run/drift-vpn/status.sock`. Useful for running
         /// multiple daemons on one host (give each its own
@@ -96,9 +104,12 @@ enum Cmd {
     /// report. Read-only — does not mutate state, does not need
     /// the daemon running.
     Doctor {
-        /// Path to TOML config.
-        #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
-        config: PathBuf,
+        /// Path to TOML config. When omitted, drift-vpn walks
+        /// the same candidate paths as `drift-vpn up` (per-user
+        /// XDG / macOS Application Support, then
+        /// `/etc/drift-vpn/config.toml`).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
         /// In addition to the static preflight checks, actually
         /// attempt a handshake against each configured peer /
         /// bridge. Briefly stands up a no-TUN Transport, calls
@@ -270,6 +281,7 @@ async fn main() -> Result<()> {
         } => {
             #[cfg(unix)]
             {
+                let path = resolve_vpn_config_path(path);
                 let cfg = config::Config::load(&path).await?;
                 let id = identity::load(&cfg.interface.identity_file).await?;
                 let sock = status_socket.unwrap_or_else(status::default_socket_path);
@@ -305,6 +317,7 @@ async fn main() -> Result<()> {
         Cmd::Doctor { config: path, probe } => {
             #[cfg(unix)]
             {
+                let path = resolve_vpn_config_path(path);
                 let all_pass = doctor::run(&path, probe).await?;
                 if !all_pass {
                     std::process::exit(1);
@@ -419,5 +432,95 @@ fn resolve_config_path(opt: Option<PathBuf>) -> Result<PathBuf> {
     match opt {
         Some(p) => Ok(p),
         None => drift_config::io::default_path(),
+    }
+}
+
+/// Resolve `--config <path>` for drift-vpn's own daemon config
+/// (`up`, `doctor`). Walks a list of candidate paths and picks
+/// the first that exists, falling back to the system-level
+/// `/etc/drift-vpn/config.toml` so the caller gets a clear
+/// "not found at <that path>" if nothing is configured anywhere.
+///
+/// Distinct from `resolve_config_path` (which resolves the
+/// shared drift.toml inventory used by `drift-vpn config`).
+fn resolve_vpn_config_path(opt: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = opt {
+        return p;
+    }
+    let candidates = default_vpn_config_candidates();
+    for c in &candidates {
+        if c.exists() {
+            return c.clone();
+        }
+    }
+    // None exist — return the system-level path so the operator
+    // sees "config not found at /etc/drift-vpn/config.toml"
+    // rather than a confusing per-user path they may not even
+    // have a directory for.
+    candidates
+        .into_iter()
+        .last()
+        .unwrap_or_else(|| PathBuf::from("/etc/drift-vpn/config.toml"))
+}
+
+/// Candidate paths searched by `resolve_vpn_config_path`, in
+/// priority order. Per-user paths first because that's where
+/// every actual deployment of drift-vpn we've debugged this
+/// session kept its config; the system path is the fallback
+/// for service-style installs.
+fn default_vpn_config_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    #[cfg(target_os = "macos")]
+    if let Some(h) = &home {
+        out.push(h.join("Library/Application Support/drift-vpn/config.toml"));
+    }
+
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        out.push(PathBuf::from(xdg).join("drift-vpn/config.toml"));
+    } else if let Some(h) = &home {
+        out.push(h.join(".config/drift-vpn/config.toml"));
+    }
+
+    out.push(PathBuf::from("/etc/drift-vpn/config.toml"));
+    out
+}
+
+#[cfg(test)]
+mod resolve_vpn_config_path_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_path_returned_as_is() {
+        let p = PathBuf::from("/some/custom/path.toml");
+        assert_eq!(resolve_vpn_config_path(Some(p.clone())), p);
+    }
+
+    #[test]
+    fn default_candidates_include_system_path_last() {
+        let cands = default_vpn_config_candidates();
+        assert!(!cands.is_empty());
+        assert_eq!(
+            cands.last(),
+            Some(&PathBuf::from("/etc/drift-vpn/config.toml")),
+            "system path must always be the final fallback"
+        );
+    }
+
+    #[test]
+    fn default_candidates_have_per_user_path_before_system() {
+        // We don't care about absolute paths in test (HOME varies),
+        // but the per-user candidate must appear BEFORE
+        // /etc/drift-vpn/config.toml — that ordering is the whole
+        // point of the fix.
+        let cands = default_vpn_config_candidates();
+        let sys = PathBuf::from("/etc/drift-vpn/config.toml");
+        let sys_idx = cands.iter().position(|p| p == &sys).expect("sys path present");
+        assert!(
+            cands.len() > 1 && sys_idx > 0 || std::env::var_os("HOME").is_none(),
+            "per-user candidate must come before the system fallback (cands = {:?})",
+            cands
+        );
     }
 }
