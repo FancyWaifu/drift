@@ -481,6 +481,45 @@ pub async fn run(
     }
     let routes = Arc::new(routes);
 
+    // SEC.STARTUP.2 — peer-establishment watchdog. Periodically
+    // logs WARN with diagnostic hints when a configured peer
+    // hasn't reached Established. The old code logged once at
+    // startup ("bridge handshake didn't complete within 5s") and
+    // then went silent — operators couldn't tell "still trying"
+    // from "permanently broken." Now there's a recurring warn
+    // that names the specific pubkey + likely causes so the
+    // operator can act.
+    //
+    // Surfaces the silent-pubkey-mismatch class of bug too: if
+    // the configured peer pubkey doesn't match the running
+    // peer's actual identity, no handshake ever completes, and
+    // the WARN now points the operator straight at "confirm
+    // pubkey on the other side" as a possible cause.
+    {
+        let mut watch_peers: Vec<WatchdogPeer> = known_peers
+            .iter()
+            .map(|p| WatchdogPeer {
+                peer_id: p.peer_id,
+                pubkey: p.pubkey,
+                kind: "peer",
+            })
+            .collect();
+        for (spec, (bridge_pid, bridge_pub)) in &bridge_handles {
+            watch_peers.push(WatchdogPeer {
+                peer_id: *bridge_pid,
+                pubkey: *bridge_pub,
+                kind: "bridge",
+            });
+            let _ = spec;
+        }
+        if !watch_peers.is_empty() {
+            let wd_transport = transport.clone();
+            tokio::spawn(async move {
+                run_unestablished_watchdog(wd_transport, watch_peers).await;
+            });
+        }
+    }
+
     // Spawn the single supervisor task if any peer needs it.
     if !supervisor_states.is_empty() {
         let sup_transport = transport.clone();
@@ -876,6 +915,84 @@ pub async fn run(
 /// virtualization). Reading back with `-k` and checking each
 /// flag catches those silent failures.
 ///
+/// One peer the establishment watchdog should keep an eye on.
+/// Kept tiny so we can clone it into the watchdog task without
+/// dragging the full peer-route shape along.
+struct WatchdogPeer {
+    peer_id: PeerId,
+    /// Configured pubkey for this peer (32-byte X25519 public).
+    /// Logged on each WARN so the operator can cross-reference
+    /// against what's actually running on the peer side.
+    pubkey: [u8; 32],
+    /// Label for the WARN line: `"bridge"` or `"peer"`. Lets
+    /// the operator distinguish "the bridge I'm tunneling
+    /// through never connected" from "my actual VPN peer
+    /// never connected" — they have very different fixes.
+    kind: &'static str,
+}
+
+/// Periodic watchdog that logs WARN-level diagnostics for any
+/// peer that hasn't reached Established. First warning fires
+/// 30 s after startup; thereafter re-warns every 60 s while the
+/// peer stays unestablished. Established peers are silent.
+///
+/// The error message names the configured pubkey + the top
+/// failure modes operators actually hit, so a "I configured
+/// drift-vpn and ping doesn't work" investigation gets a usable
+/// starting point inside one minute instead of zero.
+async fn run_unestablished_watchdog(
+    transport: Arc<Transport>,
+    peers: Vec<WatchdogPeer>,
+) {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    const TICK: Duration = Duration::from_secs(10);
+    const FIRST_WARN_AFTER: Duration = Duration::from_secs(30);
+    const REWARN_EVERY: Duration = Duration::from_secs(60);
+
+    let start = Instant::now();
+    // Per-peer next-warn deadline. Absent => no warn issued yet
+    // (use start + FIRST_WARN_AFTER as the initial target).
+    let mut next_warn: HashMap<PeerId, Instant> = HashMap::new();
+
+    loop {
+        tokio::time::sleep(TICK).await;
+        let now = Instant::now();
+        for peer in &peers {
+            if transport.peer_is_established(&peer.peer_id).await {
+                // Established — clear any pending warn schedule.
+                next_warn.remove(&peer.peer_id);
+                continue;
+            }
+            let next = *next_warn
+                .entry(peer.peer_id)
+                .or_insert(start + FIRST_WARN_AFTER);
+            if now >= next {
+                let elapsed = now.duration_since(start).as_secs();
+                warn!(
+                    kind = peer.kind,
+                    peer_id = %hex::encode(peer.peer_id),
+                    peer_pubkey = %hex::encode(peer.pubkey),
+                    elapsed_secs = elapsed,
+                    "{} not Established after {}s. Common causes: (1) peer process \
+                     offline or unreachable; (2) pubkey mismatch — confirm \
+                     `drift-vpn show --identity-file <peer-identity>` on the peer \
+                     side matches the pubkey logged above; (3) network filtering \
+                     between this host and the peer (corporate NAT, ISP egress \
+                     filter); (4) orphan TUN on either side holding the configured \
+                     address (start that side with `--force-cleanup` or kill \
+                     stale processes). Watchdog will re-warn every {}s.",
+                    peer.kind,
+                    elapsed,
+                    REWARN_EVERY.as_secs()
+                );
+                next_warn.insert(peer.peer_id, now + REWARN_EVERY);
+            }
+        }
+    }
+}
+
 /// Returns the names of TUN-family interfaces (utun* on macOS,
 /// tun*/tap* on Linux) that already have `wanted_addr` assigned.
 ///
