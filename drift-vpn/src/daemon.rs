@@ -1290,7 +1290,10 @@ async fn disable_offloads_and_verify(iface: &str) {
     }
 }
 
-async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
+/// Resolve a `<scheme>://host:port` URL to a `SocketAddr`. Used
+/// by the daemon's endpoint-probe path and by
+/// `doctor --probe`, so it's `pub(crate)`.
+pub(crate) async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
     let (_scheme, addr) = url
         .split_once("://")
         .ok_or_else(|| anyhow!("endpoint URL needs scheme: {:?}", url))?;

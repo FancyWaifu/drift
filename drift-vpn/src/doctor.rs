@@ -89,7 +89,11 @@ impl CheckResult {
 /// Run the full check suite and print a report. Returns Ok(true)
 /// if every check passed (or was warn/info), Ok(false) if any
 /// check failed.
-pub async fn run(config_path: &Path) -> Result<bool> {
+///
+/// `probe`: when true, additionally attempts a real handshake
+/// against each configured peer / bridge. Catches unreachability
+/// + pubkey-mismatch failures that the static checks can't see.
+pub async fn run(config_path: &Path, probe: bool) -> Result<bool> {
     let mut results = Vec::new();
 
     // Order is deliberate — checks that gate later checks come
@@ -106,6 +110,17 @@ pub async fn run(config_path: &Path) -> Result<bool> {
         results.push(check_peers(cfg));
     }
     results.push(check_status_socket_dir());
+
+    // Live probes — only when --probe is set, because they take
+    // ~5s per peer and touch the network. Static checks are still
+    // safe to run blindly; probes need explicit consent.
+    if probe {
+        if let Some(ref cfg) = cfg {
+            for r in probe_peers(cfg).await {
+                results.push(r);
+            }
+        }
+    }
 
     render(&results);
 
@@ -414,6 +429,171 @@ fn check_peers(cfg: &Config) -> CheckResult {
             parts.join(", ")
         ),
     )
+}
+
+/// `doctor --probe`: actually try to handshake with each
+/// configured peer / bridge. Returns one CheckResult per
+/// target.
+///
+/// What it does:
+///   - Reads the identity file.
+///   - Stands up a Transport bound to an ephemeral local UDP
+///     port (no TUN, no status socket — read-only on the system).
+///   - For each peer or via_bridge URL, calls connect_url +
+///     add_peer + send_data("probe"), then waits up to ~5s for
+///     `peer_metrics.is_established`.
+///   - Reports pass/fail + the time to establish or the error.
+///
+/// Catches: peer offline, bridge unreachable, pubkey mismatch
+/// (handshake AEAD will fail, surface as "not established within
+/// 5s"), network filtering (TCP connect timeout, UDP HELLO_ACK
+/// drop). All the failure modes we saw debugging today.
+async fn probe_peers(cfg: &Config) -> Vec<CheckResult> {
+    let mut results = Vec::new();
+
+    // 1. Collect unique bridge URLs first — multiple peers can
+    //    share one via_bridge and we probe each bridge only once.
+    use std::collections::BTreeMap;
+    let mut bridge_by_url: BTreeMap<String, [u8; 32]> = BTreeMap::new();
+    for peer in &cfg.peers {
+        if let Some(spec) = &peer.via_bridge {
+            if let Ok((url, pub_)) = crate::config::parse_bridge_spec(spec) {
+                bridge_by_url.entry(url).or_insert(pub_);
+            }
+        }
+    }
+    for (bridge_url, bridge_pub) in &bridge_by_url {
+        match probe_one(bridge_url, *bridge_pub).await {
+            Ok(elapsed) => {
+                results.push(CheckResult::pass(
+                    "probe / bridge",
+                    format!(
+                        "{} reachable; session Established in {}ms",
+                        bridge_url,
+                        elapsed.as_millis()
+                    ),
+                ));
+            }
+            Err(e) => {
+                results.push(CheckResult::fail(
+                    "probe / bridge",
+                    format!("{} not reachable: {}", bridge_url, e),
+                    "check the bridge is running and the WAN forward is correct; \
+                     if SYN/HELLO is dropped, the network between this host and \
+                     the bridge is filtering — try a different scheme (h2s/h2/ws) \
+                     or an SSH tunnel",
+                ));
+            }
+        }
+    }
+
+    // 2. Probe direct-endpoint peers. via_bridge peers ride the
+    //    bridge probe above; if the bridge handshake works,
+    //    end-to-end federation is likely working too. Probing
+    //    the federated leg specifically would require dialing
+    //    the peer's pubkey via the bridge — connect_federate
+    //    handles that inside the daemon but isn't exposed here;
+    //    deferred.
+    for (i, peer) in cfg.peers.iter().enumerate() {
+        let endpoints = peer.endpoint_list();
+        if endpoints.is_empty() {
+            continue; // mesh-only or via_bridge-only — handled above
+        }
+        let peer_pub = match peer.pubkey_bytes() {
+            Ok(p) => p,
+            Err(_) => continue, // surfaced by check_peers already
+        };
+        let mut last_err: Option<String> = None;
+        let mut succeeded = false;
+        for endpoint in &endpoints {
+            match probe_one(endpoint, peer_pub).await {
+                Ok(elapsed) => {
+                    results.push(CheckResult::pass(
+                        "probe / peer",
+                        format!(
+                            "peer #{} via {} — Established in {}ms",
+                            i,
+                            endpoint,
+                            elapsed.as_millis()
+                        ),
+                    ));
+                    succeeded = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(format!("{}: {}", endpoint, e));
+                }
+            }
+        }
+        if !succeeded {
+            results.push(CheckResult::fail(
+                "probe / peer",
+                format!(
+                    "peer #{} unreachable via {} endpoint{}: {}",
+                    i,
+                    endpoints.len(),
+                    if endpoints.len() == 1 { "" } else { "s" },
+                    last_err.unwrap_or_else(|| "no endpoints to try".to_string())
+                ),
+                "peer process may be offline, the configured pubkey may \
+                 not match the peer's current identity (check with \
+                 `drift-vpn show --identity-file <peer-key>` on the other \
+                 side), or the network is filtering — try a different scheme",
+            ));
+        }
+    }
+
+    results
+}
+
+/// Single per-target probe: spin up a fresh Transport via
+/// connect_url (which selects the correct adapter for the URL's
+/// scheme), add the target as a peer, send a probe packet, wait
+/// up to 5 s for `peer_metrics.is_established`.
+///
+/// Uses an ephemeral identity so it never collides with whatever
+/// the user's running daemon is doing. The Transport is dropped
+/// on function exit — all sockets close cleanly.
+async fn probe_one(
+    url: &str,
+    target_pub: [u8; 32],
+) -> std::result::Result<std::time::Duration, String> {
+    use drift::identity::Identity;
+    use drift::{Direction, Transport, TransportConfig};
+    use std::time::{Duration, Instant};
+
+    let identity = Identity::generate();
+    let cfg = TransportConfig {
+        accept_any_peer: true,
+        ..TransportConfig::default()
+    };
+
+    let (transport, peer_addr) = Transport::connect_url(url, identity, cfg)
+        .await
+        .map_err(|e| format!("connect_url: {}", e))?;
+    let transport = std::sync::Arc::new(transport);
+
+    let handle = transport
+        .add_peer(target_pub, peer_addr, Direction::Initiator)
+        .await
+        .map_err(|e| format!("add_peer: {}", e))?;
+    let start = Instant::now();
+    transport
+        .send_data(&handle, b"doctor-probe", 5000, 0)
+        .await
+        .map_err(|e| format!("send_data: {}", e))?;
+    let deadline = start + Duration::from_secs(5);
+    loop {
+        if let Some(m) = transport.peer_metrics(&handle).await {
+            if m.is_established {
+                return Ok(start.elapsed());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("handshake did not reach Established within 5s".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn check_status_socket_dir() -> CheckResult {
