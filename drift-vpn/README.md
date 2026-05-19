@@ -424,6 +424,20 @@ cargo build --release -p drift-vpn
 sudo cp target/release/drift-vpn /usr/local/bin/
 ```
 
+On **macOS** specifically, `cargo build` output has only an ad-hoc
+codesign, and a plain `cp`/`install` strips the signature's xattr —
+the kernel will then SIGKILL the binary on `sudo drift-vpn up` with
+a bare `zsh: killed` and no log line. Use the included script
+(builds, signs, installs, re-signs the installed copy, verifies):
+
+```bash
+./drift-vpn/scripts/install-mac.sh
+```
+
+CI-built release tarballs are properly signed (Apple Developer ID
++ notarized) and don't need this step. The script is for local
+dev builds only.
+
 ### Platform notes
 
 **Linux** — full daemon support. Needs:
