@@ -83,6 +83,7 @@ async fn spawn_proxy(target: SocketAddr, profile: LossProfile) -> SocketAddr {
 /// the server caches HELLO_ACK so a duplicate HELLO gets a replayed
 /// response rather than a fresh session.
 #[tokio::test]
+#[ignore = "timing-fragile under loaded CI; runs in nightly. See HANDOFF flaky-test note (2026-05-19)."]
 async fn handshake_under_loss() {
     let bob = Identity::from_secret_bytes([0xF0; 32]);
     let alice = Identity::from_secret_bytes([0xF1; 32]);
@@ -165,6 +166,7 @@ async fn handshake_under_loss() {
 }
 
 #[tokio::test]
+#[ignore = "timing-fragile under loaded CI (40% reorder + parallel test scheduling); passes in isolation, runs in nightly. See HANDOFF flaky-test note."]
 async fn coalescing_under_reorder() {
     // Heavy reordering: 40% of packets get delayed randomly. Send coalesced
     // "position updates" and verify the receiver never sees a group-seq
@@ -251,6 +253,7 @@ async fn coalescing_under_reorder() {
 }
 
 #[tokio::test]
+#[ignore = "timing-fragile under loaded CI (150ms-latency proxy + 50ms deadline + parallel test scheduling); passes in isolation, runs in nightly. See HANDOFF flaky-test note."]
 async fn deadline_drops_slow_packets() {
     // 150ms latency link + 50ms deadline. Packets should arrive too late
     // and be dropped by the deadline filter on the receiver.
