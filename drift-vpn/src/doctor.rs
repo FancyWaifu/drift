@@ -397,28 +397,42 @@ fn check_peers(cfg: &Config) -> CheckResult {
             "add at least one peer to make the VPN useful — see drift-vpn/README.md",
         );
     }
-    // Count peers by transport scheme to give the operator a quick
-    // visual of what the daemon will try.
+    // Count peers by reach kind: direct (endpoints), federation
+    // (via_bridge / via_bridges / via_bridges_auto), or true
+    // mesh-only (no endpoint AND no bridge). The previous version
+    // lumped all-no-endpoints peers under "mesh-only", which
+    // mis-labeled federation peers — they're reachable through
+    // the configured bridge, not via beacon-propagated mesh.
     use std::collections::BTreeMap;
-    let mut by_scheme: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut endpointless = 0;
+    let mut direct_by_scheme: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut federation = 0;
+    let mut mesh_only = 0;
     for p in &cfg.peers {
         let endpoints = p.endpoint_list();
-        if endpoints.is_empty() {
-            endpointless += 1;
+        if !endpoints.is_empty() {
+            for url in &endpoints {
+                let scheme = url.split("://").next().unwrap_or("?");
+                *direct_by_scheme
+                    .entry(Box::leak(scheme.to_string().into_boxed_str()))
+                    .or_insert(0) += 1;
+            }
             continue;
         }
-        for url in &endpoints {
-            let scheme = url.split("://").next().unwrap_or("?");
-            *by_scheme.entry(Box::leak(scheme.to_string().into_boxed_str())).or_insert(0) += 1;
+        if !p.via_bridge_list().is_empty() || p.via_bridges_auto.is_some() {
+            federation += 1;
+        } else {
+            mesh_only += 1;
         }
     }
     let mut parts = Vec::new();
-    for (scheme, c) in &by_scheme {
+    for (scheme, c) in &direct_by_scheme {
         parts.push(format!("{}×{}", scheme, c));
     }
-    if endpointless > 0 {
-        parts.push(format!("{} mesh-only", endpointless));
+    if federation > 0 {
+        parts.push(format!("{} federation", federation));
+    }
+    if mesh_only > 0 {
+        parts.push(format!("{} mesh-only", mesh_only));
     }
     CheckResult::pass(
         "peers",
