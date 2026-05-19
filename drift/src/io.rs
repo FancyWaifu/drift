@@ -1768,12 +1768,38 @@ pub struct SchemeRegistration {
 inventory::collect!(SchemeRegistration);
 
 /// Parse `<scheme>://<host:port>` URL. Bare `host:port` (no
-/// scheme) defaults to `udp` for back-compat.
+/// scheme) defaults to `udp` for back-compat — but emits a
+/// once-per-process deprecation warning, because silently
+/// picking UDP runs against the wire-agnostic principle the
+/// rest of the codebase enforces. Callers should pass an
+/// explicit scheme.
 fn split_url(url: &str) -> io::Result<(&str, &str)> {
     if let Some(idx) = url.find("://") {
         Ok((&url[..idx], &url[idx + 3..]))
     } else {
+        warn_bare_host_port_deprecated(url);
         Ok(("udp", url))
+    }
+}
+
+/// Emit a single tracing warning the first time the bare
+/// `host:port` (no scheme) form is seen. Avoids log spam in
+/// long-running processes that keep hitting the same legacy
+/// config path.
+fn warn_bare_host_port_deprecated(url: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        tracing::warn!(
+            url = %url,
+            "URL has no scheme; defaulting to udp://. This back-compat \
+             fallback is deprecated — pass an explicit scheme (udp://, \
+             tcp://, ws://, tls://, h2://, h2s://, webtransport://, …) \
+             to silence this warning."
+        );
     }
 }
 
