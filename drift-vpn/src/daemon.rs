@@ -317,44 +317,56 @@ pub async fn run(
             );
         }
     }
-    // Wait for each bridge handshake to actually complete before
-    // registering the federated peers that ride on top of it.
-    // Without this gate, `add_federated_peer` runs while the
-    // client↔bridge session is still Pending — the federated
-    // route is set up correctly but the first send_data through
-    // it errors with UnknownPeer because the bridge can't yet
-    // forward an envelope from a non-authenticated source.
+    // Parallel adapter probe — measure each bridge's handshake
+    // time concurrently, then re-rank `bridge_specs` per peer
+    // by the measurement. The default order (`via_bridges_auto`
+    // expansion or `via_bridges` config order) is just the
+    // starting point; the probe captures the actual network
+    // reality (which wires are blocked, which are slow, which
+    // are fast). Without this, the daemon would pick whichever
+    // wire happened to be first in the config — wrong half the
+    // time on real-world networks.
     //
-    // 5 s ceiling per bridge — LAN handshakes complete in
-    // <100 ms; WAN handshakes through a cookie path take up to
-    // ~1 RTT plus crypto. If a bridge doesn't come up in 5 s
-    // we proceed anyway and the federation supervisor handles
-    // the recovery.
-    for (spec, (bridge_pid, _)) in &bridge_handles {
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(5);
-        let mut warned = false;
-        loop {
-            if transport.peer_is_established(bridge_pid).await {
-                debug!(bridge = %spec, "bridge handshake established");
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                if !warned {
-                    warn!(
-                        bridge = %spec,
-                        "bridge handshake didn't complete within 5s — federated peers will retry"
-                    );
-                }
-                break;
-            }
-            // Probe again — first probe was at add_peer time;
-            // retransmit drives recovery if the first HELLO was
-            // lost.
+    // Why parallel: 9 candidates × 5 s sequential = 45 s
+    // startup. Parallel = ≤ 8 s total (the PROBE_DEADLINE).
+    //
+    // Probes also drive HELLO retransmits — the prober's
+    // `peer_is_established` poll spins fast enough to retrigger
+    // the cookie path when needed. We don't need the separate
+    // probe-retransmit loop the sequential version had.
+    let probe_candidates: Vec<(String, PeerId)> = bridge_handles
+        .iter()
+        .map(|(spec, (pid, _))| (spec.clone(), *pid))
+        .collect();
+    let probe_results = if probe_candidates.is_empty() {
+        Vec::new()
+    } else {
+        // Kick HELLO toward each bridge before probing so the
+        // handshake is actually in motion. UDP `add_peer`
+        // doesn't initiate a handshake on its own; connect_url
+        // does. Touching every bridge with a single probe byte
+        // ensures all are mid-handshake when the prober starts
+        // measuring.
+        for (_spec, (bridge_pid, _)) in &bridge_handles {
             let _ = transport.send_data(bridge_pid, b".", 0, 0).await;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-    }
+        crate::adapter_probe::probe_and_rank(
+            transport.clone(),
+            probe_candidates,
+        )
+        .await
+    };
+
+    // Build a rank-lookup: spec → index in measured order.
+    // Failed (un-handshaked) entries sort last in the probe
+    // result, so they end up at the bottom of each peer's
+    // priority list — preserving the "configured fallback even
+    // if currently unreachable" behavior.
+    let measured_rank: std::collections::HashMap<String, usize> = probe_results
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.spec.clone(), i))
+        .collect();
 
     for (i, peer_cfg) in cfg.peers.iter().enumerate() {
         let peer_pub = peer_cfg
@@ -373,7 +385,20 @@ pub async fn run(
         // Initiator side stays in Established with stale keys.
         // Always-Initiator avoids that deadlock.
         let dir = Direction::Initiator;
-        let bridge_list = peer_cfg.via_bridge_list();
+        // Reorder this peer's via_bridge_list by the daemon's
+        // adapter probe results (handshake-time ascending). The
+        // operator's configured order is the input; the measured
+        // ranking is the output the supervisor uses. Specs that
+        // weren't probed (shouldn't happen since we registered
+        // every spec in via_bridge_list above, but guard
+        // anyway) keep their original config order at the end.
+        let mut bridge_list = peer_cfg.via_bridge_list();
+        bridge_list.sort_by_key(|spec| {
+            measured_rank
+                .get(spec)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
         let chosen_for_supervisor: Option<String> = if !bridge_list.is_empty() {
             // v0.13 bridge-fallback path: peer is reachable through
             // a federation bridge. The bridge itself was registered

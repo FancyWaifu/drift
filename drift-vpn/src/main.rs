@@ -23,6 +23,8 @@ mod status;
 mod daemon;
 #[cfg(unix)]
 mod bridge_failover;
+#[cfg(unix)]
+mod adapter_probe;
 
 #[derive(Parser)]
 #[clap(
