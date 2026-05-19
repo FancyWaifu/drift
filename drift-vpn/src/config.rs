@@ -368,3 +368,284 @@ pub fn parse_bridge_spec(spec: &str) -> Result<(String, [u8; 32])> {
     pubkey.copy_from_slice(&raw);
     Ok((url.to_string(), pubkey))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Valid 64-hex-char pubkey for test fixtures.
+    const PUB_HEX: &str =
+        "0101010101010101010101010101010101010101010101010101010101010101";
+    // Different pubkey for bridge fixtures.
+    const BRIDGE_PUB_HEX: &str =
+        "0202020202020202020202020202020202020202020202020202020202020202";
+
+    /// Minimal valid TOML body. Callers can append `[[peer]]`
+    /// blocks or override [interface] fields by string formatting.
+    fn minimal_interface(extra: &str) -> String {
+        format!(
+            r#"[interface]
+identity_file = "/tmp/drift-vpn-test-identity"
+address = "10.0.0.1/24"
+{}
+"#,
+            extra
+        )
+    }
+
+    // ─── one_or_many deserializer ───────────────────────────────
+
+    #[test]
+    fn listen_accepts_back_compat_string_form() {
+        let body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        assert_eq!(cfg.interface.listen, vec!["udp://0.0.0.0:51820"]);
+    }
+
+    #[test]
+    fn listen_accepts_v02_array_form() {
+        let body = minimal_interface(
+            r#"listen = ["udp://0.0.0.0:51820", "tls://0.0.0.0:443", "ws://0.0.0.0:8443"]"#,
+        );
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        assert_eq!(
+            cfg.interface.listen,
+            vec![
+                "udp://0.0.0.0:51820",
+                "tls://0.0.0.0:443",
+                "ws://0.0.0.0:8443"
+            ]
+        );
+    }
+
+    #[test]
+    fn listen_array_form_with_single_element_works() {
+        let body = minimal_interface(r#"listen = ["udp://0.0.0.0:51820"]"#);
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        assert_eq!(cfg.interface.listen, vec!["udp://0.0.0.0:51820"]);
+    }
+
+    #[test]
+    fn listen_rejects_non_string_non_array_form() {
+        // Plain integer — should fail deserialize, not silently
+        // coerce.
+        let body = minimal_interface(r#"listen = 51820"#);
+        assert!(
+            toml::from_str::<Config>(&body).is_err(),
+            "listen = <int> must not parse as one_or_many"
+        );
+    }
+
+    #[test]
+    fn peer_endpoints_accepts_back_compat_string_form() {
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{}"
+allowed_ips = ["10.0.0.2/32"]
+endpoints   = "udp://198.51.100.7:51820"
+"#,
+            PUB_HEX
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        assert_eq!(
+            cfg.peers[0].endpoints.as_deref(),
+            Some(&["udp://198.51.100.7:51820".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn peer_endpoints_accepts_array_form_and_dedupes_against_endpoint() {
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{}"
+allowed_ips = ["10.0.0.2/32"]
+endpoint    = "udp://198.51.100.7:51820"
+endpoints   = ["udp://198.51.100.7:51820", "tls://198.51.100.7:443"]
+"#,
+            PUB_HEX
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        // endpoint + endpoints array; endpoint_list de-dups.
+        let list = cfg.peers[0].endpoint_list();
+        assert_eq!(
+            list,
+            vec!["udp://198.51.100.7:51820", "tls://198.51.100.7:443"],
+            "endpoint_list should de-dup the duplicate entry"
+        );
+    }
+
+    // ─── validate() — config-level invariants ───────────────────
+
+    #[test]
+    fn validate_rejects_empty_listen_array() {
+        let body = minimal_interface(r#"listen = []"#);
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg.validate().expect_err("empty listen must fail validate");
+        assert!(
+            err.to_string().contains("at least one URL"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_bad_pubkey_length() {
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(
+            r#"
+[[peer]]
+public_key  = "deadbeef"
+allowed_ips = ["10.0.0.2/32"]
+endpoint    = "udp://198.51.100.7:51820"
+"#,
+        );
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg
+            .validate()
+            .expect_err("bad pubkey length must fail validate");
+        // anyhow wraps errors; outermost context is `peer #0`.
+        // Use the chained `{:#}` form to see the underlying cause
+        // ("pubkey must be 32 bytes" from pubkey_bytes()).
+        let chain = format!("{:#}", err);
+        assert!(
+            chain.contains("32 bytes") || chain.contains("pubkey"),
+            "unexpected error chain: {}",
+            chain
+        );
+    }
+
+    #[test]
+    fn validate_rejects_peer_with_empty_allowed_ips() {
+        let mut body = minimal_interface(r#"listen = "udp://0.0.0.0:51820""#);
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{}"
+allowed_ips = []
+endpoint    = "udp://198.51.100.7:51820"
+"#,
+            PUB_HEX
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg
+            .validate()
+            .expect_err("empty allowed_ips must fail validate");
+        assert!(
+            err.to_string().contains("allowed_ips"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_via_bridge_with_too_large_mtu() {
+        // via_bridge present + MTU above the federation-envelope
+        // ceiling. Default MTU (1340) is already at the edge; set
+        // a knowingly-too-large 1400 to trip the check.
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1400",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+via_bridge  = "udp://192.0.2.1:51820@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg
+            .validate()
+            .expect_err("oversized MTU with via_bridge must fail validate");
+        assert!(
+            err.to_string().contains("via_bridge"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_accepts_via_bridge_at_safe_mtu() {
+        // Federation envelope (130 B) + 16 B headroom subtracted
+        // from MAX_PAYLOAD (1348) gives max_safe_mtu = 1202. The
+        // default MTU (1340) is already too large when via_bridge
+        // is used — operators have to set it explicitly.
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key  = "{peer}"
+allowed_ips = ["10.0.0.2/32"]
+via_bridge  = "udp://192.0.2.1:51820@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        cfg.validate()
+            .expect("mtu=1200 with via_bridge should be under the safe cap");
+    }
+
+    // ─── parse_bridge_spec ──────────────────────────────────────
+
+    #[test]
+    fn parse_bridge_spec_happy_path() {
+        let spec = format!("udp://192.0.2.1:51820@{}", BRIDGE_PUB_HEX);
+        let (url, pubkey) = parse_bridge_spec(&spec).expect("parse");
+        assert_eq!(url, "udp://192.0.2.1:51820");
+        assert_eq!(&pubkey[..], &hex::decode(BRIDGE_PUB_HEX).unwrap()[..]);
+    }
+
+    #[test]
+    fn parse_bridge_spec_rejects_missing_at() {
+        let spec = format!("udp://192.0.2.1:51820{}", BRIDGE_PUB_HEX);
+        let err = parse_bridge_spec(&spec).expect_err("must reject");
+        assert!(
+            err.to_string().contains("expected"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_bridge_spec_rejects_missing_scheme() {
+        // host:port@pubkey, no scheme.
+        let spec = format!("192.0.2.1:51820@{}", BRIDGE_PUB_HEX);
+        let err = parse_bridge_spec(&spec).expect_err("must reject");
+        assert!(
+            err.to_string().contains("scheme"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_bridge_spec_rejects_bad_hex_length() {
+        let spec = "udp://192.0.2.1:51820@deadbeef";
+        let err = parse_bridge_spec(spec).expect_err("must reject");
+        assert!(
+            err.to_string().contains("32 bytes"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_bridge_spec_accepts_non_udp_schemes() {
+        // The function is wire-agnostic — any scheme works.
+        for scheme in &["tcp", "tls", "ws", "h2", "h2s", "webtransport"] {
+            let spec = format!("{}://192.0.2.1:443@{}", scheme, BRIDGE_PUB_HEX);
+            let (url, _) = parse_bridge_spec(&spec)
+                .unwrap_or_else(|e| panic!("{} should parse: {}", scheme, e));
+            assert!(url.starts_with(scheme));
+        }
+    }
+}
