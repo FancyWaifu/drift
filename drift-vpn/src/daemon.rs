@@ -522,8 +522,27 @@ pub async fn run(
     // the WARN now points the operator straight at "confirm
     // pubkey on the other side" as a possible cause.
     {
+        // Federation peers are excluded from the establishment
+        // watch. They have no direct DRIFT session — all traffic
+        // flows through a configured `via_bridge`, so
+        // `peer_is_established` will never return true for them
+        // even when the tunnel is healthy and packets are flowing
+        // (verified empirically: ping over the federated path
+        // worked with 7 ms RTT while the watchdog kept warning
+        // "peer not Established after 30s"). The bridge entries
+        // we push below already cover reachability transitively:
+        // if the bridge is up, the route to the federation peer
+        // exists; if the bridge is down, the bridge-kind WARN
+        // fires first.
+        //
+        // Active liveness for the federation peer itself (e.g.
+        // "drift1's daemon crashed even though the router is
+        // fine") requires application-layer probing, which the
+        // watchdog isn't built for. That's a future feature, not
+        // a watchdog tweak.
         let mut watch_peers: Vec<WatchdogPeer> = known_peers
             .iter()
+            .filter(|p| p.kind != crate::status::PeerKind::Federation)
             .map(|p| WatchdogPeer {
                 peer_id: p.peer_id,
                 pubkey: p.pubkey,
