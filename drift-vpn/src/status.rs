@@ -26,8 +26,32 @@ use std::time::Duration;
 
 /// Default socket path. Relative paths are normal here; the
 /// daemon mkdirs the parent.
+///
+/// Platform-specific because `/run` is read-only on macOS (we
+/// observed `Read-only file system (os error 30)` and a noisy
+/// WARN at every daemon startup using the Linux path on Mac).
+///
+///   * Linux:  `/run/drift-vpn/status.sock` — systemd-managed,
+///             writable for root.
+///   * macOS:  `/var/run/drift-vpn/status.sock` — equivalent
+///             tmpfs-style location that's actually writable.
+///   * other:  `$TMPDIR/drift-vpn/status.sock` as a last resort.
 pub fn default_socket_path() -> PathBuf {
-    PathBuf::from("/run/drift-vpn/status.sock")
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/var/run/drift-vpn/status.sock")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        PathBuf::from("/run/drift-vpn/status.sock")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let tmp = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        tmp.join("drift-vpn/status.sock")
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
