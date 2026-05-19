@@ -222,6 +222,40 @@ pub struct Peer {
     /// future feature.
     #[serde(default, deserialize_with = "one_or_many_opt")]
     pub via_bridges: Option<Vec<String>>,
+    /// Shorthand for "expand to the standard wire menu in
+    /// best→worst order against this bridge." Operator writes
+    /// just `host@<bridge-pubkey-hex>` — no scheme, no port —
+    /// and drift-vpn generates the same nine `<scheme>://host:
+    /// <std-port>@<pub>` entries the operator could write by
+    /// hand into `via_bridges`. Combines with explicit
+    /// `via_bridge` / `via_bridges` (explicit entries take
+    /// priority, auto-expanded entries fill behind, duplicates
+    /// removed).
+    ///
+    /// Default port mapping (standard `drift bridge` listen
+    /// set; matches the router's port-forward table from this
+    /// session's setup):
+    ///
+    /// | scheme        | port  | notes |
+    /// |---------------|-------|---|
+    /// | udp           | 51820 | fastest, lowest overhead |
+    /// | webtransport  | 51828 | QUIC over UDP |
+    /// | h2s           | 51827 | HTTPS-shaped; traverses most middleboxes |
+    /// | tls           | 51822 | TLS-wrapped TCP |
+    /// | h2            | 51826 | cleartext HTTP/2 |
+    /// | ws            | 51821 | WebSocket; port-443-friendly |
+    /// | tcp           | 51820 | plain TCP |
+    /// | http          | 51823 | HTTP/SSE fallback |
+    /// | dns           | 51824 | extreme stealth, last resort |
+    ///
+    /// Bridges that bind non-standard ports won't be reachable
+    /// via this shorthand — fall back to writing the full
+    /// `via_bridges` list explicitly. The runtime failover
+    /// supervisor (see bridge_failover.rs) consumes whichever
+    /// list the schema produces; this field is just sugar on
+    /// top of `via_bridges`.
+    #[serde(default)]
+    pub via_bridges_auto: Option<String>,
     /// Pubkey of the bridge the *peer* is connected to (the
     /// federation routing target). Optional — defaults to the
     /// pubkey embedded in `via_bridge`, which is correct when
@@ -247,12 +281,24 @@ impl Peer {
         Ok(k)
     }
 
-    /// Resolve `via_bridge` (single) and `via_bridges` (array)
+    /// Resolve `via_bridge` (single), `via_bridges` (explicit
+    /// array), and `via_bridges_auto` (shorthand expansion)
     /// into one prioritized list of bridge specs in
-    /// `<scheme>://host:port@<bridge-pubkey-hex>` form. Same
-    /// back-compat pattern as `endpoint_list`: the single form
-    /// is the highest-priority entry; the array follows;
-    /// duplicates are removed.
+    /// `<scheme>://host:port@<bridge-pubkey-hex>` form.
+    ///
+    /// Priority order:
+    ///   1. `via_bridge` (single, highest)
+    ///   2. `via_bridges` array entries
+    ///   3. `via_bridges_auto` expansion (lowest)
+    ///
+    /// Duplicates are removed across all three sources, so the
+    /// operator can explicitly pin one wire to the top via
+    /// `via_bridge` and let auto-expansion fill the rest:
+    ///
+    /// ```toml
+    /// via_bridge       = "tls://127.0.0.1:51822@<pub>"  # SSH-tunneled, tried first
+    /// via_bridges_auto = "198.51.100.42@<pub>"        # then the standard menu
+    /// ```
     pub fn via_bridge_list(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(s) = &self.via_bridge {
@@ -262,6 +308,13 @@ impl Peer {
             for spec in list {
                 if !out.contains(spec) {
                     out.push(spec.clone());
+                }
+            }
+        }
+        if let Some(auto) = &self.via_bridges_auto {
+            for spec in expand_via_bridges_auto(auto) {
+                if !out.contains(&spec) {
+                    out.push(spec);
                 }
             }
         }
@@ -319,7 +372,7 @@ impl Config {
         let any_via_bridge = self
             .peers
             .iter()
-            .any(|p| !p.via_bridge_list().is_empty());
+            .any(|p| !p.via_bridge_list().is_empty() || p.via_bridges_auto.is_some());
         if any_via_bridge {
             let max_safe_mtu = (drift::transport::MAX_PAYLOAD
                 .saturating_sub(drift::transport::FED_HEADER_LEN)
@@ -373,6 +426,16 @@ impl Config {
                     })?;
                 }
             }
+            // v0.16: validate via_bridges_auto shorthand. The
+            // expander tolerates parse failures (returns empty)
+            // because it's called from synchronous accessors
+            // that can't propagate errors; we re-parse here at
+            // load time so malformed specs are rejected loudly.
+            if let Some(spec) = &p.via_bridges_auto {
+                parse_via_bridges_auto_spec(spec).with_context(|| {
+                    format!("peer #{} via_bridges_auto {:?}", i, spec)
+                })?;
+            }
             if let Some(tb) = &p.target_bridge {
                 let raw = hex::decode(tb)
                     .with_context(|| format!("peer #{} target_bridge hex", i))?;
@@ -401,6 +464,95 @@ impl Config {
 /// daemon-side connect will fail at startup with the adapter's
 /// own error; the config-level parser doesn't gate on adapter
 /// availability because that's a runtime decision.
+/// Expand a `via_bridges_auto` shorthand spec (`host@pub`) into
+/// the standard 9-scheme candidate list. The returned ordering
+/// is a sensible *default* — daemon-side adapter probing
+/// reorders it by measured handshake time at startup, so the
+/// initial ordering here is only what you get if probing is
+/// disabled or fails.
+///
+/// Returns empty if the spec is malformed; full validation
+/// happens in `validate()` so the operator sees a parse error
+/// at config-load, not silent fallback to no bridges.
+///
+/// Excluded by design: `webrtc://` (signaling is out-of-band,
+/// not auto-dialable from `connect_url`), `onion://` (needs
+/// the optional `--features onion` build flag).
+pub(crate) fn expand_via_bridges_auto(spec: &str) -> Vec<String> {
+    let (host, pubkey) = match parse_via_bridges_auto_spec(spec) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let pub_hex = hex::encode(pubkey);
+    [
+        ("udp", 51820),
+        ("webtransport", 51828),
+        ("h2s", 51827),
+        ("tls", 51822),
+        ("h2", 51826),
+        ("ws", 51821),
+        ("tcp", 51820),
+        ("http", 51823),
+        ("dns", 51824),
+    ]
+    .iter()
+    .map(|(scheme, port)| format!("{}://{}:{}@{}", scheme, host, port, pub_hex))
+    .collect()
+}
+
+/// Parse a `via_bridges_auto` spec — `host@<bridge-pubkey-hex>`,
+/// no scheme, no port. Used by both the expander above and
+/// by `validate()` so config-load errors are early + clear.
+///
+/// IPv6 literals are not supported in v1 (the `:` in
+/// `2001:db8::1` collides with port syntax in the generated
+/// URLs). For IPv6 targets, fall back to explicit
+/// `via_bridges` with bracketed-IPv6 URLs.
+fn parse_via_bridges_auto_spec(spec: &str) -> Result<(String, [u8; 32])> {
+    let (host, hex_pub) = spec.rsplit_once('@').ok_or_else(|| {
+        anyhow!(
+            "via_bridges_auto must be `<host>@<bridge-pubkey-hex>`, got {:?}",
+            spec
+        )
+    })?;
+    if host.contains("://") {
+        return Err(anyhow!(
+            "via_bridges_auto host must not include a scheme prefix; got {:?} \
+             (write just `host@<pub>`, drift-vpn fills in scheme + standard port)",
+            host
+        ));
+    }
+    // IPv6 detection by colon count: an IPv4 / hostname has at
+    // most one colon (for an explicit port, which we also
+    // reject below). IPv6 has multiple.
+    let colons = host.chars().filter(|c| *c == ':').count();
+    if colons > 1 {
+        return Err(anyhow!(
+            "via_bridges_auto doesn't support IPv6 literals yet (got {:?}); \
+             use explicit `via_bridges` with bracketed `[ipv6]:port` URLs",
+            host
+        ));
+    }
+    if host.contains(':') {
+        return Err(anyhow!(
+            "via_bridges_auto host must not include a port — drift-vpn uses \
+             standard per-scheme defaults (udp 51820, h2s 51827, …); got {:?}",
+            host
+        ));
+    }
+    let raw = hex::decode(hex_pub)
+        .with_context(|| format!("decoding via_bridges_auto pubkey {:?}", hex_pub))?;
+    if raw.len() != 32 {
+        return Err(anyhow!(
+            "via_bridges_auto pubkey must be 32 bytes (64 hex chars), got {}",
+            raw.len()
+        ));
+    }
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&raw);
+    Ok((host.to_string(), pk))
+}
+
 pub fn parse_bridge_spec(spec: &str) -> Result<(String, [u8; 32])> {
     let (url, hex_pub) = spec
         .rsplit_once('@')
@@ -810,6 +962,145 @@ via_bridges = ["malformed-no-scheme"]
             "expected error to mention via_bridges; got: {}",
             chain
         );
+    }
+
+    // ─── via_bridges_auto shorthand (v0.16) ──────────────────────
+
+    #[test]
+    fn expand_via_bridges_auto_produces_nine_candidates() {
+        let spec = format!("198.51.100.42@{}", BRIDGE_PUB_HEX);
+        let out = expand_via_bridges_auto(&spec);
+        // Should expand to nine scheme entries (the standard
+        // set minus webrtc and onion, both excluded by design).
+        assert_eq!(out.len(), 9, "got {:?}", out);
+        // Each must be a well-formed bridge spec parseable by
+        // the existing parse_bridge_spec.
+        for entry in &out {
+            parse_bridge_spec(entry)
+                .unwrap_or_else(|e| panic!("expanded entry {:?} should parse: {}", entry, e));
+        }
+        // First entry should be the default-best (udp) for
+        // bootstrap before the daemon's probe re-ranks.
+        assert!(out[0].starts_with("udp://"), "got {:?}", out[0]);
+    }
+
+    #[test]
+    fn expand_via_bridges_auto_uses_standard_ports() {
+        let spec = format!("example.com@{}", BRIDGE_PUB_HEX);
+        let out = expand_via_bridges_auto(&spec);
+        // Spot-check the canonical mappings against the router
+        // port-forward table.
+        let want = [
+            ("udp://", ":51820"),
+            ("webtransport://", ":51828"),
+            ("h2s://", ":51827"),
+            ("tls://", ":51822"),
+            ("h2://", ":51826"),
+            ("ws://", ":51821"),
+            ("tcp://", ":51820"),
+            ("http://", ":51823"),
+            ("dns://", ":51824"),
+        ];
+        for (scheme, port) in &want {
+            assert!(
+                out.iter().any(|e| e.starts_with(scheme) && e.contains(port)),
+                "no {} entry with port {} in {:?}",
+                scheme,
+                port,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn via_bridges_auto_rejects_scheme_prefix() {
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key       = "{peer}"
+allowed_ips      = ["10.0.0.2/32"]
+via_bridges_auto = "udp://198.51.100.42@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg.validate().expect_err("scheme prefix must fail");
+        let chain = format!("{:#}", err);
+        assert!(chain.contains("scheme prefix"), "chain: {}", chain);
+    }
+
+    #[test]
+    fn via_bridges_auto_rejects_explicit_port() {
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key       = "{peer}"
+allowed_ips      = ["10.0.0.2/32"]
+via_bridges_auto = "198.51.100.42:51820@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg.validate().expect_err("explicit port must fail");
+        let chain = format!("{:#}", err);
+        assert!(chain.contains("port"), "chain: {}", chain);
+    }
+
+    #[test]
+    fn via_bridges_auto_rejects_ipv6_literal() {
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key       = "{peer}"
+allowed_ips      = ["10.0.0.2/32"]
+via_bridges_auto = "2001:db8::1@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg.validate().expect_err("ipv6 must fail in v1");
+        let chain = format!("{:#}", err);
+        assert!(chain.contains("IPv6"), "chain: {}", chain);
+    }
+
+    #[test]
+    fn via_bridges_auto_combines_with_explicit_bridges() {
+        // Operator pins one explicit bridge as #1, lets the
+        // auto-expansion fill the rest.
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key       = "{peer}"
+allowed_ips      = ["10.0.0.2/32"]
+via_bridge       = "tls://127.0.0.1:51822@{bridge}"
+via_bridges_auto = "198.51.100.42@{bridge}"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        cfg.validate().expect("combined config must validate");
+        let list = cfg.peers[0].via_bridge_list();
+        // First entry is the explicit SSH-tunnel bridge.
+        assert!(list[0].starts_with("tls://127.0.0.1"), "got {:?}", list[0]);
+        // Remaining nine are the auto-expanded set against the
+        // public WAN IP.
+        assert_eq!(list.len(), 10, "got {:?}", list);
     }
 
     #[test]
