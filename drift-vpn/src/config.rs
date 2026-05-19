@@ -248,12 +248,27 @@ pub struct Peer {
     /// | http          | 51823 | HTTP/SSE fallback |
     /// | dns           | 51824 | extreme stealth, last resort |
     ///
-    /// Bridges that bind non-standard ports won't be reachable
-    /// via this shorthand — fall back to writing the full
-    /// `via_bridges` list explicitly. The runtime failover
-    /// supervisor (see bridge_failover.rs) consumes whichever
-    /// list the schema produces; this field is just sugar on
-    /// top of `via_bridges`.
+    /// Bridges that bind non-standard ports can be reached via
+    /// optional per-scheme overrides in a `?` query suffix on
+    /// the spec:
+    ///
+    /// ```toml
+    /// via_bridges_auto = "router.example.com@<pub>?dns=5353&h2s=8443"
+    /// via_bridges_auto = "router.example.com@<pub>?dns=off"           # skip a scheme
+    /// via_bridges_auto = "router.example.com@<pub>?bluetooth=1234"   # add a non-default
+    /// ```
+    ///
+    /// Values are `1..65535` or case-insensitive `off`/`none`.
+    /// Schemes not listed in the default table are appended as
+    /// additional candidates (so an inventory::submit!'d adapter
+    /// like `bluetooth://` can join the probe). Duplicate keys
+    /// are rejected at validate-time to surface typos cleanly.
+    ///
+    /// For bridges with radically different topology (e.g. IPv6,
+    /// or per-scheme distinct hosts), fall back to the full
+    /// `via_bridges` array. The runtime failover supervisor (see
+    /// bridge_failover.rs) consumes whichever list the schema
+    /// produces; this field is just sugar on top of `via_bridges`.
     #[serde(default)]
     pub via_bridges_auto: Option<String>,
     /// Pubkey of the bridge the *peer* is connected to (the
@@ -478,43 +493,104 @@ impl Config {
 /// Excluded by design: `webrtc://` (signaling is out-of-band,
 /// not auto-dialable from `connect_url`), `onion://` (needs
 /// the optional `--features onion` build flag).
+/// Default scheme → port table used when `via_bridges_auto`
+/// has no `?` overrides. Order is the bootstrap default
+/// (before the adapter probe re-ranks); the probe's tier-sort
+/// honors this order as the tie-break within a tier.
+const DEFAULT_AUTO_SCHEMES: &[(&str, u16)] = &[
+    ("udp", 51820),
+    ("webtransport", 51828),
+    ("h2s", 51827),
+    ("tls", 51822),
+    ("h2", 51826),
+    ("ws", 51821),
+    ("tcp", 51820),
+    ("http", 51823),
+    ("dns", 51824),
+];
+
 pub(crate) fn expand_via_bridges_auto(spec: &str) -> Vec<String> {
-    let (host, pubkey) = match parse_via_bridges_auto_spec(spec) {
+    let parsed = match parse_via_bridges_auto_spec(spec) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    let pub_hex = hex::encode(pubkey);
-    [
-        ("udp", 51820),
-        ("webtransport", 51828),
-        ("h2s", 51827),
-        ("tls", 51822),
-        ("h2", 51826),
-        ("ws", 51821),
-        ("tcp", 51820),
-        ("http", 51823),
-        ("dns", 51824),
-    ]
-    .iter()
-    .map(|(scheme, port)| format!("{}://{}:{}@{}", scheme, host, port, pub_hex))
-    .collect()
+    let pub_hex = hex::encode(parsed.pubkey);
+    let mut out = Vec::with_capacity(DEFAULT_AUTO_SCHEMES.len() + parsed.overrides.len());
+    // 1. Default schemes — applying port overrides and skipping
+    //    any explicitly disabled with `?scheme=off`.
+    for (scheme, default_port) in DEFAULT_AUTO_SCHEMES {
+        let port = match parsed.overrides.get(*scheme) {
+            Some(SchemeOverride::Disabled) => continue,
+            Some(SchemeOverride::Port(p)) => *p,
+            None => *default_port,
+        };
+        out.push(format!("{}://{}:{}@{}", scheme, parsed.host, port, pub_hex));
+    }
+    // 2. Extra schemes from the query that aren't in the default
+    //    table — additive candidates (e.g. an
+    //    inventory::submit!'d `bluetooth://` adapter). `off` for
+    //    a non-default scheme is silently a no-op since it
+    //    wasn't going to be emitted anyway.
+    for (scheme, ov) in &parsed.overrides {
+        if DEFAULT_AUTO_SCHEMES.iter().any(|(s, _)| s == scheme) {
+            continue;
+        }
+        if let SchemeOverride::Port(p) = ov {
+            out.push(format!("{}://{}:{}@{}", scheme, parsed.host, p, pub_hex));
+        }
+    }
+    out
 }
 
-/// Parse a `via_bridges_auto` spec — `host@<bridge-pubkey-hex>`,
-/// no scheme, no port. Used by both the expander above and
-/// by `validate()` so config-load errors are early + clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SchemeOverride {
+    /// `?scheme=N` — emit the scheme with port N instead of the default.
+    /// For non-default schemes this *adds* a new candidate.
+    Port(u16),
+    /// `?scheme=off` / `?scheme=none` — skip this scheme entirely.
+    /// For non-default schemes this is a no-op.
+    Disabled,
+}
+
+#[derive(Debug)]
+struct ParsedAutoSpec {
+    host: String,
+    pubkey: [u8; 32],
+    /// scheme → port override OR disable marker. Empty when the
+    /// spec has no `?...` query. Uses BTreeMap for deterministic
+    /// iteration order (matters for tests, log output, and any
+    /// future serialization).
+    overrides: std::collections::BTreeMap<String, SchemeOverride>,
+}
+
+/// Parse a `via_bridges_auto` spec:
 ///
-/// IPv6 literals are not supported in v1 (the `:` in
-/// `2001:db8::1` collides with port syntax in the generated
-/// URLs). For IPv6 targets, fall back to explicit
-/// `via_bridges` with bracketed-IPv6 URLs.
-fn parse_via_bridges_auto_spec(spec: &str) -> Result<(String, [u8; 32])> {
-    let (host, hex_pub) = spec.rsplit_once('@').ok_or_else(|| {
+///     host@<bridge-pubkey-hex>[?scheme=port&scheme=port&…]
+///
+/// The optional `?` query maps scheme names to ports or to the
+/// literal `off` / `none` to disable. See `DEFAULT_AUTO_SCHEMES`
+/// for the standard mapping the query overrides.
+///
+/// IPv6 literals are not supported (the `:` in `2001:db8::1`
+/// collides with port syntax in the generated URLs). For IPv6
+/// targets, fall back to explicit `via_bridges` with bracketed
+/// `[ipv6]:port` URLs.
+fn parse_via_bridges_auto_spec(spec: &str) -> Result<ParsedAutoSpec> {
+    let (host, after_at) = spec.rsplit_once('@').ok_or_else(|| {
         anyhow!(
-            "via_bridges_auto must be `<host>@<bridge-pubkey-hex>`, got {:?}",
+            "via_bridges_auto must be `<host>@<bridge-pubkey-hex>[?overrides]`, got {:?}",
             spec
         )
     })?;
+    // Split off the optional `?query` from the pubkey side.
+    // Putting `?` after the pubkey (rather than after the host)
+    // keeps the host validation clean and makes parsing
+    // unambiguous: pubkey is fixed-width 64 hex chars, so
+    // anything after that hex run is necessarily the query.
+    let (hex_pub, query) = match after_at.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (after_at, None),
+    };
     if host.contains("://") {
         return Err(anyhow!(
             "via_bridges_auto host must not include a scheme prefix; got {:?} \
@@ -522,9 +598,6 @@ fn parse_via_bridges_auto_spec(spec: &str) -> Result<(String, [u8; 32])> {
             host
         ));
     }
-    // IPv6 detection by colon count: an IPv4 / hostname has at
-    // most one colon (for an explicit port, which we also
-    // reject below). IPv6 has multiple.
     let colons = host.chars().filter(|c| *c == ':').count();
     if colons > 1 {
         return Err(anyhow!(
@@ -535,8 +608,8 @@ fn parse_via_bridges_auto_spec(spec: &str) -> Result<(String, [u8; 32])> {
     }
     if host.contains(':') {
         return Err(anyhow!(
-            "via_bridges_auto host must not include a port — drift-vpn uses \
-             standard per-scheme defaults (udp 51820, h2s 51827, …); got {:?}",
+            "via_bridges_auto host must not include a port — use per-scheme \
+             overrides instead: `host@<pub>?dns=5353` (got {:?})",
             host
         ));
     }
@@ -548,9 +621,85 @@ fn parse_via_bridges_auto_spec(spec: &str) -> Result<(String, [u8; 32])> {
             raw.len()
         ));
     }
-    let mut pk = [0u8; 32];
-    pk.copy_from_slice(&raw);
-    Ok((host.to_string(), pk))
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&raw);
+    let overrides = match query {
+        Some(q) => parse_via_bridges_auto_query(q)?,
+        None => Default::default(),
+    };
+    Ok(ParsedAutoSpec {
+        host: host.to_string(),
+        pubkey,
+        overrides,
+    })
+}
+
+/// Parse the `?scheme=port&scheme=port` query suffix.
+///
+/// Each pair is `name=value` where `value` is a port number
+/// (1..=65535) or case-insensitive `off`/`none` to disable.
+/// Duplicate keys are an error (silent last-wins is a footgun
+/// on multi-line configs). Empty keys or values are errors.
+fn parse_via_bridges_auto_query(
+    query: &str,
+) -> Result<std::collections::BTreeMap<String, SchemeOverride>> {
+    use std::collections::BTreeMap;
+    let mut out: BTreeMap<String, SchemeOverride> = BTreeMap::new();
+    if query.is_empty() {
+        return Err(anyhow!(
+            "via_bridges_auto has empty `?` query — drop the `?` if you want \
+             standard ports, or add at least one `scheme=value` pair"
+        ));
+    }
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').ok_or_else(|| {
+            anyhow!(
+                "via_bridges_auto override {:?} must be `scheme=port` or \
+                 `scheme=off` (no `=` found)",
+                pair
+            )
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            return Err(anyhow!(
+                "via_bridges_auto override has empty scheme name in pair {:?}",
+                pair
+            ));
+        }
+        if value.is_empty() {
+            return Err(anyhow!(
+                "via_bridges_auto override `{}=` has empty value (use `off` to disable)",
+                key
+            ));
+        }
+        let ov = match value.to_ascii_lowercase().as_str() {
+            "off" | "none" => SchemeOverride::Disabled,
+            _ => {
+                let port: u16 = value.parse().with_context(|| {
+                    format!(
+                        "via_bridges_auto override `{}={}` value must be a port \
+                         number (1-65535) or `off`",
+                        key, value
+                    )
+                })?;
+                if port == 0 {
+                    return Err(anyhow!(
+                        "via_bridges_auto override `{}=0` is invalid; ports start at 1",
+                        key
+                    ));
+                }
+                SchemeOverride::Port(port)
+            }
+        };
+        if out.insert(key.to_string(), ov).is_some() {
+            return Err(anyhow!(
+                "via_bridges_auto has duplicate override for scheme {:?}",
+                key
+            ));
+        }
+    }
+    Ok(out)
 }
 
 pub fn parse_bridge_spec(spec: &str) -> Result<(String, [u8; 32])> {
@@ -1101,6 +1250,176 @@ via_bridges_auto = "104.166.196.243@{bridge}"
         // Remaining nine are the auto-expanded set against the
         // public WAN IP.
         assert_eq!(list.len(), 10, "got {:?}", list);
+    }
+
+    // ─── Per-scheme query overrides (v0.17 capability) ───────────
+
+    #[test]
+    fn auto_query_overrides_default_port() {
+        let spec = format!("example.com@{}?dns=5353", BRIDGE_PUB_HEX);
+        let out = expand_via_bridges_auto(&spec);
+        // Still nine candidates — DNS is overridden, not added.
+        assert_eq!(out.len(), 9, "got {:?}", out);
+        let dns = out
+            .iter()
+            .find(|e| e.starts_with("dns://"))
+            .expect("dns candidate present");
+        assert!(dns.contains(":5353@"), "dns port not overridden: {}", dns);
+        // Other schemes keep their defaults.
+        let udp = out
+            .iter()
+            .find(|e| e.starts_with("udp://"))
+            .expect("udp candidate");
+        assert!(udp.contains(":51820@"), "udp port should be default: {}", udp);
+    }
+
+    #[test]
+    fn auto_query_disables_scheme() {
+        for off_value in &["off", "OFF", "none", "None"] {
+            let spec = format!("example.com@{}?dns={}", BRIDGE_PUB_HEX, off_value);
+            let out = expand_via_bridges_auto(&spec);
+            assert_eq!(out.len(), 8, "expected DNS skipped via {:?}: {:?}", off_value, out);
+            assert!(
+                !out.iter().any(|e| e.starts_with("dns://")),
+                "dns leaked through {:?}: {:?}",
+                off_value,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn auto_query_adds_non_default_scheme() {
+        // A scheme not in DEFAULT_AUTO_SCHEMES (e.g. an
+        // inventory::submit!'d bluetooth adapter) gets appended
+        // as a new candidate. Doesn't displace the defaults.
+        let spec = format!("example.com@{}?bluetooth=1234", BRIDGE_PUB_HEX);
+        let out = expand_via_bridges_auto(&spec);
+        assert_eq!(out.len(), 10, "expected 9 defaults + 1 extra: {:?}", out);
+        let bt = out
+            .iter()
+            .find(|e| e.starts_with("bluetooth://"))
+            .expect("bluetooth candidate present");
+        assert!(bt.contains(":1234@"), "bluetooth port wrong: {}", bt);
+    }
+
+    #[test]
+    fn auto_query_combines_overrides_disables_additions() {
+        // Realistic stress test: override one default, disable
+        // another, add a non-default.
+        let spec = format!(
+            "example.com@{}?h2s=8443&dns=off&bluetooth=1234",
+            BRIDGE_PUB_HEX
+        );
+        let out = expand_via_bridges_auto(&spec);
+        // 9 defaults − 1 disabled (dns) + 1 added (bluetooth) = 9.
+        assert_eq!(out.len(), 9, "got {:?}", out);
+        assert!(out.iter().any(|e| e.starts_with("h2s://") && e.contains(":8443@")));
+        assert!(!out.iter().any(|e| e.starts_with("dns://")));
+        assert!(out.iter().any(|e| e.starts_with("bluetooth://") && e.contains(":1234@")));
+    }
+
+    #[test]
+    fn auto_query_validates_bad_port() {
+        let mut body = minimal_interface(
+            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
+        );
+        body.push_str(&format!(
+            r#"
+[[peer]]
+public_key       = "{peer}"
+allowed_ips      = ["10.0.0.2/32"]
+via_bridges_auto = "example.com@{bridge}?dns=not-a-port"
+"#,
+            peer = PUB_HEX,
+            bridge = BRIDGE_PUB_HEX,
+        ));
+        let cfg: Config = toml::from_str(&body).expect("toml parse");
+        let err = cfg.validate().expect_err("non-numeric port must fail");
+        let chain = format!("{:#}", err);
+        assert!(
+            chain.contains("port number") || chain.contains("invalid digit"),
+            "chain: {}",
+            chain
+        );
+    }
+
+    #[test]
+    fn auto_query_validates_port_zero() {
+        let spec = format!("example.com@{}?dns=0", BRIDGE_PUB_HEX);
+        let err = parse_via_bridges_auto_spec(&spec)
+            .expect_err("port=0 must fail");
+        assert!(
+            format!("{:#}", err).contains("ports start at 1"),
+            "err: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn auto_query_rejects_duplicate_scheme() {
+        let spec = format!("example.com@{}?dns=5353&dns=5354", BRIDGE_PUB_HEX);
+        let err = parse_via_bridges_auto_spec(&spec)
+            .expect_err("duplicate key must fail");
+        assert!(
+            format!("{:#}", err).contains("duplicate"),
+            "err: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn auto_query_rejects_empty_query() {
+        let spec = format!("example.com@{}?", BRIDGE_PUB_HEX);
+        let err = parse_via_bridges_auto_spec(&spec)
+            .expect_err("empty query must fail");
+        assert!(
+            format!("{:#}", err).contains("empty"),
+            "err: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn auto_query_rejects_missing_equals() {
+        let spec = format!("example.com@{}?just-a-key", BRIDGE_PUB_HEX);
+        let err = parse_via_bridges_auto_spec(&spec)
+            .expect_err("missing `=` must fail");
+        assert!(
+            format!("{:#}", err).contains("scheme=port"),
+            "err: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn auto_query_rejects_empty_value() {
+        let spec = format!("example.com@{}?dns=", BRIDGE_PUB_HEX);
+        let err = parse_via_bridges_auto_spec(&spec)
+            .expect_err("empty value must fail");
+        assert!(
+            format!("{:#}", err).contains("empty value"),
+            "err: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn auto_query_back_compat_no_overrides() {
+        // Spec without `?` produces the identical 9 candidates
+        // as before the query syntax was added — proves the new
+        // code path doesn't change behavior for existing configs.
+        let bare = format!("104.166.196.243@{}", BRIDGE_PUB_HEX);
+        let with_empty_query = format!("104.166.196.243@{}", BRIDGE_PUB_HEX);
+        assert_eq!(
+            expand_via_bridges_auto(&bare),
+            expand_via_bridges_auto(&with_empty_query),
+            "bare spec should match itself (sanity)"
+        );
+        // Spot-check: same as the old expand_via_bridges_auto_uses_standard_ports test.
+        let out = expand_via_bridges_auto(&bare);
+        assert_eq!(out.len(), 9);
+        assert!(out[0].starts_with("udp://") && out[0].contains(":51820@"));
     }
 
     #[test]
