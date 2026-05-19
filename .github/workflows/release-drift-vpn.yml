@@ -31,6 +31,11 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    # Non-supported targets (currently Windows) set
+    # `optional: true` in the matrix and run with
+    # `continue-on-error` so a broken Windows build doesn't
+    # gate the release-attach job from running.
+    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,12 +65,30 @@ jobs:
           # them in 2023); Apple Silicon coverage handles the modern
           # macOS user base. If demand returns we can re-add with a
           # `if: ${{ inputs.with_intel_mac }}` gate.
+          # x86_64-pc-windows-msvc started failing somewhere
+          # between v0.14.0 (built clean) and v0.15.1 (broke and
+          # blocked v0.15.1 / v0.16.0 / v0.17.0 from publishing).
+          # Windows native isn't a supported target right now —
+          # the release notes already direct Windows users to
+          # WSL2 (where the Linux x86_64 binary works) — so
+          # making this job non-blocking matches the actual
+          # support matrix. continue-on-error means a Windows
+          # compile failure still surfaces in CI logs but
+          # doesn't gate the release artifacts the operator
+          # actually consumes.
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             ext: '.exe'
             archive: zip
+            optional: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # When invoked via workflow_dispatch, check out the
+          # `tag` input so re-runs build the right code rather
+          # than whatever's at HEAD. Push-triggered runs leave
+          # this empty and use the default ref (the tag itself).
+          ref: ${{ github.event.inputs.tag || '' }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
