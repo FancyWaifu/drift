@@ -250,112 +250,46 @@ pub async fn run(
     // table aligned with a single client session.
     let mut bridge_handles: std::collections::HashMap<String, (PeerId, [u8; 32])> =
         std::collections::HashMap::new();
-    // v0.1.2 fallback chain: register every entry in each peer's
-    // `via_bridge_list()` (single `via_bridge` + array
-    // `via_bridges` combined). Per-peer selection picks the
-    // first that establishes, but we pre-register all bridges so
-    // the selection check has something to test against. Bridges
-    // that never establish remain registered but unused.
+    // Collect every unique bridge spec across all peers' via_
+    // bridge_list (via_bridge + via_bridges + via_bridges_auto
+    // expansion). De-dup so we register each spec once even
+    // when multiple peers share a bridge.
+    let mut all_specs: Vec<String> = Vec::new();
     for peer_cfg in cfg.peers.iter() {
-        for spec_owned in peer_cfg.via_bridge_list() {
-            let spec = spec_owned.as_str();
-            if bridge_handles.contains_key(spec) {
-                continue;
+        for spec in peer_cfg.via_bridge_list() {
+            if !all_specs.contains(&spec) {
+                all_specs.push(spec);
             }
-        let (url, bridge_pub) = crate::config::parse_bridge_spec(spec)
-            .context("parsing via_bridge")?;
-        let scheme = url.split("://").next().unwrap_or("");
-
-        // Branch on scheme. UDP can reuse the daemon's existing
-        // listen socket (UDP is connectionless), so a bare
-        // `add_peer` is enough — sends to the bridge go out via the
-        // primary interface. For connection-oriented schemes
-        // (tcp, tls, ws, wss, http, https, onion, …) we have to
-        // open a dedicated outbound connection; `connect_federate`
-        // is the right primitive — it makes a connector, attaches
-        // it as an interface, registers the bridge peer, and pins
-        // the peer's interface_id to the new outbound. Whichever
-        // scheme the operator chose, drift's adapter registry
-        // dispatches it — works for every transport this drift
-        // build was compiled with. If the bridge doesn't actually
-        // accept that scheme (its `--listen` set doesn't include
-        // it), the connect will fail at startup with a clear
-        // adapter-level error.
-        let bridge_pid = if scheme == "udp" {
-            let addr = resolve_endpoint(&url)
-                .await
-                .with_context(|| format!("resolving bridge {}", url))?;
-            let pid = transport
-                .add_peer(bridge_pub, addr, Direction::Initiator)
-                .await
-                .with_context(|| format!("add_peer(bridge {})", url))?;
-            // Kick HELLO toward the bridge. UDP `add_peer` alone
-            // doesn't initiate a handshake; `send_data` does. We
-            // need the client↔bridge session Established before
-            // any `add_federated_peer` can carry envelopes.
-            let _ = transport.send_data(&pid, b".", 0, 0).await;
-            pid
-        } else {
-            // connect_federate opens the outbound connection, adds
-            // it as an interface, and pins the bridge peer to that
-            // interface. It also registers the bridge in our
-            // federation_table — semantically a little odd
-            // (drift-vpn isn't a peer bridge, just a client) but
-            // benign: drift-vpn doesn't accept FederationDirectory
-            // packets or relay traffic, so the entry is inert.
-            transport
-                .connect_federate(&url, bridge_pub)
-                .await
-                .with_context(|| format!("connect_federate({})", url))?
-        };
-            bridge_handles.insert(spec.to_string(), (bridge_pid, bridge_pub));
-            info!(
-                bridge = %url,
-                scheme = %scheme,
-                bridge_pub = %hex::encode(bridge_pub),
-                "bridge registered for via_bridge peer reach"
-            );
         }
     }
-    // Parallel adapter probe — measure each bridge's handshake
-    // time concurrently, then re-rank `bridge_specs` per peer
-    // by the measurement. The default order (`via_bridges_auto`
-    // expansion or `via_bridges` config order) is just the
-    // starting point; the probe captures the actual network
-    // reality (which wires are blocked, which are slow, which
-    // are fast). Without this, the daemon would pick whichever
-    // wire happened to be first in the config — wrong half the
-    // time on real-world networks.
+
+    // Parallel adapter probe: register + measure each bridge in
+    // the same task so the timing captures real connect +
+    // handshake cost. Without this interleaving, all bridges
+    // would handshake during the sequential register loop
+    // (~10 ms each on LAN), and the subsequent probe would
+    // observe `is_established=true` for everything with
+    // microsecond timing — bogus ranking.
     //
-    // Why parallel: 9 candidates × 5 s sequential = 45 s
-    // startup. Parallel = ≤ 8 s total (the PROBE_DEADLINE).
-    //
-    // Probes also drive HELLO retransmits — the prober's
-    // `peer_is_established` poll spins fast enough to retrigger
-    // the cookie path when needed. We don't need the separate
-    // probe-retransmit loop the sequential version had.
-    let probe_candidates: Vec<(String, PeerId)> = bridge_handles
-        .iter()
-        .map(|(spec, (pid, _))| (spec.clone(), *pid))
-        .collect();
-    let probe_results = if probe_candidates.is_empty() {
+    // Wall-clock bounded by PROBE_DEADLINE (8 s), not N × per-
+    // bridge time, since all probes run concurrently.
+    let probe_results = if all_specs.is_empty() {
         Vec::new()
     } else {
-        // Kick HELLO toward each bridge before probing so the
-        // handshake is actually in motion. UDP `add_peer`
-        // doesn't initiate a handshake on its own; connect_url
-        // does. Touching every bridge with a single probe byte
-        // ensures all are mid-handshake when the prober starts
-        // measuring.
-        for (_spec, (bridge_pid, _)) in &bridge_handles {
-            let _ = transport.send_data(bridge_pid, b".", 0, 0).await;
-        }
-        crate::adapter_probe::probe_and_rank(
-            transport.clone(),
-            probe_candidates,
-        )
-        .await
+        crate::adapter_probe::register_and_probe(transport.clone(), all_specs).await
     };
+
+    // Build bridge_handles from probe results: spec → (PeerId,
+    // bridge_pub). Skip entries whose register step failed
+    // outright (bridge_pid = zero bytes). Entries that
+    // registered but didn't reach Established are kept — the
+    // supervisor uses them as fallbacks the watchdog can poll.
+    for m in &probe_results {
+        if m.bridge_pid == [0u8; 8] {
+            continue;
+        }
+        bridge_handles.insert(m.spec.clone(), (m.bridge_pid, m.bridge_pub));
+    }
 
     // Build a rank-lookup: spec → index in measured order.
     // Failed (un-handshaked) entries sort last in the probe
