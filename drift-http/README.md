@@ -52,13 +52,17 @@ drift-http serve --root /var/www \
 
 Any DRIFT transport adapter can stand in for `--bind`. The
 full set of live-validated schemes is **udp / tcp / ws / tls
-/ http / dns** — `tls://` for proxies that demand encrypted
-egress, `http://` for environments where WebSocket upgrades
-get stripped, `dns://` for the truly hostile networks where
-only DNS queries get through. (`tls://` auto-generates a
-self-signed cert; clients use `NoCertVerifier` since DRIFT
-authenticates internally — the TLS layer is only there to
-look like HTTPS on the wire.)
+/ http / dns / h2 / h2s / webtransport** — `tls://` for
+proxies that demand encrypted egress, `http://` for
+environments where WebSocket upgrades get stripped, `dns://`
+for the truly hostile networks where only DNS queries get
+through, `h2://` / `h2s://` for federation-grade HTTPS-shaped
+links, `webtransport://` for QUIC + HTTP/3. (`tls://` and
+`h2s://` auto-generate a self-signed cert; clients use
+`NoCertVerifier` since DRIFT authenticates internally — the
+TLS layer is only there to look like HTTPS on the wire.
+`webtransport://` prints the cert SHA-256 to stderr so
+browser-side clients can pin it.)
 
 Banner on stdout:
 ```
@@ -221,8 +225,12 @@ cargo test -p drift-http --lib
 | UDP | ✅ | ✅ | Default; lowest latency |
 | TCP | ✅ | ✅ | Corporate-firewall fallback |
 | WebSocket | ✅ | ✅ | Port-443 friendly, HTTP-proxy traversable |
+| TLS | ✅ | ✅ | TCP wrapped in TLS — looks like HTTPS to middleboxes |
+| HTTP/SSE | ✅ | ✅ | Last-resort fallback when WS upgrades are stripped |
+| h2 (HTTP/2 cleartext) | ✅ | ✅ | One TCP + bidi stream pair carrying DRIFT packets |
+| h2s (HTTP/2 over TLS) | ✅ | ✅ | Same as `h2://` with ALPN=h2; federation-grade HTTPS |
+| WebTransport | ✅ | ✅ | QUIC + HTTP/3; ECDSA-P256 self-signed cert with stderr SHA-256 hash for browser pinning |
 | WebRTC | ⏳ | ⏳ | Adapter exists in drift, no URL dispatch yet (signaling out-of-band) |
-| WebTransport | ⏳ | ⏳ | Adapter exists in drift, no URL dispatch yet (TLS cert handoff out-of-band) |
 
 When drift core gains a URL-dispatchable adapter (via `inventory::submit!` in any crate), drift-http picks it up automatically — no edits needed here.
 

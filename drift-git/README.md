@@ -30,7 +30,7 @@ drift[+<scheme>]://<64-hex-pubkey>@<host>:<port>/<repo-path>
 - `<host>:<port>` — DRIFT wire endpoint (server, or bridge if mesh-routed)
 - `<repo-path>` — repo on the server, resolved relative to the server's `--root`
 
-The `+<scheme>` suffix selects the underlying transport. Bare `drift://` defaults to UDP. Currently supported:
+The `+<scheme>` suffix selects the underlying transport. Bare `drift://` defaults to UDP. `DriftGitUrl::parse` dispatches `drift+<scheme>://` through DRIFT's registry-based URL dispatcher — any registered scheme works. Live-validated:
 
 | URL prefix | Underlying DRIFT adapter |
 |---|---|
@@ -38,13 +38,16 @@ The `+<scheme>` suffix selects the underlying transport. Bare `drift://` default
 | `drift+tcp://` | `tcp://` (length-prefixed) |
 | `drift+tls://` | `tls://` (TCP wrapped in TLS — looks like HTTPS to middleboxes) |
 | `drift+ws://` | `ws://` (WebSocket — survives HTTP-only proxies) |
-
-Future prefixes: `drift+http://` (Server-Sent Events fallback), `drift+onion://` (Tor hidden services). Both work today on the underlying DRIFT layer; the URL prefix glue is one-line additions to `DriftGitUrl::parse`.
+| `drift+http://` | `http://` (Server-Sent Events fallback for WS-stripping proxies) |
+| `drift+h2://` | `h2://` (HTTP/2 cleartext, bidi stream pair) |
+| `drift+h2s://` | `h2s://` (HTTP/2 over TLS, ALPN=h2 — federation-grade HTTPS) |
+| `drift+webtransport://` | `webtransport://` (QUIC + HTTP/3) |
+| `drift+onion://` | `onion://` (Tor hidden services; opt-in via `--features onion`) |
 
 For the helper to use a non-UDP scheme, git needs a corresponding `git-remote-<scheme>` entry on PATH. A single binary serves all schemes via symlinks (the same trick `git-remote-https` uses for both `http://` and `https://`):
 
 ```bash
-for s in drift+tcp drift+tls drift+ws; do
+for s in drift+tcp drift+tls drift+ws drift+http drift+h2 drift+h2s drift+webtransport; do
     ln -s git-remote-drift /path/to/git-remote-$s
 done
 ```
@@ -101,7 +104,7 @@ DRIFT_GIT_BRIDGE_PUB=<hex>        Bridge's pubkey. Required when DRIFT_GIT_BRIDG
 
 - **No SSH keys.** Client identity is X25519, server ACL is a list of pubkeys.
 - **No DNS.** The `<host>:<port>` is the wire-level address. The user identifies the *server* by its 64-char pubkey, not by hostname.
-- **Multi-transport, eventually.** v1 hardcodes UDP; once we add `drift+tls://` and `drift+onion://` URL prefixes, the same `git push` works through HTTPS-only proxies and over Tor.
+- **Multi-transport.** The same `git push` URL works through any DRIFT wire — `drift+tls://` for HTTPS-only proxies, `drift+h2s://` for federation-grade HTTPS, `drift+webtransport://` for QUIC, `drift+onion://` for Tor. Pick the wire that survives the network you're on.
 - **Mobility.** Server's IP changes (laptop → coffee shop → home) and the URL stays the same identity — only the `@host:port` part needs updating.
 
 ## Limitations

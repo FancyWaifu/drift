@@ -78,10 +78,10 @@ Stacked, these defeat bulk traffic analysis: transit bridges see only hashed tar
 ### Open work
 
 - **drift-vpn Windows daemon** (Wintun) — pre-existing pending task, never started.
-- **Browser test harness** (chromedriver / playwright) — only way to fully exercise the WASM `ws_stream` / `webrtc` / `webtransport` adapters end-to-end.
+- **Browser test harness shipped** — `drift-wasm/test/browser/` runs Playwright across Chromium / Firefox / WebKit for the WS, HTTP, WebTransport, and WebRTC adapters against a real `drift bridge` subprocess on ephemeral ports.
 - **drift-mosh-client WASM build** — would give an in-browser remote shell with no system install, riding on the cross-stack story this session validated.
 - **PIR-based "high-privacy" lookup mode** — lattice-based homomorphic PIR for the case where you can't trust even the answering bridge. See the trade-off discussion in [`FEDERATION_DISCOVERY.md`](FEDERATION_DISCOVERY.md).
-- **`webtransport://` / `webrtc://` URL schemes** — currently programmatic-only adapters on the native side; adding CLI-accessible schemes needs a QUIC server stack for WT and a signaling protocol for WebRTC. ~1 day each.
+- **`webrtc://` URL scheme** — currently programmatic-only on the native side; adding a CLI-accessible scheme needs a signaling protocol. (`webtransport://` shipped as a CLI scheme in the federation-backbone arc — see below.)
 
 ### Test totals after this work
 
@@ -109,7 +109,7 @@ Plus three Docker harnesses (`federation-discovery`, `federation-triangle`, `two
 
 **Federation** — Matrix/XMPP-style bridge-to-bridge forwarding for the cases where mesh discovery doesn't fit: explicit `--federate` links between bridges plus pubkey-addressed envelopes (`PacketType::Federated`) that target a `(remote_bridge_pub, remote_client_pub)` tuple. Bridges see ciphertext only; end-to-end crypto stays between the real client endpoints. Heterogeneous-transport chains work end-to-end — UDP client → TCP federation link → WebSocket client (and any other permutation across UDP / TCP / TLS / WS) all share the same envelope.
 
-**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebSocketStream (Chromium-only, automatic backpressure), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), plain HTTP/SSE (`GET /drift-sse` downstream + `POST /drift-send` per-packet upstream — fallback for proxies that strip WS upgrades), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), WebTransport (QUIC/HTTP3, UDP-like datagrams in the browser), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
+**Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebSocketStream (Chromium-only, automatic backpressure), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), plain HTTP/SSE (`GET /drift-sse` downstream + `POST /drift-send` per-packet upstream — fallback for proxies that strip WS upgrades), HTTP/2 cleartext (`h2://` — one TCP + one HTTP/2 bidi stream pair carrying length-prefixed DRIFT packets), HTTP/2 over TLS (`h2s://` — same as `h2://` with ALPN=h2, federation-grade over HTTPS), WebTransport (`webtransport://` — QUIC + HTTP/3, one DRIFT packet per QUIC datagram, native CLI-accessible and browser-shipping), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
 
 **Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
 
@@ -156,9 +156,12 @@ drift/           native tokio-based stack built on drift-core
     lib.rs           Transport re-exports
     main.rs          `drift` CLI (keygen, info, send, listen, relay, bridge)
     io.rs            PacketIO + Listener traits, UDP / TCP / WebSocket / TLS /
-                       WebRTC / WebTransport / Memory adapters, inventory-based
-                       scheme registry (Transport::bind_url / connect_url /
-                       add_listener)
+                       Memory adapters, inventory-based scheme registry
+                       (Transport::bind_url / connect_url / add_listener).
+                       h2://, h2s://, webtransport://, webrtc://, http://,
+                       dns://, doh://, onion:// each live in their own
+                       wire_*.rs file and self-register through the same
+                       inventory.
     cli/bridge.rs    `drift bridge` runner; --listen (repeatable) +
                        --federate <url>@<pub> (repeatable) for cross-
                        bridge client routing via Transport::connect_federate
@@ -192,7 +195,8 @@ drift/           native tokio-based stack built on drift-core
       resumption.rs  1-RTT PSK session resumption
       rtt.rs         Ping/Pong RTT measurement
       ecn.rs         ECN marking + CE feedback
-      batch.rs       sendmmsg batching (Linux)
+      batch.rs       sendmmsg + UDP_SEGMENT (GSO) sender, UDP_GRO receiver
+                       (Linux); single-send fallback on other platforms
       qlog.rs        Structured NDJSON event logging
 
 drift-wasm/      browser-side stack, same drift-core compiled to wasm32

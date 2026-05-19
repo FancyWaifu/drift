@@ -63,11 +63,17 @@ Options:
       --no-ssh                Skip SSH launch; connect to a server you started manually
       --server-pub <HEX>      Server pubkey (required with --no-ssh)
       --server-addr <ADDR>    Server address. Bare host:port = UDP (default).
-                              Scheme prefix selects transport:
-                                udp://host:port  (UDP, the default)
-                                tcp://host:port  (TCP — firewalled networks)
-                                ws://host:port   (WebSocket)
-                                tls://host:port  (TLS-wrapped TCP)
+                              Scheme prefix selects transport — any DRIFT
+                              wire works since both client and server go
+                              through Transport::connect_url / bind_url:
+                                udp://host:port            (UDP, the default)
+                                tcp://host:port            (TCP — firewalled networks)
+                                ws://host:port             (WebSocket)
+                                tls://host:port            (TLS-wrapped TCP)
+                                http://host:port           (HTTP/SSE — fallback)
+                                h2://host:port             (HTTP/2 cleartext)
+                                h2s://host:port            (HTTP/2 over TLS, ALPN=h2)
+                                webtransport://host:port   (QUIC + HTTP/3)
       --bridge <URL@PUB>      Reach the server through a DRIFT bridge instead
                               of a direct connection. URL is the bridge's
                               listen URL; PUB is its pubkey.
