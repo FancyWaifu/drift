@@ -448,6 +448,19 @@ pub async fn run(
             peer_id: peer_pid,
             allowed_ips: peer_cfg.allowed_ips.clone(),
         });
+        // Classify the peer for status display: direct
+        // endpoints → Direct; via_bridge → Federation;
+        // neither → Mesh. The classification only affects how
+        // `drift-vpn status` renders this peer (so the
+        // federation case doesn't look misleadingly "pending
+        // tx=0 rx=0"). Internal routing is identical.
+        let peer_kind = if !peer_cfg.endpoint_list().is_empty() {
+            crate::status::PeerKind::Direct
+        } else if peer_cfg.via_bridge.is_some() {
+            crate::status::PeerKind::Federation
+        } else {
+            crate::status::PeerKind::Mesh
+        };
         known_peers.push(KnownPeer {
             peer_id: peer_pid,
             pubkey: peer_pub,
@@ -456,6 +469,7 @@ pub async fn run(
                 .iter()
                 .map(|n| n.to_string())
                 .collect(),
+            kind: peer_kind,
         });
 
         // v0.6: collect supervisor state per multi-endpoint
