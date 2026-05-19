@@ -147,10 +147,31 @@ jobs:
     # release job just uploads artifacts — runner version doesn't
     # affect any binary it ships, so ubuntu-latest is fine here.
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/drift-vpn-v')
+    # Run when: (a) push triggered by a drift-vpn-v* tag, OR
+    # (b) workflow_dispatch (manual re-run for a specific tag).
+    # The dispatch case is the supported way to rebuild a release
+    # after fixing CI without re-tagging.
+    if: startsWith(github.ref, 'refs/tags/drift-vpn-v') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     steps:
+      - name: Resolve target tag
+        id: tag
+        shell: bash
+        run: |
+          # On push-by-tag: github.ref_name is "drift-vpn-vX.Y.Z".
+          # On workflow_dispatch: github.ref_name is "main" (the
+          # ref the workflow was dispatched against), so we fall
+          # back to the explicit `tag` input that the operator
+          # supplied when triggering the run.
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Target release tag: $TAG"
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -158,11 +179,16 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          # Explicit tag_name: when dispatched from main, the
+          # action would otherwise create a release on `main`,
+          # which is wrong. The Resolve step above figures out
+          # the right tag regardless of trigger type.
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
           generate_release_notes: true
-          name: drift-vpn ${{ github.ref_name }}
+          name: drift-vpn ${{ steps.tag.outputs.tag }}
           body: |
             Pre-built drift-vpn binaries.
 
