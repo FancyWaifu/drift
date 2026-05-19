@@ -33,7 +33,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Result<()> {
+pub async fn run(
+    cfg: Config,
+    identity: Identity,
+    status_socket: PathBuf,
+    force_cleanup: bool,
+) -> Result<()> {
     let our_pubkey = identity.public_bytes();
     let our_pid = identity.peer_id();
     info!(
@@ -49,6 +54,43 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
     // 1. TUN device.
     let mut tun_cfg = tun::Configuration::default();
     let addr = cfg.interface.address.addr();
+
+    // SEC.STARTUP.1 — refuse to start if another TUN-family
+    // interface already claims our configured address. This is
+    // the orphan-TUN-from-prior-run footgun: a previous
+    // drift-vpn (possibly SIGKILL'd, or just an unclean exit)
+    // can leave behind a utun/tun device with our address +
+    // a 10.X.0.0/24 route pointing at it. Creating a fresh
+    // device on top doesn't take the route (kernel keeps the
+    // existing one), so outbound packets silently vanish into
+    // the dead interface. Detect + refuse + ask user to
+    // confirm — or override with `--force-cleanup`.
+    let conflicting = find_conflicting_tun_interfaces(addr);
+    if !conflicting.is_empty() {
+        if force_cleanup {
+            warn!(
+                address = %addr,
+                conflicts = ?conflicting,
+                "starting despite conflicting TUN interface(s) holding our address (--force-cleanup set)"
+            );
+        } else {
+            return Err(anyhow!(
+                "address {} is already assigned to existing TUN interface(s): {}. \
+                 These are likely orphan devices from a previous drift-vpn run that \
+                 didn't shut down cleanly — routing for the configured subnet may \
+                 point at the orphan, silently dropping traffic.\n\n\
+                 Cleanup:\n\
+                 \x20  1. `sudo killall drift-vpn` (kills any leftover drift-vpn process)\n\
+                 \x20  2. On Linux: `sudo ip link delete <iface>` for each listed interface\n\
+                 \x20     On macOS: utun devices can't be destroyed once orphaned; \n\
+                 \x20     the only fix is a reboot, OR pass `--force-cleanup` and \n\
+                 \x20     accept that the routing table may need manual fixup with \n\
+                 \x20     `sudo route delete -net <cidr>`.",
+                addr,
+                conflicting.join(", ")
+            ));
+        }
+    }
     let netmask = match cfg.interface.address {
         ipnet::IpNet::V4(n) => n.netmask().to_string(),
         ipnet::IpNet::V6(_) => {
@@ -834,6 +876,223 @@ pub async fn run(cfg: Config, identity: Identity, status_socket: PathBuf) -> Res
 /// virtualization). Reading back with `-k` and checking each
 /// flag catches those silent failures.
 ///
+/// Returns the names of TUN-family interfaces (utun* on macOS,
+/// tun*/tap* on Linux) that already have `wanted_addr` assigned.
+///
+/// Used at startup to detect orphan TUN devices from prior
+/// drift-vpn runs that didn't clean up properly. If we don't
+/// catch this, the kernel keeps the orphan's route for the
+/// configured subnet, and our freshly-created TUN silently
+/// fails to receive any outbound traffic.
+///
+/// Best-effort: shells out to `ifconfig` (macOS) or `ip addr`
+/// (Linux) and parses the text. If the command is missing or
+/// fails, returns empty (skips the check rather than blocking
+/// startup). The cost is negligible (one fork+exec at daemon
+/// boot) and avoids pulling in a netlink/getifaddrs dep.
+fn find_conflicting_tun_interfaces(wanted_addr: std::net::IpAddr) -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        find_conflicting_tun_macos(wanted_addr)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        find_conflicting_tun_linux(wanted_addr)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = wanted_addr;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_conflicting_tun_macos(wanted_addr: std::net::IpAddr) -> Vec<String> {
+    let output = match std::process::Command::new("ifconfig").arg("-a").output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    parse_ifconfig_for_addr(&String::from_utf8_lossy(&output), wanted_addr)
+}
+
+/// Parse macOS `ifconfig -a` output for TUN-family interfaces
+/// holding `wanted_addr`. Pure function, kept separate so the
+/// parser can be unit-tested against canned fixtures without
+/// shelling out.
+///
+/// `ifconfig -a` output shape (relevant subset):
+///
+///   utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1200
+///         inet 10.99.0.2 --> 10.0.0.255 netmask 0xffffff00
+///   utun6: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1200
+///         inet 10.99.0.2 --> 10.0.0.255 netmask 0xffffff00
+///
+/// Interface header starts at column 0; sub-lines are
+/// whitespace-indented. Only TUN-family names (utun*, tun*)
+/// are checked; we ignore en0/lo0/etc.
+#[allow(dead_code)] // also exercised in tests via direct call
+fn parse_ifconfig_for_addr(text: &str, wanted_addr: std::net::IpAddr) -> Vec<String> {
+    let wanted_str = wanted_addr.to_string();
+    let mut conflicts = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            if let Some(name) = line.split(':').next() {
+                current = if name.starts_with("utun") || name.starts_with("tun") {
+                    Some(name.to_string())
+                } else {
+                    None
+                };
+            }
+            continue;
+        }
+        if let Some(iface) = &current {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("inet ") {
+                let addr_str = rest.split_whitespace().next().unwrap_or("");
+                if addr_str == wanted_str && !conflicts.contains(iface) {
+                    conflicts.push(iface.clone());
+                }
+            }
+        }
+    }
+    conflicts
+}
+
+#[cfg(target_os = "linux")]
+fn find_conflicting_tun_linux(wanted_addr: std::net::IpAddr) -> Vec<String> {
+    let output = match std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    parse_ip_addr_show_for_addr(&String::from_utf8_lossy(&output), wanted_addr)
+}
+
+/// Parse Linux `ip -o -4 addr show` output for TUN-family
+/// interfaces holding `wanted_addr`. Pure function for testing.
+///
+/// Output shape (one line per address):
+///
+///   1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever ...
+///   332: tun0    inet 10.99.0.1/24 scope global tun0\       ...
+///
+/// Field [1] is `iface:`, field [3] is `<addr>/<prefix>`.
+#[allow(dead_code)]
+fn parse_ip_addr_show_for_addr(text: &str, wanted_addr: std::net::IpAddr) -> Vec<String> {
+    let wanted_str = wanted_addr.to_string();
+    let mut conflicts = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let iface = fields[1].trim_end_matches(':');
+        if !(iface.starts_with("tun") || iface.starts_with("tap")) {
+            continue;
+        }
+        let cidr = fields[3];
+        if let Some(addr_part) = cidr.split('/').next() {
+            if addr_part == wanted_str
+                && !conflicts.iter().any(|s: &String| s == iface)
+            {
+                conflicts.push(iface.to_string());
+            }
+        }
+    }
+    conflicts
+}
+
+#[cfg(test)]
+mod conflict_detection_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    #[test]
+    fn macos_parser_finds_one_conflicting_utun() {
+        let text = "\
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 192.168.1.50 netmask 0xffffff00 broadcast 192.168.1.255
+utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1200
+\tinet 10.99.0.2 --> 10.0.0.255 netmask 0xffffff00
+";
+        let want: IpAddr = "10.99.0.2".parse().unwrap();
+        assert_eq!(parse_ifconfig_for_addr(text, want), vec!["utun5"]);
+    }
+
+    #[test]
+    fn macos_parser_finds_multiple_conflicting_utuns() {
+        // The bug we hit: drift-vpn started on utun5 + the orphan,
+        // then on utun6 because utun5 was still alive. Both held
+        // 10.99.0.2 simultaneously.
+        let text = "\
+utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1202
+\tinet 10.99.0.2 --> 10.0.0.255 netmask 0xffffff00
+utun6: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1200
+\tinet 10.99.0.2 --> 10.0.0.255 netmask 0xffffff00
+";
+        let want: IpAddr = "10.99.0.2".parse().unwrap();
+        assert_eq!(parse_ifconfig_for_addr(text, want), vec!["utun5", "utun6"]);
+    }
+
+    #[test]
+    fn macos_parser_ignores_non_tun_interfaces() {
+        // en0 having the wanted address shouldn't match — we
+        // only care about TUN-family conflicts.
+        let text = "\
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 10.99.0.2 netmask 0xffffff00
+";
+        let want: IpAddr = "10.99.0.2".parse().unwrap();
+        assert!(parse_ifconfig_for_addr(text, want).is_empty());
+    }
+
+    #[test]
+    fn macos_parser_returns_empty_when_no_conflict() {
+        let text = "\
+utun5: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1200
+\tinet 10.42.0.1 --> 10.0.0.255 netmask 0xffffff00
+";
+        let want: IpAddr = "10.99.0.2".parse().unwrap();
+        assert!(parse_ifconfig_for_addr(text, want).is_empty());
+    }
+
+    #[test]
+    fn linux_parser_finds_conflicting_tun() {
+        let text = "\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+332: tun0    inet 10.99.0.1/24 scope global tun0\\       valid_lft forever preferred_lft forever
+";
+        let want: IpAddr = "10.99.0.1".parse().unwrap();
+        assert_eq!(parse_ip_addr_show_for_addr(text, want), vec!["tun0"]);
+    }
+
+    #[test]
+    fn linux_parser_ignores_non_tun_interfaces() {
+        let text = "\
+2: eth0    inet 10.99.0.1/24 scope global eth0\\       valid_lft forever preferred_lft forever
+";
+        let want: IpAddr = "10.99.0.1".parse().unwrap();
+        assert!(parse_ip_addr_show_for_addr(text, want).is_empty());
+    }
+
+    #[test]
+    fn linux_parser_dedupes_repeat_listings() {
+        // Same iface listed twice (rare but possible with
+        // multiple addr families) shouldn't double-count.
+        let text = "\
+1: tun0    inet 10.99.0.1/24 scope global tun0\\       valid_lft forever
+1: tun0    inet 10.99.0.1/32 scope global tun0\\       valid_lft forever
+";
+        let want: IpAddr = "10.99.0.1".parse().unwrap();
+        assert_eq!(parse_ip_addr_show_for_addr(text, want), vec!["tun0"]);
+    }
+}
+
 /// Best-effort: if `ethtool` isn't available, log and continue.
 /// Verification mismatches log at WARN with a hint pointing
 /// at `ethtool -k` so operators can investigate.

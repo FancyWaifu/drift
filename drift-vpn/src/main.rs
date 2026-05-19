@@ -47,6 +47,18 @@ enum Cmd {
         /// path) or for tests.
         #[clap(long)]
         status_socket: Option<PathBuf>,
+        /// Skip the startup check that aborts when another TUN
+        /// interface already claims our configured address.
+        /// Useful when the orphan interface is known-stale and
+        /// can't be torn down (utun on macOS can't be deleted
+        /// after its owner dies; only `drift-vpn cleanup` or a
+        /// reboot frees it). Proceeding past the conflict means
+        /// the routing-table entry for the configured subnet
+        /// may end up on the stale interface, silently dropping
+        /// traffic — set this flag only after `drift-vpn status`
+        /// on the conflicting iface confirms it's really dead.
+        #[clap(long)]
+        force_cleanup: bool,
     },
     /// Generate a fresh identity keypair, write the secret
     /// to `--out`, and print the pubkey hex to stdout.
@@ -241,17 +253,18 @@ async fn main() -> Result<()> {
         Cmd::Up {
             config: path,
             status_socket,
+            force_cleanup,
         } => {
             #[cfg(unix)]
             {
                 let cfg = config::Config::load(&path).await?;
                 let id = identity::load(&cfg.interface.identity_file).await?;
                 let sock = status_socket.unwrap_or_else(status::default_socket_path);
-                daemon::run(cfg, id, sock).await?;
+                daemon::run(cfg, id, sock, force_cleanup).await?;
             }
             #[cfg(not(unix))]
             {
-                let _ = (path, status_socket);
+                let _ = (path, status_socket, force_cleanup);
                 anyhow::bail!(
                     "drift-vpn `up` requires a Unix-like OS for TUN/utun support \
                      (Linux + macOS today; Windows Wintun support is on the roadmap). \
