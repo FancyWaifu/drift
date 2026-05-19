@@ -99,6 +99,19 @@ enum Cmd {
         /// Path to TOML config.
         #[clap(short, long, default_value = "/etc/drift-vpn/config.toml")]
         config: PathBuf,
+        /// In addition to the static preflight checks, actually
+        /// attempt a handshake against each configured peer /
+        /// bridge. Briefly stands up a no-TUN Transport, calls
+        /// connect_url + add_peer, waits up to ~5s for the
+        /// session to reach Established, then tears down. Will
+        /// surface "bridge unreachable" / "peer offline" /
+        /// pubkey-mismatch failures that static checks miss.
+        ///
+        /// Read-only with respect to system state (no TUN
+        /// created, no routes added). Does not need the daemon
+        /// running.
+        #[clap(long)]
+        probe: bool,
     },
 
     /// Install drift-vpn as a managed system service: writes a
@@ -289,17 +302,17 @@ async fn main() -> Result<()> {
                 anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
             }
         }
-        Cmd::Doctor { config: path } => {
+        Cmd::Doctor { config: path, probe } => {
             #[cfg(unix)]
             {
-                let all_pass = doctor::run(&path).await?;
+                let all_pass = doctor::run(&path, probe).await?;
                 if !all_pass {
                     std::process::exit(1);
                 }
             }
             #[cfg(not(unix))]
             {
-                let _ = path;
+                let _ = (path, probe);
                 anyhow::bail!(
                     "drift-vpn doctor requires a Unix-like OS (Linux + macOS today)"
                 );
