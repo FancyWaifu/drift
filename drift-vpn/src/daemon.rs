@@ -945,29 +945,35 @@ struct WatchdogPeer {
     kind: &'static str,
 }
 
-/// Periodic watchdog that logs WARN-level diagnostics for any
-/// peer that hasn't reached Established. First warning fires
-/// 30 s after startup; thereafter re-warns every 60 s while the
-/// peer stays unestablished. Established peers are silent.
+/// Periodic watchdog that logs diagnostics for any peer that
+/// hasn't reached Established. Severity escalates with time:
 ///
-/// The error message names the configured pubkey + the top
-/// failure modes operators actually hit, so a "I configured
-/// drift-vpn and ping doesn't work" investigation gets a usable
-/// starting point inside one minute instead of zero.
+///   * 30 s unestablished → first WARN (recurring every 60 s)
+///   * 5 min unestablished → escalate to ERROR (recurring every
+///     5 min) so log-level filters and alerting pipelines catch
+///     it. The original WARN-only schedule was easy to miss in
+///     `journalctl --priority=err` or any monitoring rule keyed
+///     on log severity. Bridges or peers that have been broken
+///     for minutes deserve an ERROR.
+///
+/// Established peers are silent. Recovery (back to Established)
+/// clears the per-peer warn schedule and re-arms it from scratch
+/// if the peer drops again.
 async fn run_unestablished_watchdog(
     transport: Arc<Transport>,
     peers: Vec<WatchdogPeer>,
 ) {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+    use tracing::error;
 
     const TICK: Duration = Duration::from_secs(10);
     const FIRST_WARN_AFTER: Duration = Duration::from_secs(30);
     const REWARN_EVERY: Duration = Duration::from_secs(60);
+    const ESCALATE_TO_ERROR_AFTER: Duration = Duration::from_secs(5 * 60);
+    const REWARN_ERROR_EVERY: Duration = Duration::from_secs(5 * 60);
 
     let start = Instant::now();
-    // Per-peer next-warn deadline. Absent => no warn issued yet
-    // (use start + FIRST_WARN_AFTER as the initial target).
     let mut next_warn: HashMap<PeerId, Instant> = HashMap::new();
 
     loop {
@@ -975,34 +981,59 @@ async fn run_unestablished_watchdog(
         let now = Instant::now();
         for peer in &peers {
             if transport.peer_is_established(&peer.peer_id).await {
-                // Established — clear any pending warn schedule.
+                // Recovered (or never failed) — clear schedule.
                 next_warn.remove(&peer.peer_id);
                 continue;
             }
             let next = *next_warn
                 .entry(peer.peer_id)
                 .or_insert(start + FIRST_WARN_AFTER);
-            if now >= next {
-                let elapsed = now.duration_since(start).as_secs();
+            if now < next {
+                continue;
+            }
+            let elapsed_dur = now.duration_since(start);
+            let elapsed = elapsed_dur.as_secs();
+            let escalated = elapsed_dur >= ESCALATE_TO_ERROR_AFTER;
+            let next_interval = if escalated {
+                REWARN_ERROR_EVERY
+            } else {
+                REWARN_EVERY
+            };
+            // Same diagnostic body; severity differs.
+            let msg = format!(
+                "{} not Established after {}s. Common causes: (1) peer process \
+                 offline or unreachable; (2) pubkey mismatch — confirm \
+                 `drift-vpn show --identity-file <peer-identity>` on the peer \
+                 side matches the pubkey logged here; (3) network filtering \
+                 between this host and the peer (corporate NAT, ISP egress \
+                 filter); (4) orphan TUN on either side holding the configured \
+                 address (start that side with `--force-cleanup` or kill \
+                 stale processes). Watchdog will re-emit every {}s at {} level.",
+                peer.kind,
+                elapsed,
+                next_interval.as_secs(),
+                if escalated { "ERROR" } else { "WARN" }
+            );
+            if escalated {
+                error!(
+                    kind = peer.kind,
+                    peer_id = %hex::encode(peer.peer_id),
+                    peer_pubkey = %hex::encode(peer.pubkey),
+                    elapsed_secs = elapsed,
+                    "{}",
+                    msg
+                );
+            } else {
                 warn!(
                     kind = peer.kind,
                     peer_id = %hex::encode(peer.peer_id),
                     peer_pubkey = %hex::encode(peer.pubkey),
                     elapsed_secs = elapsed,
-                    "{} not Established after {}s. Common causes: (1) peer process \
-                     offline or unreachable; (2) pubkey mismatch — confirm \
-                     `drift-vpn show --identity-file <peer-identity>` on the peer \
-                     side matches the pubkey logged above; (3) network filtering \
-                     between this host and the peer (corporate NAT, ISP egress \
-                     filter); (4) orphan TUN on either side holding the configured \
-                     address (start that side with `--force-cleanup` or kill \
-                     stale processes). Watchdog will re-warn every {}s.",
-                    peer.kind,
-                    elapsed,
-                    REWARN_EVERY.as_secs()
+                    "{}",
+                    msg
                 );
-                next_warn.insert(peer.peer_id, now + REWARN_EVERY);
             }
+            next_warn.insert(peer.peer_id, now + next_interval);
         }
     }
 }
