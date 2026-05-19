@@ -33,7 +33,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use drift::Transport;
+use anyhow::Context;
+use drift::{Direction, Transport};
 use drift_core::PeerId;
 use tracing::{debug, info, warn};
 
@@ -47,12 +48,20 @@ pub struct AdapterMeasurement {
     /// or `via_bridges`. Used as the key into `bridge_handles`
     /// and as the failover-supervisor's display string.
     pub spec: String,
-    /// Pre-registered bridge `PeerId` (handle into the
-    /// transport's peer table).
+    /// Bridge `PeerId` (handle into the transport's peer
+    /// table). Filled by `register_and_probe` after the
+    /// register step succeeds; remains `[0u8; 8]` if register
+    /// failed (which also sets `handshake_time = None`).
     pub bridge_pid: PeerId,
-    /// Time from probe-start to `peer_is_established` =
-    /// true. `None` if the bridge didn't establish within
-    /// `PROBE_DEADLINE`.
+    /// Bridge's 32-byte X25519 pubkey, parsed from `spec`.
+    /// Caller passes this to `Transport::add_federated_peer`
+    /// as the `target_bridge_pub` argument.
+    pub bridge_pub: [u8; 32],
+    /// Time from probe-start (before connect) to
+    /// `peer_is_established = true`. Includes connect +
+    /// crypto + handshake. `None` if the bridge didn't
+    /// establish within `PROBE_DEADLINE` OR if the register
+    /// step itself failed.
     pub handshake_time: Option<Duration>,
 }
 
@@ -69,48 +78,80 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(8);
 /// the runtime.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Probe a list of pre-registered bridges in parallel; return
-/// measurements sorted by handshake time ascending.
+/// Register + probe each bridge spec in parallel; return
+/// measurements sorted by total time-to-Established ascending.
 ///
-/// Caller has already done `connect_federate` for each
-/// `(spec, bridge_pid)` so the transport's peer table contains
-/// each bridge in `Pending` state with the handshake in flight.
-/// All we do here is wait + time + sort.
+/// Each task runs `connect_federate` (or the UDP equivalent)
+/// AND the establishment poll inside the same wall-clock
+/// window, so the measurement captures the real cost: connect
+/// + crypto + handshake round-trips. The previous design
+/// registered bridges sequentially before probing — and on a
+/// LAN where handshakes complete in 5-10 ms each, all 9 had
+/// reached Established before the probe loop even ran. The
+/// resulting `wall_clock_ms=0` ranking was meaningless.
 ///
-/// The probes run as concurrent tokio tasks; total wall-clock
-/// time is bounded by `PROBE_DEADLINE` (≈ 8 s), not N ×
-/// per-probe time.
-pub async fn probe_and_rank(
+/// Returns: `Vec<AdapterMeasurement>` sorted by handshake time
+/// ascending. Caller treats failed entries (`handshake_time =
+/// None`) as available-but-unranked; the supervisor uses them
+/// as last-resort fallbacks.
+///
+/// Side effect: populates the transport's peer table with one
+/// federation-style entry per bridge. Caller reads each
+/// measurement's `bridge_pid` and uses it as the
+/// `via_bridge` argument to `Transport::add_federated_peer`
+/// for the actual VPN peer.
+pub async fn register_and_probe(
     transport: Arc<Transport>,
-    candidates: Vec<(String, PeerId)>,
+    specs: Vec<String>,
 ) -> Vec<AdapterMeasurement> {
-    let total = candidates.len();
+    let total = specs.len();
     info!(
         candidates = total,
         deadline_secs = PROBE_DEADLINE.as_secs(),
-        "adapter probe starting (parallel handshake-time measurement)"
+        "adapter probe starting (parallel register + handshake-time measurement)"
     );
 
     let started = Instant::now();
     let mut tasks = Vec::with_capacity(total);
-    for (spec, bridge_pid) in candidates {
+    for spec in specs {
         let t = transport.clone();
         tasks.push(tokio::spawn(async move {
+            // Per-task clock: includes the register call AND
+            // the wait-for-Established. This is the metric
+            // that actually captures adapter cost on the
+            // current network.
             let measure_started = Instant::now();
+            let bridge_pid = match register_one(&t, &spec).await {
+                Ok((pid, _pub)) => pid,
+                Err(e) => {
+                    debug!(spec = %spec, error = %e, "bridge register failed");
+                    return AdapterMeasurement {
+                        spec,
+                        bridge_pid: [0u8; 8],
+                        bridge_pub: [0u8; 32],
+                        handshake_time: None,
+                    };
+                }
+            };
+            let bridge_pub = match crate::config::parse_bridge_spec(&spec) {
+                Ok((_, pk)) => pk,
+                Err(_) => [0u8; 32], // unreachable: register_one would have failed first
+            };
             let deadline = measure_started + PROBE_DEADLINE;
             loop {
                 if t.peer_is_established(&bridge_pid).await {
-                    let elapsed = measure_started.elapsed();
                     return AdapterMeasurement {
                         spec,
                         bridge_pid,
-                        handshake_time: Some(elapsed),
+                        bridge_pub,
+                        handshake_time: Some(measure_started.elapsed()),
                     };
                 }
                 if Instant::now() >= deadline {
                     return AdapterMeasurement {
                         spec,
                         bridge_pid,
+                        bridge_pub,
                         handshake_time: None,
                     };
                 }
@@ -128,9 +169,8 @@ pub async fn probe_and_rank(
     }
 
     // Sort: established first (by ascending handshake time);
-    // failed last (preserving the original input order among
-    // failed entries so the operator can still see the
-    // default-best fallback they configured).
+    // failed last (preserving relative input order among failed
+    // entries so operators still see configured fallbacks).
     results.sort_by(|a, b| match (a.handshake_time, b.handshake_time) {
         (Some(ta), Some(tb)) => ta.cmp(&tb),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -149,7 +189,7 @@ pub async fn probe_and_rank(
     );
     for (idx, m) in results.iter().enumerate() {
         match m.handshake_time {
-            Some(t) => debug!(
+            Some(t) => info!(
                 rank = idx,
                 spec = %m.spec,
                 handshake_ms = t.as_millis() as u64,
@@ -164,6 +204,39 @@ pub async fn probe_and_rank(
     }
 
     results
+}
+
+/// Register one bridge spec via the appropriate scheme:
+/// `add_peer` (+ HELLO kick) for UDP, `connect_federate` for
+/// stream-based schemes. Returns the bridge's `PeerId` and the
+/// raw pubkey for the caller to track.
+async fn register_one(
+    transport: &Transport,
+    spec: &str,
+) -> anyhow::Result<(PeerId, [u8; 32])> {
+    let (url, bridge_pub) = crate::config::parse_bridge_spec(spec)
+        .context("parsing bridge spec")?;
+    let scheme = url.split("://").next().unwrap_or("");
+    let bridge_pid = if scheme == "udp" {
+        let addr = crate::daemon::resolve_endpoint(&url)
+            .await
+            .with_context(|| format!("resolving {}", url))?;
+        let pid = transport
+            .add_peer(bridge_pub, addr, Direction::Initiator)
+            .await
+            .with_context(|| format!("add_peer({})", url))?;
+        // UDP add_peer doesn't initiate handshake on its own;
+        // send_data does. Trigger HELLO immediately so the
+        // measure window covers the round-trip.
+        let _ = transport.send_data(&pid, b".", 0, 0).await;
+        pid
+    } else {
+        transport
+            .connect_federate(&url, bridge_pub)
+            .await
+            .with_context(|| format!("connect_federate({})", url))?
+    };
+    Ok((bridge_pid, bridge_pub))
 }
 
 #[cfg(test)]
@@ -183,21 +256,25 @@ mod tests {
             AdapterMeasurement {
                 spec: "fail-a".into(),
                 bridge_pid: [0u8; 8],
+                bridge_pub: [0u8; 32],
                 handshake_time: None,
             },
             AdapterMeasurement {
                 spec: "slow".into(),
                 bridge_pid: [1u8; 8],
+                bridge_pub: [1u8; 32],
                 handshake_time: Some(Duration::from_secs(3)),
             },
             AdapterMeasurement {
                 spec: "fail-b".into(),
                 bridge_pid: [2u8; 8],
+                bridge_pub: [2u8; 32],
                 handshake_time: None,
             },
             AdapterMeasurement {
                 spec: "fast".into(),
                 bridge_pid: [3u8; 8],
+                bridge_pub: [3u8; 32],
                 handshake_time: Some(Duration::from_millis(80)),
             },
         ];
