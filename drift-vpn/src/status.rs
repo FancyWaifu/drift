@@ -46,6 +46,30 @@ pub struct LocalInfo {
     pub uptime_secs: u64,
 }
 
+/// How drift-vpn reaches this peer. Determines whether the
+/// "state=pending tx=0 rx=0" reading from `peer_metrics` is
+/// meaningful — for `Federation` peers, no direct session
+/// exists, so `peer_metrics` returns None and the counters
+/// would all be zero whether data flows through the bridge
+/// or not.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerKind {
+    /// Direct peer reachable via one or more `endpoints`. Has a
+    /// real DRIFT session and meaningful tx/rx/srtt.
+    Direct,
+    /// Mesh-only peer — no direct endpoint, no via_bridge.
+    /// Reachable only via forwarding through another peer.
+    /// Has a DRIFT session once the forwarder discovers it.
+    Mesh,
+    /// Federation peer — reachable through a configured
+    /// via_bridge. No direct session; all wire traffic flows
+    /// through the bridge's session. `peer_metrics` reads
+    /// zero for these because the bridge sees the bytes, not
+    /// the federation peer itself.
+    Federation,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerStatus {
     pub peer_id_hex: String,
@@ -59,6 +83,15 @@ pub struct PeerStatus {
     pub seconds_since_last_seen: u64,
     pub tx_packets: u32,
     pub rx_packets: u32,
+    /// How this peer is reached. See `PeerKind`. Default
+    /// `Direct` for back-compat with older daemons that didn't
+    /// emit this field.
+    #[serde(default = "default_peer_kind")]
+    pub kind: PeerKind,
+}
+
+fn default_peer_kind() -> PeerKind {
+    PeerKind::Direct
 }
 
 /// Information the daemon serves to status clients.
@@ -78,6 +111,7 @@ pub struct KnownPeer {
     pub peer_id: PeerId,
     pub pubkey: [u8; 32],
     pub allowed_ips: Vec<String>,
+    pub kind: PeerKind,
 }
 
 impl StatusContext {
@@ -111,6 +145,7 @@ impl StatusContext {
                 seconds_since_last_seen: last_seen,
                 tx_packets: tx,
                 rx_packets: rx,
+                kind: kp.kind,
             });
         }
         StatusReport {
@@ -222,7 +257,25 @@ pub fn render_human(report: &StatusReport) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "peers: {}", report.peers.len());
     for p in &report.peers {
-        let state = if p.is_established { "established" } else { "pending" };
+        // State display depends on kind:
+        //   * Direct/Mesh peer with a DRIFT session →
+        //     "established" or "pending" per is_established.
+        //   * Federation peer has no direct session — show
+        //     "federation-routed" instead of "pending tx=0
+        //     rx=0" so operators don't mistake it for broken.
+        //     Actual reachability is the bridge's session
+        //     state, which the bridge shows in its own peers
+        //     list above this one.
+        let state = match (p.kind, p.is_established) {
+            (PeerKind::Federation, _) => "federation-routed",
+            (_, true) => "established",
+            (_, false) => "pending",
+        };
+        let kind_tag = match p.kind {
+            PeerKind::Direct => "",
+            PeerKind::Mesh => " kind=mesh",
+            PeerKind::Federation => " kind=federation",
+        };
         let srtt = p
             .srtt_us
             .map(|us| format!("{:.1}ms", us as f64 / 1000.0))
@@ -234,18 +287,33 @@ pub fn render_human(report: &StatusReport) -> String {
         };
         let _ = writeln!(
             out,
-            "  {}  {}  state={} srtt={} stale={}",
+            "  {}  {}  state={}{} srtt={} stale={}",
             &p.peer_id_hex,
             p.current_addr.as_deref().unwrap_or("—"),
             state,
+            kind_tag,
             srtt,
             stale,
         );
-        let _ = writeln!(
-            out,
-            "    allowed_ips={:?}  tx={} rx={}",
-            p.allowed_ips, p.tx_packets, p.rx_packets
-        );
+        // For federation peers, the tx/rx counters here are
+        // zero by construction — peer_metrics tracks the direct
+        // session, federation peers don't have one. Suppress
+        // the misleading "tx=0 rx=0" and show the data plane
+        // counters from the daemon (tun writes, egress sent)
+        // are the source of truth instead.
+        if p.kind == PeerKind::Federation {
+            let _ = writeln!(
+                out,
+                "    allowed_ips={:?}  (tx/rx counters are bridge-side; see daemon counters below)",
+                p.allowed_ips
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "    allowed_ips={:?}  tx={} rx={}",
+                p.allowed_ips, p.tx_packets, p.rx_packets
+            );
+        }
     }
     let _ = writeln!(out);
     let m = &report.metrics;
