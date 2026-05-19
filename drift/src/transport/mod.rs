@@ -1699,10 +1699,23 @@ impl Transport {
     /// preserved — identity remains bound to the same pubkey, only the
     /// socket address changes. Returns true if the peer was found.
     pub async fn update_peer_addr(&self, peer_id: &PeerId, new_addr: SocketAddr) -> bool {
-        let mut peers = self.inner.peers.lock_for(peer_id).await;
-        match peers.get_mut(peer_id) {
-            Some(peer) => {
-                peer.addr = new_addr;
+        let old_addr: Option<SocketAddr> = {
+            let mut peers = self.inner.peers.lock_for(peer_id).await;
+            match peers.get_mut(peer_id) {
+                Some(peer) => {
+                    let old = peer.addr;
+                    peer.addr = new_addr;
+                    Some(old)
+                }
+                None => None,
+            }
+        };
+        match old_addr {
+            Some(old) => {
+                self.inner
+                    .peers
+                    .note_addr_changed(*peer_id, old, new_addr)
+                    .await;
                 true
             }
             None => false,
@@ -1780,23 +1793,32 @@ impl Transport {
         direction: Direction,
     ) -> Result<PeerId> {
         let id = derive_peer_id(&peer_static_pub);
-        let mut peers = self.inner.peers.lock_for(&id).await;
-        match peers.get(&id) {
-            Some(existing) if existing.peer_static_pub != peer_static_pub => {
-                self.inner
-                    .metrics
-                    .peer_id_collisions
-                    .fetch_add(1, Ordering::Relaxed);
-                warn!(peer_id = ?id, "peer id collision in add_peer; rejecting");
-                Err(DriftError::PeerIdCollision)
+        let inserted_at: Option<SocketAddr> = {
+            let mut peers = self.inner.peers.lock_for(&id).await;
+            match peers.get(&id) {
+                Some(existing) if existing.peer_static_pub != peer_static_pub => {
+                    self.inner
+                        .metrics
+                        .peer_id_collisions
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!(peer_id = ?id, "peer id collision in add_peer; rejecting");
+                    return Err(DriftError::PeerIdCollision);
+                }
+                Some(_) => None,
+                None => {
+                    let peer = Peer::new(id, addr, peer_static_pub, direction);
+                    peers.insert(peer);
+                    Some(addr)
+                }
             }
-            Some(_) => Ok(id),
-            None => {
-                let peer = Peer::new(id, addr, peer_static_pub, direction);
-                peers.insert(peer);
-                Ok(id)
-            }
+        };
+        // SEC.FIX.1 fast-gate: maintain the addr_index after the
+        // shard guard drops. See peer_shards.rs for the lock-
+        // ordering and stale-positive analysis.
+        if let Some(addr) = inserted_at {
+            self.inner.peers.note_inserted(id, addr).await;
         }
+        Ok(id)
     }
 
     /// Register a peer that has no known direct address — it
@@ -1827,24 +1849,30 @@ impl Transport {
         let placeholder: SocketAddr = "0.0.0.0:0"
             .parse()
             .expect("constant addr parses");
-        let mut peers = self.inner.peers.lock_for(&id).await;
-        match peers.get(&id) {
-            Some(existing) if existing.peer_static_pub != peer_static_pub => {
-                self.inner
-                    .metrics
-                    .peer_id_collisions
-                    .fetch_add(1, Ordering::Relaxed);
-                warn!(peer_id = ?id, "peer id collision in add_mesh_peer; rejecting");
-                Err(DriftError::PeerIdCollision)
+        let inserted_at: Option<SocketAddr> = {
+            let mut peers = self.inner.peers.lock_for(&id).await;
+            match peers.get(&id) {
+                Some(existing) if existing.peer_static_pub != peer_static_pub => {
+                    self.inner
+                        .metrics
+                        .peer_id_collisions
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!(peer_id = ?id, "peer id collision in add_mesh_peer; rejecting");
+                    return Err(DriftError::PeerIdCollision);
+                }
+                Some(_) => None,
+                None => {
+                    let mut peer = Peer::new(id, placeholder, peer_static_pub, direction);
+                    peer.via_mesh = true;
+                    peers.insert(peer);
+                    Some(placeholder)
+                }
             }
-            Some(_) => Ok(id),
-            None => {
-                let mut peer = Peer::new(id, placeholder, peer_static_pub, direction);
-                peer.via_mesh = true;
-                peers.insert(peer);
-                Ok(id)
-            }
+        };
+        if let Some(addr) = inserted_at {
+            self.inner.peers.note_inserted(id, addr).await;
         }
+        Ok(id)
     }
 
     pub async fn send_data(
@@ -1957,37 +1985,47 @@ impl Transport {
     ) -> Result<PeerId> {
         let id = derive_peer_id(&target_client_pub);
         let placeholder: SocketAddr = "0.0.0.0:0".parse().expect("constant addr parses");
-        let mut peers = self.inner.peers.lock_for(&id).await;
-        match peers.get_mut(&id) {
-            Some(existing) if existing.peer_static_pub != target_client_pub => {
-                self.inner
-                    .metrics
-                    .peer_id_collisions
-                    .fetch_add(1, Ordering::Relaxed);
-                Err(DriftError::PeerIdCollision)
+        let inserted_at: Option<SocketAddr> = {
+            let mut peers = self.inner.peers.lock_for(&id).await;
+            match peers.get_mut(&id) {
+                Some(existing) if existing.peer_static_pub != target_client_pub => {
+                    self.inner
+                        .metrics
+                        .peer_id_collisions
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Err(DriftError::PeerIdCollision);
+                }
+                Some(existing) => {
+                    existing.federated_via = Some(via_bridge);
+                    existing.federated_target_bridge_pub = Some(target_bridge_pub);
+                    None
+                }
+                None => {
+                    // Federated peers don't have a direct DRIFT
+                    // session with us — the bridge handles all
+                    // crypto-bearing forwarding. We leave handshake
+                    // in the default `Pending` state; `send_data`
+                    // recognizes `federated_via.is_some()` and
+                    // short-circuits to the federated path BEFORE
+                    // any handshake-state check, so the placeholder
+                    // session state is never read.
+                    let mut peer = Peer::new(
+                        id,
+                        placeholder,
+                        target_client_pub,
+                        Direction::Initiator,
+                    );
+                    peer.federated_via = Some(via_bridge);
+                    peer.federated_target_bridge_pub = Some(target_bridge_pub);
+                    peers.insert(peer);
+                    Some(placeholder)
+                }
             }
-            Some(existing) => {
-                existing.federated_via = Some(via_bridge);
-                existing.federated_target_bridge_pub = Some(target_bridge_pub);
-                Ok(id)
-            }
-            None => {
-                // Federated peers don't have a direct DRIFT
-                // session with us — the bridge handles all
-                // crypto-bearing forwarding. We leave handshake
-                // in the default `Pending` state; `send_data`
-                // recognizes `federated_via.is_some()` and
-                // short-circuits to the federated path BEFORE
-                // any handshake-state check, so the placeholder
-                // session state is never read.
-                let mut peer =
-                    Peer::new(id, placeholder, target_client_pub, Direction::Initiator);
-                peer.federated_via = Some(via_bridge);
-                peer.federated_target_bridge_pub = Some(target_bridge_pub);
-                peers.insert(peer);
-                Ok(id)
-            }
+        };
+        if let Some(addr) = inserted_at {
+            self.inner.peers.note_inserted(id, addr).await;
         }
+        Ok(id)
     }
 
     /// Send a federated payload to `target_client_pub` via the
@@ -2865,7 +2903,7 @@ impl Inner {
         // Build the Close wire packet under the peer lock, then
         // send it outside the lock so the socket.await doesn't
         // block peer-table users.
-        let (bytes, addr) = {
+        let (bytes, addr, removed) = {
             let mut peers = self.peers.lock_for(dst).await;
             let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
             if !peer.handshake.is_ready_for_data() {
@@ -2878,21 +2916,26 @@ impl Inner {
             // Drop local state immediately — we won't accept any
             // further DATA on this session and won't retry the
             // Close if it gets lost.
-            if peer.auto_registered {
+            let removed = if peer.auto_registered {
                 peers.remove(dst);
+                true
             } else {
                 peer.handshake = HandshakeState::Pending;
                 peer.pending.clear();
                 peer.session_epoch = None;
                 peer.probing = None;
-            }
+                false
+            };
             if was_awaiting_data {
                 self.metrics
                     .handshakes_inflight
                     .fetch_sub(1, Ordering::Relaxed);
             }
-            (wire, addr)
+            (wire, addr, removed)
         };
+        if removed {
+            self.peers.note_removed(dst, addr).await;
+        }
 
         self.ifaces
             .send_for(self.iface_for(dst).await, &bytes, addr)
@@ -3564,7 +3607,7 @@ impl Inner {
             // bridge — the one that delivered this envelope —
             // so it's also the correct `via_bridge` for the
             // reply path.
-            if self.config.accept_any_peer {
+            let fed_inserted_at: Option<SocketAddr> = if self.config.accept_any_peer {
                 let mut peers = self.peers.lock_for(&source_peer_id).await;
                 match peers.get_mut(&source_peer_id) {
                     Some(existing) => {
@@ -3596,6 +3639,7 @@ impl Inner {
                         existing.federated_via = Some(peer_id);
                         existing.federated_target_bridge_pub =
                             Some(env.source_bridge_pub);
+                        None
                     }
                     None => {
                         let placeholder: SocketAddr =
@@ -3611,8 +3655,14 @@ impl Inner {
                             Some(env.source_bridge_pub);
                         p.auto_registered = true;
                         peers.insert(p);
+                        Some(placeholder)
                     }
                 }
+            } else {
+                None
+            };
+            if let Some(addr) = fed_inserted_at {
+                self.peers.note_inserted(source_peer_id, addr).await;
             }
 
             return Ok(Some(Received {
@@ -6087,6 +6137,13 @@ impl Inner {
         // congestion gauges) before the new session's OPENs
         // arrive and silently collide with the old keys.
         let mut session_was_reset = false;
+        // SEC.FIX.1 addr_index maintenance: track whether this
+        // HELLO caused us to insert a new peer or migrate an
+        // existing peer's addr. Apply the index update AFTER
+        // the lock_all guard drops, so we never hold all shard
+        // mutexes across the addr_index await.
+        let mut new_inserted_addr: Option<SocketAddr> = None;
+        let mut migrated_from: Option<SocketAddr> = None;
         let (ack_bytes, ack_addr) = {
             // handle_hello takes lock_all because the
             // auto-register cap check needs to count peers
@@ -6112,6 +6169,7 @@ impl Inner {
                     new_peer.auto_registered = true;
                     new_peer.interface_id = iface_idx;
                     peers.insert(new_peer);
+                    new_inserted_addr = Some(src);
                     debug!(
                         "auto-registered new peer {:?} on iface {}",
                         client_peer_id, iface_idx
@@ -6177,7 +6235,8 @@ impl Inner {
                     // No session_reset signal here — `AwaitingData`
                     // means no DATA has flowed yet, so the stream
                     // layer has nothing for this peer to wipe.
-                    regenerate_session(
+                    let old_addr = peer.addr;
+                    let result = regenerate_session(
                         &self.identity,
                         peer,
                         client_static_pub,
@@ -6190,7 +6249,11 @@ impl Inner {
                         header.hop_ttl,
                         iface_idx,
                         pq_client_ek.as_deref(),
-                    )?
+                    )?;
+                    if old_addr != src && new_inserted_addr.is_none() {
+                        migrated_from = Some(old_addr);
+                    }
+                    result
                 }
             } else {
                 // Only an `Established` peer had real
@@ -6203,7 +6266,8 @@ impl Inner {
                 // stream layer at all.
                 session_was_reset =
                     matches!(peer.handshake, HandshakeState::Established { .. });
-                regenerate_session(
+                let old_addr = peer.addr;
+                let result = regenerate_session(
                     &self.identity,
                     peer,
                     client_static_pub,
@@ -6216,9 +6280,23 @@ impl Inner {
                     header.hop_ttl,
                     iface_idx,
                     pq_client_ek.as_deref(),
-                )?
+                )?;
+                if old_addr != src && new_inserted_addr.is_none() {
+                    migrated_from = Some(old_addr);
+                }
+                result
             }
         };
+        // SEC.FIX.1 addr_index maintenance, applied after the
+        // lock_all guard dropped at the closing `};` above.
+        if let Some(addr) = new_inserted_addr {
+            self.peers.note_inserted(client_peer_id, addr).await;
+        }
+        if let Some(old) = migrated_from {
+            self.peers
+                .note_addr_changed(client_peer_id, old, src)
+                .await;
+        }
 
         // Notify the session-reset listener (if installed) AFTER
         // dropping the peer lock so the observer can grab its
@@ -6553,7 +6631,12 @@ impl Inner {
             let cutoff = std::time::Duration::from_secs(self.config.awaiting_data_timeout_secs);
             let now = Instant::now();
             let mut evicted: u64 = 0;
-            let mut to_remove: Vec<PeerId> = Vec::new();
+            // SEC.FIX.1: track (id, addr) for each peer we evict
+            // so we can update the addr_index after the lock_all
+            // guard drops. Storing addrs alongside ids — capturing
+            // them later via lock_for would race against any
+            // concurrent peer mutation.
+            let mut to_remove: Vec<(PeerId, SocketAddr)> = Vec::new();
 
             {
                 let mut peers = self.peers.lock_all().await;
@@ -6589,7 +6672,7 @@ impl Inner {
                         continue;
                     }
                     if peer.auto_registered {
-                        to_remove.push(peer.id);
+                        to_remove.push((peer.id, peer.addr));
                     } else {
                         peer.handshake = HandshakeState::Pending;
                         peer.pending.clear();
@@ -6597,11 +6680,15 @@ impl Inner {
                         evicted += 1;
                     }
                 }
-                for id in &to_remove {
+                for (id, _addr) in &to_remove {
                     if peers.remove(id).is_some() {
                         evicted += 1;
                     }
                 }
+            }
+            // SEC.FIX.1 addr_index maintenance, after lock_all drops.
+            for (id, addr) in &to_remove {
+                self.peers.note_removed(id, *addr).await;
             }
 
             if evicted > 0 {
@@ -6895,7 +6982,7 @@ impl Inner {
         // parking_lot guard ends lexically before any await.
         // Explicit `drop(peers)` is not enough for Rust's async
         // non-Send analysis — must close the lexical scope.
-        let (disconnected_pub, was_awaiting_data) = {
+        let (disconnected_pub, was_awaiting_data, removed_addr) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
             let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
@@ -6912,21 +6999,29 @@ impl Inner {
             // mutate their entry — needed for PeerGone emission
             // below.
             let disconnected_pub = peer.peer_static_pub;
+            // And their tracked addr, for the SEC.FIX.1
+            // addr_index maintenance below.
+            let peer_addr = peer.addr;
 
             let was_awaiting_data =
                 matches!(peer.handshake, HandshakeState::AwaitingData { .. });
-            if peer.auto_registered {
+            let removed_addr = if peer.auto_registered {
                 debug!(peer_id = ?peer_id, "peer closed; removing auto-registered entry");
                 peers.remove(&peer_id);
+                Some(peer_addr)
             } else {
                 debug!(peer_id = ?peer_id, "peer closed; resetting explicit entry");
                 peer.handshake = HandshakeState::Pending;
                 peer.pending.clear();
                 peer.session_epoch = None;
                 peer.probing = None;
-            }
-            (disconnected_pub, was_awaiting_data)
+                None
+            };
+            (disconnected_pub, was_awaiting_data, removed_addr)
         };
+        if let Some(addr) = removed_addr {
+            self.peers.note_removed(&peer_id, addr).await;
+        }
         if was_awaiting_data {
             self.metrics
                 .handshakes_inflight

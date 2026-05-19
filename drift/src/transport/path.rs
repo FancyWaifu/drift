@@ -258,62 +258,75 @@ impl Inner {
         }
         let peer_id = header.src_id;
 
-        let mut peers = self.peers.lock_for(&peer_id).await;
-        let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-        let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+        // Block-scope the shard guard so the addr_index update
+        // below (SEC.FIX.1 maintenance) doesn't run while
+        // holding the shard lock. Returns `Some((old, new))`
+        // when migration committed; the early-`return Ok(())`
+        // paths escape the block without setting migration.
+        let migration: Option<(SocketAddr, SocketAddr)> = {
+            let mut peers = self.peers.lock_for(&peer_id).await;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
 
-        let mut hbuf = [0u8; HEADER_LEN];
-        hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
-        let aad = canonical_aad(&hbuf);
-        let echoed = rx.open(header.seq, PacketType::PathResponse as u8, &aad, body)?;
-        if echoed.len() != PATH_CHALLENGE_LEN {
-            return Ok(());
-        }
+            let mut hbuf = [0u8; HEADER_LEN];
+            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
+            let aad = canonical_aad(&hbuf);
+            let echoed =
+                rx.open(header.seq, PacketType::PathResponse as u8, &aad, body)?;
+            if echoed.len() != PATH_CHALLENGE_LEN {
+                return Ok(());
+            }
 
-        let (probe_addr, probe_challenge, probe_started) = match &peer.probing {
-            Some(p) => (p.addr, p.challenge, p.started),
-            None => return Ok(()), // no probe outstanding
-        };
+            let (probe_addr, probe_challenge, probe_started) = match &peer.probing {
+                Some(p) => (p.addr, p.challenge, p.started),
+                None => return Ok(()), // no probe outstanding
+            };
 
-        // Timeout check: if the probe is stale, ignore the response.
-        if Instant::now().duration_since(probe_started) > PATH_PROBE_TIMEOUT {
+            // Timeout check: if the probe is stale, ignore the response.
+            if Instant::now().duration_since(probe_started) > PATH_PROBE_TIMEOUT {
+                peer.probing = None;
+                return Ok(());
+            }
+
+            // The response must come from the address we probed AND
+            // echo the exact challenge bytes we put on the wire.
+            if src != probe_addr {
+                return Ok(());
+            }
+            if !ct_eq(&echoed, &probe_challenge) {
+                return Ok(());
+            }
+
+            debug!(
+                old = ?peer.addr,
+                new = ?probe_addr,
+                old_iface = peer.interface_id,
+                new_iface = recv_iface,
+                "path-validated migration"
+            );
+            // Feed the round-trip time into the neighbor RTT
+            // estimator — a valid PathResponse is a clean
+            // sample of the candidate path's cost.
+            peer.update_neighbor_rtt(Instant::now().duration_since(probe_started));
+            let old_addr = peer.addr;
+            peer.addr = probe_addr;
+            // Critical for v0.5 cross-scheme failover: also pin the
+            // outbound interface to the one the response arrived on.
+            // Without this, even a successful probe via iface N
+            // leaves outbound traffic going via the original (broken)
+            // iface 0. The migration is half-done and packets keep
+            // dropping. With this, the next send_data picks iface N
+            // and traffic flows.
+            peer.interface_id = recv_iface;
             peer.probing = None;
-            return Ok(());
+            Some((old_addr, probe_addr))
+        };
+        if let Some((old, new)) = migration {
+            self.peers.note_addr_changed(peer_id, old, new).await;
+            self.metrics
+                .path_probes_succeeded
+                .fetch_add(1, Ordering::Relaxed);
         }
-
-        // The response must come from the address we probed AND
-        // echo the exact challenge bytes we put on the wire.
-        if src != probe_addr {
-            return Ok(());
-        }
-        if !ct_eq(&echoed, &probe_challenge) {
-            return Ok(());
-        }
-
-        debug!(
-            old = ?peer.addr,
-            new = ?probe_addr,
-            old_iface = peer.interface_id,
-            new_iface = recv_iface,
-            "path-validated migration"
-        );
-        // Feed the round-trip time into the neighbor RTT
-        // estimator — a valid PathResponse is a clean
-        // sample of the candidate path's cost.
-        peer.update_neighbor_rtt(Instant::now().duration_since(probe_started));
-        peer.addr = probe_addr;
-        // Critical for v0.5 cross-scheme failover: also pin the
-        // outbound interface to the one the response arrived on.
-        // Without this, even a successful probe via iface N
-        // leaves outbound traffic going via the original (broken)
-        // iface 0. The migration is half-done and packets keep
-        // dropping. With this, the next send_data picks iface N
-        // and traffic flows.
-        peer.interface_id = recv_iface;
-        peer.probing = None;
-        self.metrics
-            .path_probes_succeeded
-            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }

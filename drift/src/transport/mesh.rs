@@ -612,17 +612,18 @@ impl Inner {
         // default in `drift bridge`'s CLI config.
         if self.config.require_src_for_forward {
             if let Some(src_addr) = src {
-                let src_is_known_peer = {
-                    let all = self.peers.lock_all().await;
-                    let mut hit = false;
-                    for p in all.iter() {
-                        if p.addr == src_addr {
-                            hit = true;
-                            break;
-                        }
-                    }
-                    hit
-                };
+                // SEC.FIX.1 fast gate: `addr_belongs_to_known_peer`
+                // checks the `addr_index` for candidates, then
+                // verifies against the candidate's shard. O(1) for
+                // attack traffic (unknown addrs), O(1 mutex + 1
+                // shard) for legit forwards. Replaces the prior
+                // `lock_all()` walk, which acquired all 16 shard
+                // mutexes per forwarded packet — strictly worse
+                // under attack load. See `peer_shards.rs` for the
+                // two-step verify pattern and stale-positive
+                // analysis.
+                let src_is_known_peer =
+                    self.peers.addr_belongs_to_known_peer(&src_addr).await;
                 if !src_is_known_peer {
                     self.metrics
                         .forward_unauth_drops

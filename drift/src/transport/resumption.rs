@@ -617,11 +617,21 @@ impl Inner {
         // NEW session key, so a successful decrypt on the
         // client side proves we derived the same key from the
         // same PSK.
-        let (ack_wire, ack_addr, prev_session, was_awaiting_data) = {
+        let (ack_wire, ack_addr, prev_session, was_awaiting_data, addr_changed_from) = {
             let mut peers = self.peers.lock_for(&client_peer_id).await;
             let peer = peers
                 .get_mut(&client_peer_id)
                 .ok_or(DriftError::UnknownPeer)?;
+            // Capture old addr for SEC.FIX.1 addr_index update.
+            // Resumption authenticates via PSK, so migrating
+            // peer.addr to src is safe — the AEAD check on the
+            // ResumeHello (via session derivation from PSK)
+            // proves the sender holds the prior session secret.
+            let addr_changed_from = if peer.addr != src {
+                Some(peer.addr)
+            } else {
+                None
+            };
             let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
 
             // Capture the OLD session keys (if any) so we can
@@ -682,9 +692,14 @@ impl Inner {
             };
             peer.addr = src;
 
-            (wire, src, prev_session, was_awaiting_data)
+            (wire, src, prev_session, was_awaiting_data, addr_changed_from)
         };
         let _ = prev_session; // (used inside the block via clone)
+        if let Some(old) = addr_changed_from {
+            self.peers
+                .note_addr_changed(client_peer_id, old, src)
+                .await;
+        }
 
         if was_awaiting_data {
             self.metrics
