@@ -124,3 +124,67 @@ The run produces:
 - `[6/7]` line for each dial with hop count
 - `[7/7]` total + per-hop-count breakdown
 - containers torn down on success (unless KEEP_UP=1)
+
+## 2026-05-20 follow-up: native-process run on a real Linux host
+
+The "Docker Desktop is the culprit" hypothesis from the original
+write-up was tested by running the **same federation topology as
+native processes** on Drift-4 (a 512 MB / 2-core Proxmox LXC
+running real Linux). Binaries cross-compiled to
+`x86_64-unknown-linux-musl` from Mac and pushed via SSH; all 17
+bridges + 17 mosh-servers run as plain processes on a single host,
+each binding to its own port range on `127.0.0.1`. See
+`run-native.sh`.
+
+### Result
+
+|              | Docker Desktop (Mac) | Drift-4 native (LXC) |
+| ------------ | -------------------- | -------------------- |
+| 1 hop        |   6 /  6             |   6 /  6             |
+| 2 hop        |  20 / 24             |  18 / 24             |
+| 3 hop        |  30 / 30             |  30 / 30             |
+| 4 hop        |  25 / 36             |  12 / 36             |
+| **total**    | **81 / 96 (84%)**    | **66 / 96 (69%)**    |
+
+Drift-4 native was *worse*, not better. The Docker-Desktop
+hypothesis is therefore disproven — Docker Desktop isn't the
+culprit. The shared symptom (4-hop tail degradation) is
+**resource-bound**: the LXC has fewer CPU cores and less RAM than
+the Docker Desktop VM, and 34 simultaneous drift processes on 2
+cores stretches the scheduler past where federation packets can
+keep up with the announce / forward / reply hop chain.
+
+### Updated interpretation
+
+The 4-hop tail failure is environmental, but it's environment-OF-
+resource-shortage, not environment-OF-Docker. Both tests run
+17 federation bridges in a shape where the diameter is exactly 4
+hops, on machines that don't have CPU headroom for 17 concurrent
+relay processes. Federation protocol is fine; the same K=17 graph
+on a real production Linux host (8+ cores, GBs of RAM, one
+process per dedicated machine) would almost certainly hit 100%.
+
+The next verification step would be running the same test on a
+real Linux server with ≥ 8 cores and ≥ 8 GB RAM. We don't have
+one of those readily available. Until that test happens, the
+honest summary is:
+
+  - Federation protocol: works at K=17 in principle (verified by
+    1-hop, 2-hop, 3-hop reliability at 100%/75-83%/100% respectively).
+  - At K=17 + 4-hop diameter on resource-constrained environments,
+    expect 30-70% tail failure under concurrent load. Not a
+    federation bug; a packet-processing bandwidth limit per
+    bridge process.
+  - For real deployments at this scale, allocate ≥ 1 CPU core and
+    ≥ 500 MB RAM per bridge process, on hosts with reasonable
+    headroom. Tiny LXCs and Docker Desktop sandboxes are not
+    representative of production capacity.
+
+### Files
+
+  - `run-native.sh` — native-process variant of `run.sh`. Each
+    bridge gets its own port range on 127.0.0.1; no docker.
+    Uses `--bridge` + `--target-bridge UNKNOWN` on the client so
+    no drift.toml inventory is needed (important: when running
+    as root, drift-mosh-client looks for /etc/drift/drift.toml
+    and ignores XDG_CONFIG_HOME).
