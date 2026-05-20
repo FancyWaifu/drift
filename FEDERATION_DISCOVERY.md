@@ -423,6 +423,75 @@ Suggested incremental rollout — each phase is independently usable:
 - ✓ Prunes expired entries from `pending_finds` (2s lifetime), `recent_queries` (10s), `neg_cache` (5s), `forwarded_queries` (slaved to recent_queries — same query_id key).
 - ✓ Bounds memory growth across long-lived bridge processes.
 
+**Phase F — Case-2 fallback on local miss (multi-hop forwarding fix). PLANNED.**
+
+The 4×3 topology sweep in `docker/federation-topology/` (2026-05-19)
+exposed a forwarding bug in the live `drift bridge` subcommand.
+The unit tests for Phases B/C pass; the bug only manifests with
+real packet flow through the bridge:
+
+  - When bridge B receives a re-announce of client X from
+    bridge A (where A learned about X from origin bridge C),
+    B records: `peer_directory[X] = (A's_peer_id, ts)`.
+  - Later, when B needs to forward a packet to X, `handle_federated`
+    case 3 (lines 3729-3793 in `drift/src/transport/mod.rs`) looks
+    up `peer_directory[X]`, finds A's peer_id, resolves A's pubkey
+    via `federation_table`, rewrites `envelope.target_bridge_pub = A_pub`,
+    and forwards to A.
+  - A receives the packet with `target_bridge_pub == A_pub` — this
+    matches case 2 (deliver to local client). A's local lookup
+    misses (X is on C, not A). A drops the packet with `DEBUG
+    drift::transport: federated: failed to deliver to local
+    client error=unknown peer`.
+
+The original bridge C IS preserved in `peer_directory_tickets[X]`
+(C's ticket is the proof X exists), but the wire format doesn't
+carry C's pubkey out-of-band, and the directory entry's PeerId
+points at A (the immediate announcer), not C.
+
+**Fix (Phase F-1):** When case 2 (`target_bridge_pub == our_pub`)
+local-delivery lookup misses, fall through to case 3 (directory
+lookup). This keeps the wire format unchanged and handles the
+transit case correctly:
+
+  - A receives Federated envelope with `target_bridge_pub = A_pub`.
+  - A's local clients don't include X → fall through.
+  - A's directory has `X → (C's_peer_id, ts)` (A learned it
+    from C directly, hops=0).
+  - A rewrites `target_bridge_pub = C_pub`, forwards to C.
+  - C receives, case 2 hits, X IS a local client of C → deliver.
+
+Tests:
+  - New integration test `federation_discovery::live_ring_multi_hop_chain`
+    that mirrors the docker pentagon ring topology but in-process,
+    so CI catches the bug without needing Docker.
+  - Existing unit tests (`find_peer_multi_hop_chain`,
+    `proactive_announce_propagates_2_hops`) continue to pass —
+    they exercise the FindPeer/PeerHere reactive path, which is
+    unaffected.
+  - `docker/federation-pentagon` sweep expected to flip from
+    10-14/20 (ring) to 20/20 after the fix lands.
+
+**Phase G — Configurable `MAX_ANNOUNCE_HOPS`. PLANNED.**
+
+Current cap is hardcoded at 2 (one transitive re-announce). That
+covers 5-bridge mesh and ring (max shortest-path = 2) but NOT
+5-bridge chain (max shortest-path = 4) or arbitrary larger
+topologies the user wants to deploy (target: 20 bridges).
+
+**Fix (Phase G-1):** Add `--max-announce-hops <N>` CLI flag on
+`drift bridge`, plumbed through `TransportConfig` to the
+`announce_directory` re-emission gate. Default 4 (covers up to
+~16-bridge chain or full mesh up to any size). Per-bridge
+configuration — bridges in the same federation can pick different
+caps; receivers honor whatever hops value arrived.
+
+Tests:
+  - `docker/federation-topology/chain × {h2s,h2,webtransport}`
+    expected to flip from 8/20 to 20/20 after Phase F+G land
+    (chain needs both: directory entries propagating ≥3 hops, AND
+    each transit bridge actually forwarding via its directory).
+
 ---
 
 ## 11. Open questions
