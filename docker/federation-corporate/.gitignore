@@ -1,0 +1,4 @@
+# Generated per run.sh invocation.
+docker-compose.yml
+identities/
+inventory-c-*/
