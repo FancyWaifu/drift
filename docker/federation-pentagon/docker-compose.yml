@@ -16,12 +16,19 @@
 #                  | /           \\ |
 #               bridge-b4 ─────── (b3, also closes the K5)
 #
-# 5 bridges in a complete graph (K5): every pair federated via UDP.
+# 5 bridges in a complete graph (K5): every pair federated.
 # At each vertex we attach (server-sN, client-cN). Twenty cross-bridge
 # dials cover every (c → s_remote) ordered pair. Verifies that
 # federation directory propagation reaches every vertex at K5 scale
 # (4× the federation peers per bridge vs. the triangle test) and that
 # bridge-side forwarding fanout doesn't introduce ordering bugs.
+#
+# Federation wire is parameterizable via FED_SCHEME + FED_PORT env vars
+# so the same compose tests all three HTTP.FED.STRICT-supported wires:
+#   FED_SCHEME=h2s          FED_PORT=51827   (default)
+#   FED_SCHEME=h2           FED_PORT=51826
+#   FED_SCHEME=webtransport FED_PORT=51828
+# See run.sh for the FED_WIRE convenience flag that sets both.
 #
 # Image is reused from docker/federation-discovery/Dockerfile (same
 # tools: drift, drift-mosh-server, drift-mosh-client, drift-config).
@@ -49,11 +56,11 @@ services:
     command: >
       drift --identity /identities/b1.key bridge
         --listen udp://0.0.0.0:51820
-        --listen h2s://0.0.0.0:51827
-        --federate h2s://10.55.0.12:51827@${PUB_B2}
-        --federate h2s://10.55.0.13:51827@${PUB_B3}
-        --federate h2s://10.55.0.14:51827@${PUB_B4}
-        --federate h2s://10.55.0.15:51827@${PUB_B5}
+        --listen ${FED_SCHEME:-h2s}://0.0.0.0:${FED_PORT:-51827}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.12:${FED_PORT:-51827}@${PUB_B2}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.13:${FED_PORT:-51827}@${PUB_B3}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.14:${FED_PORT:-51827}@${PUB_B4}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.15:${FED_PORT:-51827}@${PUB_B5}
 
   bridge-b2:
     <<: *base-build
@@ -66,11 +73,11 @@ services:
     command: >
       drift --identity /identities/b2.key bridge
         --listen udp://0.0.0.0:51820
-        --listen h2s://0.0.0.0:51827
-        --federate h2s://10.55.0.11:51827@${PUB_B1}
-        --federate h2s://10.55.0.13:51827@${PUB_B3}
-        --federate h2s://10.55.0.14:51827@${PUB_B4}
-        --federate h2s://10.55.0.15:51827@${PUB_B5}
+        --listen ${FED_SCHEME:-h2s}://0.0.0.0:${FED_PORT:-51827}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.11:${FED_PORT:-51827}@${PUB_B1}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.13:${FED_PORT:-51827}@${PUB_B3}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.14:${FED_PORT:-51827}@${PUB_B4}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.15:${FED_PORT:-51827}@${PUB_B5}
 
   bridge-b3:
     <<: *base-build
@@ -83,11 +90,11 @@ services:
     command: >
       drift --identity /identities/b3.key bridge
         --listen udp://0.0.0.0:51820
-        --listen h2s://0.0.0.0:51827
-        --federate h2s://10.55.0.11:51827@${PUB_B1}
-        --federate h2s://10.55.0.12:51827@${PUB_B2}
-        --federate h2s://10.55.0.14:51827@${PUB_B4}
-        --federate h2s://10.55.0.15:51827@${PUB_B5}
+        --listen ${FED_SCHEME:-h2s}://0.0.0.0:${FED_PORT:-51827}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.11:${FED_PORT:-51827}@${PUB_B1}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.12:${FED_PORT:-51827}@${PUB_B2}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.14:${FED_PORT:-51827}@${PUB_B4}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.15:${FED_PORT:-51827}@${PUB_B5}
 
   bridge-b4:
     <<: *base-build
@@ -100,11 +107,11 @@ services:
     command: >
       drift --identity /identities/b4.key bridge
         --listen udp://0.0.0.0:51820
-        --listen h2s://0.0.0.0:51827
-        --federate h2s://10.55.0.11:51827@${PUB_B1}
-        --federate h2s://10.55.0.12:51827@${PUB_B2}
-        --federate h2s://10.55.0.13:51827@${PUB_B3}
-        --federate h2s://10.55.0.15:51827@${PUB_B5}
+        --listen ${FED_SCHEME:-h2s}://0.0.0.0:${FED_PORT:-51827}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.11:${FED_PORT:-51827}@${PUB_B1}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.12:${FED_PORT:-51827}@${PUB_B2}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.13:${FED_PORT:-51827}@${PUB_B3}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.15:${FED_PORT:-51827}@${PUB_B5}
 
   bridge-b5:
     <<: *base-build
@@ -117,11 +124,11 @@ services:
     command: >
       drift --identity /identities/b5.key bridge
         --listen udp://0.0.0.0:51820
-        --listen h2s://0.0.0.0:51827
-        --federate h2s://10.55.0.11:51827@${PUB_B1}
-        --federate h2s://10.55.0.12:51827@${PUB_B2}
-        --federate h2s://10.55.0.13:51827@${PUB_B3}
-        --federate h2s://10.55.0.14:51827@${PUB_B4}
+        --listen ${FED_SCHEME:-h2s}://0.0.0.0:${FED_PORT:-51827}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.11:${FED_PORT:-51827}@${PUB_B1}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.12:${FED_PORT:-51827}@${PUB_B2}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.13:${FED_PORT:-51827}@${PUB_B3}
+        --federate ${FED_SCHEME:-h2s}://10.55.0.14:${FED_PORT:-51827}@${PUB_B4}
 
   # ─── 5 SERVERS ───────────────────────────────────────────────────
   # Each on a different bridge. Servers know ONLY their on-ramp.

@@ -26,6 +26,22 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 
+# ─── Pick the federation wire ─────────────────────────────────────
+# FED_WIRE is the convenience flag: set to h2s | h2 | webtransport
+# and it derives FED_SCHEME + FED_PORT (the actual env vars the
+# compose file substitutes). Explicit FED_SCHEME/FED_PORT win.
+case "${FED_WIRE:-h2s}" in
+  h2s)          : "${FED_SCHEME:=h2s}";          : "${FED_PORT:=51827}" ;;
+  h2)           : "${FED_SCHEME:=h2}";           : "${FED_PORT:=51826}" ;;
+  webtransport) : "${FED_SCHEME:=webtransport}"; : "${FED_PORT:=51828}" ;;
+  *)
+    echo "FED_WIRE must be one of: h2s | h2 | webtransport (got ${FED_WIRE})" >&2
+    exit 2
+    ;;
+esac
+export FED_SCHEME FED_PORT
+echo "[0/5] Federation wire: ${FED_SCHEME}://…:${FED_PORT} (override with FED_WIRE=h2|h2s|webtransport)"
+
 VERTICES=(b1 b2 b3 b4 b5 s1 s2 s3 s4 s5 c1 c2 c3 c4 c5)
 BRIDGE_IDS=(b1 b2 b3 b4 b5)
 CLIENT_IDS=(c1 c2 c3 c4 c5)
@@ -175,7 +191,7 @@ for i in 0 1 2 3 4; do
 done
 
 echo ""
-echo "  Summary: $PASS pass / $FAIL fail (of 20)"
+echo "  Summary: $PASS pass / $FAIL fail (of 20) — federation wire: ${FED_SCHEME}"
 
 # Show only failures in summary, plus a "all good" if everything passed.
 if [ "$FAIL" -gt 0 ]; then
