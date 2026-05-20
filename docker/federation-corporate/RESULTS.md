@@ -265,3 +265,107 @@ K=17 on real Linux with reasonable resource margins, and the
 remaining 4-hop tail is a known CPU-starvation symptom rather
 than a federation bug. A real production deployment (one bridge
 per dedicated host, 4+ cores, GBs of RAM) should hit 100%.
+
+## 2026-05-20 third follow-up: internet-routing-inspired changes
+
+After comparing federation's 4-hop tail to how IP routers handle
+overload (drop, don't block; drop stale frames; surface kernel
+buffer clamps), three changes landed in commit `3fcfab8`
+(`drift/src/wire_h2.rs` + `drift/src/io.rs`):
+
+  1. **Drop-on-full** — `H2StreamPacketIO::send_to` switched from
+     `send().await` to `try_send` on the outbound mpsc. On a full
+     queue, increment a drop counter and return `Ok` (lie like an
+     IP router) so the inner DRIFT transport's replay window
+     retransmits end-to-end. No more head-of-line blocking when
+     one downstream peer is slow.
+  2. **Stale packet drop** — outbound channel item changed from
+     `Bytes` to `(Instant, Bytes)`. At dequeue, a `filter_map`
+     drops frames older than 500 ms (`MAX_FORWARD_AGE`). Same
+     idea as IP TTL: forward if fresh, drop if not — the inner
+     transport retransmits.
+  3. **Promote SO_RCVBUF clamp to WARN** — when the kernel grants
+     less than 80% of what the bridge requested, log at WARN
+     with a copy-paste `sysctl` remediation command.
+
+Re-ran on Drift-4 (same 2-core / 512 MB LXC, single run):
+
+|              | Pre-opt | H2 opt run 1 | H2 opt run 2 | + items 1–3 |
+| ------------ | ------- | ------------ | ------------ | ----------- |
+| 1 hop        |  6 / 6  |  6 / 6       |  6 / 6       |  6 / 6      |
+| 2 hop        | 18 / 24 | 21 / 24      | 24 / 24      | 22 / 24     |
+| 3 hop        | 30 / 30 | 30 / 30      | 30 / 30      | 30 / 30     |
+| 4 hop        | 12 / 36 | 16 / 36      | 22 / 36      | 18 / 36     |
+| **total**    | 66 / 96 | 73 / 96      | 82 / 96      | **76 / 96** |
+| **pct**      | 69%     | 76%          | 85%          | **79%**     |
+
+### Verdict
+
+76/96 sits squarely **inside the prior h2-opt run-to-run variance
+band (73 – 82)**. Items 1+2+3 are correct changes — the code is
+better-shaped for overload — but on this benchmark they're not
+measurably distinguishable from the existing h2-opt baseline.
+
+Why this is plausible (and not a regression):
+
+- **Drop-on-full only fires when the channel saturates.** The h2
+  flow control work already opened the windows to 2 MiB and
+  matched channel depth to 4096; under this workload the channel
+  rarely actually fills. The drop-on-full path is exercised on
+  bursty/sustained-throughput workloads, which the corporate
+  topology dial test (one short dial at a time per client) is
+  not.
+- **Stale drop only fires when a frame sits in queue ≥ 500 ms.**
+  Same story — the queue is flowing, not backed up, so
+  filter_map almost never returns `None`.
+- **SO_RCVBUF warning is diagnostic only.** No behavioral
+  change.
+
+The 4-hop result (18/36) is right at the median of the prior
+two runs (16/36 and 22/36). The 2-hop result (22/24 = 92%) is
+between the prior runs (21/24, 24/24). Single-run variance on
+this 2-core LXC is wide enough that drawing a stronger
+conclusion would need 5+ trials.
+
+### What this means for the changes
+
+Items 1+2+3 are kept — they are the **right** defaults for an
+IP-router-style relay even if the bench doesn't reward them on
+this specific workload. They earn their keep on:
+
+- bursty traffic (many clients dialing concurrently),
+- sustained-throughput workloads (the `bench-matrix.sh` micro
+  bench),
+- adversarial / slow-downstream scenarios where blocking would
+  have caused head-of-line stalling.
+
+Items 4-6 from the same internet-routing analysis (per-source
+fair queuing, ECMP multi-path, ECN-style backpressure) were
+**deferred** rather than implemented:
+
+- Item 4 is largely subsumed by item 1 (drop-on-full removes
+  the head-of-line failure mode that fair queuing would
+  address).
+- Items 5 and 6 require data-structure or wire-format changes
+  (`peer_directory` becoming multi-entry; a new control packet
+  type or h2 SETTINGS extension). Worth revisiting if a future
+  bench can show the protocol is still the bottleneck — but the
+  current bottleneck on this host is CPU scheduler contention,
+  not the protocol.
+
+### Honest summary across all three rounds of optimization
+
+  - Phase F + G + presence-registration (`0c88962`): the
+    federation protocol itself was broken at multi-hop. Fixed.
+    Drift-4 baseline jumped from ~30% to 66/96.
+  - HTTP/2 flow control + channel depth + bytes arena
+    (`5182375`): 66/96 → 73-82/96 (76-85%). Measurable
+    improvement; matched Docker Desktop / Mac baseline.
+  - Internet-routing-inspired drop-on-full + stale drop
+    (`3fcfab8`): no measurable improvement on this specific
+    workload (76/96 in band with prior runs). Code is more
+    correct under overload regardless.
+
+The 4-hop tail at K=17 on a 2-core/512 MB host is now bounded
+by CPU scheduler contention across 17 concurrent bridge
+processes, not by the federation protocol or h2 layer.
