@@ -154,47 +154,49 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         eprintln!("│ federation peers:");
         for spec in &args.federates {
             let (url, pubkey) = parse_federate_spec(spec)?;
-            // HTTP.FED.STRICT — federation links default to the
+            // HTTP.FED.STRICT — federation links MUST use the
             // modern HTTP/2-family backbone (h2 / h2s /
             // webtransport). These are multiplexed,
-            // middlebox-friendly, and reverse-proxy-ready. Client
-            // connections via `--listen` still accept any wire
-            // scheme; only outbound `--federate` URLs are gated.
-            // Opt out with `--allow-legacy-federation`.
+            // middlebox-friendly, reverse-proxy-ready, AND —
+            // discovered the hard way in the
+            // docker/federation-pentagon K5 test — their
+            // bidirectional TLS-style handshakes avoid the
+            // asymmetric UDP mutual-init races that hit at
+            // higher federation densities.
             //
-            // RFC1918 carve-out: the gate is purely a "WAN
-            // federation should ride HTTPS" recommendation. For
-            // LAN federation (two homelab nodes, two cloud VMs
-            // in the same VPC, a router federating with an LXC
-            // on the same subnet) UDP/TCP is genuinely the
-            // right answer — lower latency, fewer moving parts.
-            // If the federate target resolves entirely to
-            // private / loopback / link-local / ULA / CGNAT
-            // addresses, skip the strict check.
+            // Client connections via `--listen` still accept
+            // any wire scheme; only outbound `--federate` URLs
+            // are gated. Operators who genuinely need UDP/TCP
+            // federation (single-host integration tests, niche
+            // hardware) opt in with `--allow-legacy-federation`.
+            //
+            // Previous versions had an RFC1918 carve-out that
+            // exempted LAN targets from the strict check. That
+            // carve-out was removed: the K5 pentagon test
+            // proved that the same UDP mutual-init race occurs
+            // on LAN federation as on WAN, and the latency
+            // savings of UDP-over-LAN are negligible compared
+            // to the reliability cost. Federation behavior is
+            // now identical regardless of whether the target
+            // is a homelab IP or a public WAN one.
             let scheme = url
                 .split_once("://")
                 .map(|(s, _)| s)
                 .unwrap_or(&url);
             let preferred = matches!(scheme, "h2" | "h2s" | "webtransport");
             if !preferred && !args.allow_legacy_federation {
-                let host_port = url
-                    .split_once("://")
-                    .map(|(_, rest)| rest)
-                    .unwrap_or(&url);
-                let lan_only = is_lan_target(host_port).await;
-                if !lan_only {
-                    bail!(
-                        "refusing to federate over `{}://` to a public \
-                         target — drift bridge restricts internet-facing \
-                         federation to h2:// / h2s:// / webtransport://. \
-                         Use one of those schemes on the remote bridge, \
-                         OR pass `--allow-legacy-federation` to bypass \
-                         this gate. (LAN targets — RFC1918, loopback, \
-                         link-local, ULA, CGNAT — are exempted from \
-                         this check.)",
-                        scheme
-                    );
-                }
+                bail!(
+                    "refusing to federate over `{}://` — drift bridge \
+                     restricts federation to h2:// / h2s:// / \
+                     webtransport:// regardless of target network \
+                     (LAN, WAN, or loopback). Use one of those schemes \
+                     on the remote bridge, OR pass \
+                     `--allow-legacy-federation` to opt into the \
+                     pre-v0.18 legacy path (UDP/TCP federation; not \
+                     recommended — see docker/federation-pentagon for \
+                     the scaling failure mode that motivated the change).",
+                    scheme
+                );
             }
             match transport.connect_federate(&url, pubkey).await {
                 Ok(handle) => {
@@ -474,101 +476,12 @@ fn detect_hostname() -> Result<String> {
 // path works — see other commands for the pattern.)
 fn _link_identity_module() {}
 
-// ─── HTTP.FED.STRICT — RFC1918 carve-out helpers ─────────────────
-
-/// Returns true iff every address the host portion resolves to is
-/// a LAN / loopback / link-local / ULA / CGNAT address. Used by
-/// the federation gate to skip the strict-scheme check when the
-/// target is clearly intra-network (homelab, same-VPC, etc.).
-///
-/// On resolution failure we return false — falling back to the
-/// strict check is the safer default than silently letting a
-/// legacy-scheme federate target a public peer.
-async fn is_lan_target(host_port: &str) -> bool {
-    let resolved: Vec<std::net::SocketAddr> = match tokio::net::lookup_host(host_port).await {
-        Ok(iter) => iter.collect(),
-        Err(_) => return false,
-    };
-    if resolved.is_empty() {
-        return false;
-    }
-    resolved.iter().all(|sa| is_private_address(sa.ip()))
-}
-
-fn is_private_address(addr: std::net::IpAddr) -> bool {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    match addr {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()        // 10/8, 172.16/12, 192.168/16
-                || v4.is_link_local()     // 169.254/16
-                || is_cgnat_ipv4(v4)      // 100.64/10 (Tailscale et al.)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || is_ula_ipv6(v6) || is_link_local_ipv6(v6)
-        }
-    }
-}
-
-/// Carrier-grade NAT range: `100.64.0.0/10`. Not covered by
-/// `Ipv4Addr::is_private`. Includes Tailscale's default range.
-fn is_cgnat_ipv4(v4: std::net::Ipv4Addr) -> bool {
-    let o = v4.octets();
-    o[0] == 100 && (o[1] & 0xC0) == 64
-}
-
-/// IPv6 Unique Local Address: `fc00::/7`. Not in stable stdlib.
-fn is_ula_ipv6(v6: std::net::Ipv6Addr) -> bool {
-    (v6.segments()[0] & 0xFE00) == 0xFC00
-}
-
-/// IPv6 link-local: `fe80::/10`. Not in stable stdlib.
-fn is_link_local_ipv6(v6: std::net::Ipv6Addr) -> bool {
-    (v6.segments()[0] & 0xFFC0) == 0xFE80
-}
-
-#[cfg(test)]
-mod fed_gate_tests {
-    use super::*;
-
-    #[test]
-    fn rfc1918_v4_recognised() {
-        assert!(is_private_address("10.0.0.5".parse().unwrap()));
-        assert!(is_private_address("10.255.255.254".parse().unwrap()));
-        assert!(is_private_address("172.16.0.1".parse().unwrap()));
-        assert!(is_private_address("172.31.255.254".parse().unwrap()));
-        assert!(is_private_address("192.168.1.1".parse().unwrap()));
-        assert!(is_private_address("192.0.2.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn loopback_link_local_cgnat_v4() {
-        assert!(is_private_address("127.0.0.1".parse().unwrap()));
-        assert!(is_private_address("169.254.1.1".parse().unwrap()));
-        assert!(is_private_address("100.64.0.1".parse().unwrap())); // CGNAT
-        assert!(is_private_address("100.127.255.254".parse().unwrap()));
-    }
-
-    #[test]
-    fn public_v4_not_private() {
-        assert!(!is_private_address("8.8.8.8".parse().unwrap()));
-        assert!(!is_private_address("203.0.113.99".parse().unwrap())); // router WAN
-        assert!(!is_private_address("100.63.255.255".parse().unwrap())); // just below CGNAT
-        assert!(!is_private_address("100.128.0.0".parse().unwrap())); // just above CGNAT
-        assert!(!is_private_address("172.32.0.1".parse().unwrap())); // just above 172.16/12
-    }
-
-    #[test]
-    fn v6_loopback_ula_linklocal() {
-        assert!(is_private_address("::1".parse().unwrap()));
-        assert!(is_private_address("fc00::1".parse().unwrap()));
-        assert!(is_private_address("fd00::1".parse().unwrap()));
-        assert!(is_private_address("fe80::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn public_v6_not_private() {
-        assert!(!is_private_address("2001:db8::1".parse().unwrap())); // not strictly public but globally routable docrange
-        assert!(!is_private_address("2606:4700::1".parse().unwrap())); // cloudflare
-    }
-}
+// Note: pre-v0.18 versions of HTTP.FED.STRICT had an RFC1918
+// carve-out that exempted private/loopback/link-local/ULA/CGNAT
+// federation targets from the h2/h2s/webtransport requirement.
+// That carve-out was removed once docker/federation-pentagon
+// demonstrated the same UDP mutual-init race occurs on LAN as
+// on WAN — so the strict-scheme rule now applies uniformly and
+// the address-classification helpers it depended on were dropped.
+// If LAN-classification is needed elsewhere in the future, the
+// helpers live in the git history at the commit that removed them.

@@ -6647,7 +6647,7 @@ impl Inner {
                     //     Original eviction case.
                     //   * AwaitingAck = client sent HELLO, server
                     //     never replied. Common when an outbound
-                    //     federation link (--federate udp://X@P)
+                    //     federation link (--federate h2s://X@P)
                     //     points at a dead peer; without this the
                     //     peer entry sits in AwaitingAck for the
                     //     life of the process, retransmitting HELLO
