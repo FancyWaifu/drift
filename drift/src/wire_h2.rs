@@ -96,6 +96,24 @@ const H2_INITIAL_CONNECTION_WINDOW: u32 = 2 * 1024 * 1024;
 /// the occasional larger payload.
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 
+/// Maximum age of a queued outbound frame before it's dropped at
+/// dequeue. Same logical pattern as IP TTL: a packet that's been
+/// sitting in our send queue for too long is stale by the time
+/// it would reach the next hop. Dropping is preferable to
+/// forwarding stale data — the inner DRIFT transport will
+/// retransmit anyway via its sequence-number replay window.
+///
+/// 500ms is the right floor for federation hot path: longer than
+/// any reasonable hop's processing burst, shorter than a TCP
+/// retransmit timeout, so we drop before the upstream gives up.
+const MAX_FORWARD_AGE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Item carried through the per-stream outbound channel.
+/// The `Instant` is the enqueue timestamp; the stream pump checks
+/// it against `MAX_FORWARD_AGE` at dequeue and drops stale items
+/// before writing them to the HTTP/2 stream.
+type OutFrame = (std::time::Instant, Bytes);
+
 type RespBody = BoxBody<Bytes, io::Error>;
 
 // ─── PacketIO over an h2 stream pair ──────────────────────────────
@@ -115,11 +133,19 @@ const SEND_ARENA_CHUNK: usize = 64 * 1024;
 pub struct H2StreamPacketIO {
     /// Caller's outbound bytes flow into this channel; the
     /// `body_pump` task drains it and writes framed packets
-    /// into the HTTP/2 body stream.
-    send_tx: mpsc::Sender<Bytes>,
+    /// into the HTTP/2 body stream. Each item is paired with
+    /// its enqueue Instant so the stream-pump can drop stale
+    /// items (older than MAX_FORWARD_AGE).
+    send_tx: mpsc::Sender<OutFrame>,
     /// Inbound framed packets land here after the `body_drain`
     /// task parses them from the remote's HTTP/2 body stream.
     recv_rx: Mutex<mpsc::Receiver<Bytes>>,
+    /// Counter of frames dropped because the send channel was
+    /// full (drop-on-full / "AQM" policy borrowed from IP
+    /// routers). Visible via diagnostics; the application layer
+    /// retransmits via the inner DRIFT transport's replay
+    /// window so dropped frames recover end-to-end.
+    drop_counter: Arc<std::sync::atomic::AtomicU64>,
     /// The peer's view of "where we are." For client-side
     /// wraps this is the bridge's TCP address; for server-side
     /// wraps it's the connecting peer's TCP address.
@@ -144,16 +170,25 @@ pub struct H2StreamPacketIO {
 
 impl H2StreamPacketIO {
     pub fn new(
-        send_tx: mpsc::Sender<Bytes>,
+        send_tx: mpsc::Sender<OutFrame>,
         recv_rx: mpsc::Receiver<Bytes>,
         addr: SocketAddr,
     ) -> Self {
         Self {
             send_tx,
             recv_rx: Mutex::new(recv_rx),
+            drop_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             addr,
             send_arena: std::sync::Mutex::new(BytesMut::with_capacity(SEND_ARENA_CHUNK)),
         }
+    }
+
+    /// Diagnostic accessor: total frames dropped because the
+    /// send channel was full. Useful for operators watching for
+    /// bridges under load.
+    #[allow(dead_code)]
+    pub fn full_queue_drops(&self) -> u64 {
+        self.drop_counter.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -193,11 +228,36 @@ impl PacketIO for H2StreamPacketIO {
             // send_tx which we MUST NOT do while holding the
             // std::sync::Mutex.
         };
-        self.send_tx
-            .send(framed)
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "h2 send pump gone"))?;
-        Ok(buf.len())
+        // Drop-on-full instead of block-on-full: when the channel
+        // is saturated, drop the frame and report success to the
+        // caller. The inner DRIFT transport's replay window
+        // (sequence numbers + retransmit) recovers the missing
+        // packet end-to-end. This mirrors how IP routers handle
+        // queue overflow — they drop packets and let TCP/QUIC
+        // retransmit. Blocking the producer task here would stall
+        // OTHER federation flows behind a single slow downstream,
+        // which is the bug we're avoiding.
+        let item: OutFrame = (std::time::Instant::now(), framed);
+        match self.send_tx.try_send(item) {
+            Ok(()) => Ok(buf.len()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.drop_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(
+                    addr = %self.addr,
+                    "h2 send queue full; dropping (drop-on-full / AQM)"
+                );
+                // Lie to the caller: pretend the send succeeded.
+                // This matches IP-router semantics — the network
+                // doesn't tell the sender about a drop; the
+                // endpoint detects via missing ACK.
+                Ok(buf.len())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "h2 send pump gone",
+            )),
+        }
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
@@ -421,7 +481,7 @@ async fn handle_h2_request(
     let (in_tx, in_rx) = mpsc::channel::<Bytes>(RECV_QUEUE_DEPTH);
     // Outbound channel: PacketIO writes packets here; we drain
     // into the response body.
-    let (out_tx, out_rx) = mpsc::channel::<Bytes>(SEND_QUEUE_DEPTH);
+    let (out_tx, out_rx) = mpsc::channel::<OutFrame>(SEND_QUEUE_DEPTH);
 
     let body = req.into_body();
     tokio::spawn(drain_h2_body_into_packets(body, in_tx));
@@ -434,9 +494,19 @@ async fn handle_h2_request(
             .unwrap();
     }
 
-    // Build a streaming response body fed by `out_rx`.
-    let response_stream =
-        ReceiverStream::new(out_rx).map(|chunk| Ok::<_, io::Error>(Frame::data(chunk)));
+    // Build a streaming response body fed by `out_rx`. We drop
+    // stale items at dequeue: any frame whose enqueue Instant is
+    // older than MAX_FORWARD_AGE is too late to be useful by the
+    // time it would reach the next hop. The inner DRIFT transport
+    // retransmits stale-dropped packets via sequence-number
+    // replay. Same TTL-style staleness check used by IP routers.
+    let response_stream = ReceiverStream::new(out_rx).filter_map(|(ts, chunk): OutFrame| async move {
+        if ts.elapsed() > MAX_FORWARD_AGE {
+            None
+        } else {
+            Some(Ok::<_, io::Error>(Frame::data(chunk)))
+        }
+    });
     let body = BodyExt::boxed(StreamBody::new(response_stream));
     Response::builder()
         .status(StatusCode::OK)
@@ -532,15 +602,23 @@ where
         }
     });
 
-    let (out_tx, out_rx) = mpsc::channel::<Bytes>(SEND_QUEUE_DEPTH);
+    let (out_tx, out_rx) = mpsc::channel::<OutFrame>(SEND_QUEUE_DEPTH);
     let (in_tx, in_rx) = mpsc::channel::<Bytes>(RECV_QUEUE_DEPTH);
 
     // Outbound: drain out_rx into a stream of Frame<Bytes> that
-    // becomes the request body.
+    // becomes the request body. Same TTL-style stale-drop as the
+    // server side — frames older than MAX_FORWARD_AGE at dequeue
+    // are dropped on the floor rather than forwarded stale.
     let body_stream: Pin<
         Box<dyn futures_util::Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>,
     > = Box::pin(
-        ReceiverStream::new(out_rx).map(|chunk| Ok::<_, io::Error>(Frame::data(chunk))),
+        ReceiverStream::new(out_rx).filter_map(|(ts, chunk): OutFrame| async move {
+            if ts.elapsed() > MAX_FORWARD_AGE {
+                None
+            } else {
+                Some(Ok::<_, io::Error>(Frame::data(chunk)))
+            }
+        }),
     );
     let req_body = StreamBody::new(body_stream);
 

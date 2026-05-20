@@ -1098,10 +1098,27 @@ pub(crate) fn apply_udp_recv_buffer(sock: &UdpSocket, want_bytes: usize) {
     let _leak = s2.into_raw_fd(); // see SAFETY note above
     match req_result {
         Ok(()) => match granted {
+            // Clamp ratio of 80%+ is acceptable jitter; below that
+            // the bridge is meaningfully limited and the operator
+            // needs to act. Promote to WARN at that threshold.
+            // Internet-class relays run with GBs of dedicated
+            // buffer per interface — drift settling for 425 KB
+            // when it asked for 4 MB is exactly the kind of
+            // silent under-provisioning that produces tail-loss
+            // symptoms at K-large topologies.
+            Some(g) if g < want_bytes * 4 / 5 => tracing::warn!(
+                requested = want_bytes,
+                granted = g,
+                "SO_RCVBUF was clamped by the kernel. The bridge will silently \
+                 drop UDP packets under burst load. Fix on the host: \
+                 `echo 'net.core.rmem_max=134217728' >> /etc/sysctl.d/99-drift.conf \
+                 && sysctl -p /etc/sysctl.d/99-drift.conf`. See \
+                 docs/BRIDGE_OPTIMIZATION.md item 2 for the full sysctl tuning."
+            ),
             Some(g) if g < want_bytes => tracing::info!(
                 requested = want_bytes,
                 granted = g,
-                "SO_RCVBUF clamped by kernel; raise sysctl rmem_max for full size"
+                "SO_RCVBUF slightly clamped by kernel (within 20% of request — usually fine)"
             ),
             Some(g) => tracing::info!(
                 requested = want_bytes,
