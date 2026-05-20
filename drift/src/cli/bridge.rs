@@ -91,6 +91,11 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         // bridge restart). Default matches WireGuard's
         // RekeyTimeoutJitterMaxMs = 334.
         handshake_jitter_ms: args.handshake_jitter_ms,
+        // Phase G (FED_DISC): per-bridge cap on directory-entry
+        // re-emission depth. Default 4 — covers ~16-bridge
+        // linear chain. See `--max-announce-hops` CLI flag
+        // docstring for tuning notes.
+        max_announce_hops: args.max_announce_hops,
         ..TransportConfig::default()
     };
 

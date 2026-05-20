@@ -316,6 +316,25 @@ async fn run() -> Result<()> {
         // bridge to be Established before it can carry a
         // Federated envelope).
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Register presence with our local bridge so the server's
+        // reply path can find us. Without this, the bridge can't
+        // announce us in its FederationDirectory (announces only
+        // include clients with valid presence tickets), AND remote
+        // bridges hitting our local bridge with FindPeer queries
+        // won't get a PeerHere reply (handle_find_peer also gates
+        // on ticket existence). 60 s is plenty for a typical
+        // dial-reply round-trip; long-lived clients should refresh.
+        if let Err(e) = t.register_presence_to(&bridge_handle, 60_000).await {
+            // Non-fatal: register_presence_to can fail transiently
+            // (e.g. if the bridge HELLO hasn't fully completed).
+            // The dial still works for the OUTBOUND direction; the
+            // reply path may need FindPeer fallback.
+            eprintln!(
+                "drift-mosh: warning: presence registration with \
+                 bridge failed ({e}); replies may take longer to \
+                 route until proactive announces converge"
+            );
+        }
         let server_peer = t
             .add_federated_peer(server_pub, bridge_handle, target_bridge_pub)
             .await

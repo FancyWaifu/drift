@@ -38,7 +38,7 @@ pub use federated::{
     build as build_federated, build_directory, build_directory_v3, build_directory_v4,
     build_ticket, decode_ticket, encode_ticket, parse as parse_federated, parse_directory,
     parse_directory_v3, parse_directory_v4, ticket_signed_msg, verify_ticket, FederatedEnvelope,
-    PresenceTicket, FED_HEADER_LEN, MAX_ANNOUNCE_HOPS, MAX_DIRECTORY_ENTRIES,
+    PresenceTicket, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES,
     MAX_DIRECTORY_ENTRIES_V4, TICKET_LEN, UNKNOWN_BRIDGE_PUB,
 };
 pub use find_peer::{
@@ -267,6 +267,26 @@ pub struct TransportConfig {
     /// quiet to fully decay back to zero.
     pub bridge_fault_decay_secs: u64,
 
+    /// Phase G (FED_DISC): maximum hops a directory entry may
+    /// travel through proactive re-announcement. A direct local
+    /// entry has hops=0; a once-re-announced entry has hops=1;
+    /// a twice-re-announced entry has hops=2; etc. Bridges
+    /// don't re-emit entries with hops >= max_announce_hops.
+    ///
+    /// Default 4 — covers the typical homelab federation up to
+    /// ~16 bridges in a linear chain, or any-size full mesh.
+    /// Bridges in larger federations may set this higher;
+    /// bridges with strict privacy needs may set it lower
+    /// (0 = receivers don't re-emit; only the originating
+    /// bridge announces its direct clients).
+    ///
+    /// Note: this is a *per-bridge* cap on what THIS bridge
+    /// will re-emit. Each bridge in the chain enforces its
+    /// own cap independently — the lowest cap along the path
+    /// is the effective propagation limit. Receivers honor
+    /// whatever hops value an inbound entry carries.
+    pub max_announce_hops: u8,
+
     /// Phase PQ: enable the X25519 + ML-KEM-768 hybrid
     /// handshake. When `true`:
     ///   - This transport's outbound HELLOs carry an ML-KEM
@@ -399,6 +419,10 @@ impl Default for TransportConfig {
             cover_traffic_rate_hz: None,
             bridge_fault_skip_threshold: 5,
             bridge_fault_decay_secs: 30,
+            // Phase G (FED_DISC): covers ~16-bridge linear
+            // chain or any-size full mesh. See field doc for
+            // tuning guidance.
+            max_announce_hops: 4,
             // Phase PQ-T.12: PQ is now ON by default. The wire
             // is interop-compatible with classical peers (a
             // PQ-enabled server still accepts classical
@@ -454,6 +478,10 @@ impl TransportConfig {
             cover_traffic_rate_hz: None,
             bridge_fault_skip_threshold: 5,
             bridge_fault_decay_secs: 30,
+            // Phase G (FED_DISC): covers ~16-bridge linear
+            // chain or any-size full mesh. See field doc for
+            // tuning guidance.
+            max_announce_hops: 4,
             // Phase PQ-T.12: PQ is now ON by default. The wire
             // is interop-compatible with classical peers (a
             // PQ-enabled server still accepts classical
@@ -506,6 +534,10 @@ impl TransportConfig {
             cover_traffic_rate_hz: None,
             bridge_fault_skip_threshold: 5,
             bridge_fault_decay_secs: 30,
+            // Phase G (FED_DISC): covers ~16-bridge linear
+            // chain or any-size full mesh. See field doc for
+            // tuning guidance.
+            max_announce_hops: 4,
             // Phase PQ-T.12: PQ is now ON by default. The wire
             // is interop-compatible with classical peers (a
             // PQ-enabled server still accepts classical
@@ -2146,13 +2178,19 @@ impl Transport {
         // PeerId so we can apply split-horizon (don't tell B
         // about a client we learned from B).
         let transitive: Vec<([u8; 32], federated::PresenceTicket, u8, PeerId)> = {
+            // Phase G: read cap from per-bridge config rather
+            // than the previous hardcoded MAX_ANNOUNCE_HOPS=2.
+            // Receivers honor whatever hops value an inbound
+            // entry carries; this cap only governs what we
+            // re-emit.
+            let hops_cap = self.inner.config.max_announce_hops;
             let dir = self.inner.peer_directory.lock().unwrap();
             let hops_map = self.inner.peer_directory_hops.lock().unwrap();
             let tickets = self.inner.peer_directory_tickets.lock().unwrap();
             let mut out = Vec::new();
             for (client_pub, (announcer_pid, _)) in dir.iter() {
                 let hops = match hops_map.get(client_pub) {
-                    Some(&h) if h + 1 < federated::MAX_ANNOUNCE_HOPS => h,
+                    Some(&h) if h + 1 < hops_cap => h,
                     _ => continue,
                 };
                 if let Some(ticket) = tickets.get(client_pub) {
@@ -3676,57 +3714,82 @@ impl Inner {
             }));
         }
 
-        // (2) We're the destination bridge — forward to the
-        //     target client over our local session with them.
-        if env.target_bridge_pub == our_pub {
-            let client_peer_id = derive_peer_id(&env.target_client_pub);
-
-            // (Auto-register removed in the same change that
-            //  introduced the source-authentication check above.
-            //  Auto-registering an arbitrary sender as a bridge
-            //  let unrelated clients inject routing entries into
-            //  the federation table — and even with the sender-
-            //  matches-claim restriction, the resulting "self-
-            //  attested" bridge could still spoof source_client_pub
-            //  for envelopes it relayed back, defeating the whole
-            //  point of the source check.
-            //
-            //  Federation requires *symmetric* --federate config on
-            //  both bridges, matching Matrix / XMPP server-to-server
-            //  trust. See drift-config/README.md.)
-
-            // Re-build the envelope unchanged; only the outer
-            // DRIFT envelope (src, dst, encryption) changes.
-            let re_envelope = federated::build(
-                &env.target_bridge_pub,
-                &env.target_client_pub,
-                &env.source_bridge_pub,
-                &env.source_client_pub,
-                env.payload,
-            );
-            if let Err(e) = self
-                .send_typed(&client_peer_id, PacketType::Federated, &re_envelope)
-                .await
-            {
-                debug!(
-                    error = %e,
-                    target = ?env.target_client_pub,
-                    "federated: failed to deliver to local client"
-                );
-            }
-            return Ok(None);
-        }
-
-        // (3) Intermediate hop — forward via federation table,
-        // with a peer-directory fallback for client-supplied
-        // "I don't know the bridge" requests (target_bridge_pub
-        // is the all-zero sentinel). When the sentinel is set,
-        // we look up the *target client* in our directory and
-        // forward to whichever bridge announced them — rewriting
-        // the envelope's target_bridge_pub so the next hop and
-        // the eventual destination can both validate routing
-        // normally.
-        let unknown = env.target_bridge_pub == federated::UNKNOWN_BRIDGE_PUB;
+        // (2) + (3) collapsed — directory-lookup routing.
+        //
+        // The previous separate case-2 ("target_bridge_pub == our_pub
+        // → deliver locally; drop on miss") had a transit-hop bug
+        // that surfaced as soon as proactive announces propagated
+        // beyond one hop (Phase F in FEDERATION_DISCOVERY.md):
+        //
+        //   - Bridge B re-announces client X (originally announced
+        //     by bridge C) to bridge A. A's peer_directory now has
+        //     X → (B's_peer_id, ts).
+        //   - A later forwards a packet for X via the directory:
+        //     case-3 rewrites target_bridge_pub = B_pub, sends to B.
+        //   - B receives, sees target_bridge_pub == our_pub → case-2
+        //     local-delivery → MISS (X isn't on B, X is on C). The
+        //     old code logged "failed to deliver to local client"
+        //     and dropped silently.
+        //
+        // The fix is structural: treat `target_bridge_pub == our_pub`
+        // AND `target_bridge_pub == UNKNOWN_BRIDGE_PUB` the same way
+        // — try local delivery first, fall through to directory
+        // lookup on miss. The directory entry's announcer_pub
+        // becomes the rewritten target_bridge_pub, and B's directory
+        // (which has X → C) forwards to C. C local-delivers.
+        //
+        // (Auto-register removed in the same earlier change that
+        //  introduced the source-authentication check above.
+        //  Federation requires *symmetric* --federate config on
+        //  both bridges, matching Matrix / XMPP server-to-server
+        //  trust. See drift-config/README.md.)
+        // Phase F (FED_DISC): treat THREE conditions as "needs
+        // routing via directory lookup":
+        //   (a) UNKNOWN_BRIDGE_PUB sentinel — client doesn't know
+        //       the target bridge (original case 3).
+        //   (b) target_bridge_pub == our_pub but client isn't
+        //       local — we're a transit hop for a re-announced
+        //       entry (the Phase F transit bug fix).
+        //   (c) target_bridge_pub is some specific OTHER bridge
+        //       not in our federation_table — happens on REPLY
+        //       traffic when the destination is multiple hops
+        //       away through bridges we don't directly federate
+        //       with (e.g. local-client on b1 replies to a remote
+        //       client whose bridge b3 isn't in b1's federation
+        //       table). Previously dropped with "no route to
+        //       target bridge"; now we consult the directory and
+        //       forward via whichever of our federation peers
+        //       has announced the target client.
+        // The `unknown` (= "needs directory lookup") predicate
+        // covers three conditions:
+        //   (a) UNKNOWN_BRIDGE_PUB sentinel — the client doesn't
+        //       know which bridge hosts the target.
+        //   (b) target_bridge_pub == our_pub — we may be a transit
+        //       hop for a re-announced entry. We try local
+        //       delivery first, then fall through to directory
+        //       lookup if the client isn't actually local.
+        //   (c) target_bridge_pub names a bridge that isn't in
+        //       our federation_table — happens on REPLY traffic
+        //       when the destination is reachable only via a
+        //       multi-hop chain through bridges we don't directly
+        //       federate with. (Concretely: local-client on b1
+        //       replies to a remote client whose bridge b3 isn't
+        //       in b1's federation table. We should consult the
+        //       directory / fall back to FindPeer rather than
+        //       drop.)
+        //
+        // Negating (a or b or c) gives us "target IS a known
+        // federation peer we can directly route to" — the fast
+        // path.
+        let fed_table_has_target = env.target_bridge_pub
+            != federated::UNKNOWN_BRIDGE_PUB
+            && env.target_bridge_pub != our_pub
+            && self
+                .federation_table
+                .lock()
+                .unwrap()
+                .contains_key(&env.target_bridge_pub);
+        let unknown = !fed_table_has_target;
         let (next_hop, resolved_bridge_pub) = if unknown {
             // First check: do WE host this client locally? A
             // single-bridge federation with no remote peers has

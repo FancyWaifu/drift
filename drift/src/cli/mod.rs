@@ -275,6 +275,27 @@ pub struct BridgeArgs {
     /// haven't upgraded yet, or for tests.
     #[arg(long = "allow-legacy-federation", default_value_t = false)]
     pub allow_legacy_federation: bool,
+
+    /// Phase G (FED_DISC): maximum hops a directory entry may
+    /// travel through proactive re-announcement.
+    ///
+    /// A direct local entry has hops=0; a once-re-announced
+    /// entry has hops=1; etc. This bridge re-emits entries only
+    /// when their current hops value is strictly less than this
+    /// cap. Receivers honor whatever hops value arrived; this
+    /// cap only governs THIS bridge's re-emission.
+    ///
+    /// Default 4 covers a ~16-bridge linear chain or any-size
+    /// full mesh. Bump higher for larger federations on partial
+    /// topologies; bump lower (or 0 — never re-emit) for
+    /// privacy-sensitive bridges that only want their own
+    /// direct clients advertised.
+    ///
+    /// Empirically validated against `docker/federation-topology/`
+    /// — chain/ring/star at 5 bridges all converge to 20/20
+    /// cross-bridge dial coverage with the default 4.
+    #[arg(long = "max-announce-hops", default_value_t = 4)]
+    pub max_announce_hops: u8,
 }
 
 #[derive(clap::Args)]

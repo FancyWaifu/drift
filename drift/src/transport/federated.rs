@@ -267,13 +267,22 @@ pub const MAX_DIRECTORY_ENTRIES: usize = 10;
 /// metadata). 8 * 129 + 4 + 150 ≈ 1186 bytes < MAX_PAYLOAD.
 pub const MAX_DIRECTORY_ENTRIES_V4: usize = 8;
 
-/// Maximum hop count a re-announced directory entry may carry.
-/// Caps the radius of proactive propagation; reactive `FindPeer`
-/// covers the long tail (see `FEDERATION_DISCOVERY.md` §8).
+/// Recommended-default hop count for re-announced directory
+/// entries. As of Phase G the actual cap is configurable
+/// per-bridge via `TransportConfig::max_announce_hops`; this
+/// constant tracks the default that ships in the stock build.
+///
 /// A direct-client entry has hops=0; an entry forwarded once has
-/// hops=1; an entry forwarded twice has hops=2 — caps here. We
-/// don't re-announce entries with hops >= MAX_ANNOUNCE_HOPS.
-pub const MAX_ANNOUNCE_HOPS: u8 = 2;
+/// hops=1; an entry forwarded twice has hops=2; etc. Bridges
+/// don't re-announce entries with hops >= their configured cap.
+///
+/// History: pre-Phase-G this was hardcoded to 2 (covered the
+/// homelab triangle/mesh case). Phase G bumped the default to 4
+/// — covers ~16-bridge linear chains — after the docker
+/// federation-pentagon sweep demonstrated 5-bridge chain/star
+/// topologies needed >2 hops. See FEDERATION_DISCOVERY.md §10
+/// Phase G.
+pub const MAX_ANNOUNCE_HOPS: u8 = 4;
 
 /// Build a FederationDirectory v2 payload from a slice of
 /// (pubkey, ticket) pairs. Callers MUST keep

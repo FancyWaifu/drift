@@ -63,6 +63,21 @@ async fn build_transport_with_mode(secret: [u8; 32], mode: FindPeerMode) -> Tran
         .unwrap()
 }
 
+/// Build a transport with a custom `max_announce_hops` cap (Phase G).
+/// Used by tests that verify proactive announces propagate further
+/// than the legacy hardcoded hops=2 cap.
+async fn build_transport_with_hops(secret: [u8; 32], max_announce_hops: u8) -> Transport {
+    let id = Identity::from_secret_bytes(secret);
+    let cfg = TransportConfig {
+        accept_any_peer: true,
+        max_announce_hops,
+        ..Default::default()
+    };
+    Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), id, cfg)
+        .await
+        .unwrap()
+}
+
 /// Establish a bidirectional federation between `bridge_a` and
 /// `bridge_b`. Returns the PeerIds each bridge uses to address
 /// the other.
@@ -943,6 +958,174 @@ async fn proactive_announce_propagates_2_hops() {
         bridge_c.pending_finds_count(),
         0,
         "PHASE C: proactive propagation must not require a reactive FindPeer"
+    );
+}
+
+// ─── Test 1c-bis: Phase G — configurable announce hops cap ────────
+
+#[tokio::test]
+async fn proactive_announce_respects_configurable_hops_cap() {
+    // 4-bridge chain: A — B — C — D. Each bridge has its
+    // immediate neighbor(s) as federation peers; no shortcuts.
+    // Client X on A. We want D's directory to learn about X
+    // through three transitive re-announces (A → B → C → D).
+    //
+    // Legacy MAX_ANNOUNCE_HOPS=2 caps at hops=1 re-emission;
+    // hops=1 entries on C can't be re-emitted further, so D
+    // never learns. With Phase G's configurable cap raised to
+    // 4, hops=2 entries on C ARE re-emitted, and D records the
+    // entry with hops=2.
+    let hops_cap: u8 = 4;
+    let bridge_a = build_transport_with_hops([0xA1; 32], hops_cap).await;
+    let a_pub = Identity::from_secret_bytes([0xA1; 32]).public_bytes();
+    let bridge_b = build_transport_with_hops([0xB2; 32], hops_cap).await;
+    let b_pub = Identity::from_secret_bytes([0xB2; 32]).public_bytes();
+    let bridge_c = build_transport_with_hops([0xC3; 32], hops_cap).await;
+    let c_pub = Identity::from_secret_bytes([0xC3; 32]).public_bytes();
+    let bridge_d = build_transport_with_hops([0xD4; 32], hops_cap).await;
+    let d_pub = Identity::from_secret_bytes([0xD4; 32]).public_bytes();
+
+    let (_a_to_b, _b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+    let (_b_to_c, _c_to_b) = federate(&bridge_b, &b_pub, &bridge_c, &c_pub).await;
+    let (_c_to_d, _d_to_c) = federate(&bridge_c, &c_pub, &bridge_d, &d_pub).await;
+
+    let client_x_secret = [0xEF; 32];
+    let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
+    let (_client_x, _x_to_a) =
+        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+
+    // Walk announces along the chain. Each bridge has to
+    // re-emit before the next hop learns.
+    let a_entries = bridge_a.established_client_entries().await;
+    bridge_a.announce_directory(&a_entries).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        bridge_b.peer_directory_contains(&client_x_pub),
+        "B should learn X with hops=0 from A's direct announce"
+    );
+
+    let b_entries = bridge_b.established_client_entries().await;
+    bridge_b.announce_directory(&b_entries).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        bridge_c.peer_directory_contains(&client_x_pub),
+        "C should learn X transitively with hops=1 (within legacy cap)"
+    );
+
+    // The Phase G assertion: the legacy cap of 2 stops here.
+    // With the new cap=4, C re-emits the hops=1 entry to D
+    // with hops=2 — D learns.
+    let c_entries = bridge_c.established_client_entries().await;
+    bridge_c.announce_directory(&c_entries).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        bridge_d.peer_directory_contains(&client_x_pub),
+        "PHASE G: D should learn X via C's hops=2 re-announce — would have been clamped under the legacy cap"
+    );
+}
+
+// ─── Test 1d: Phase F — live multi-hop forwarding ─────────────────
+
+#[tokio::test]
+async fn live_multi_hop_forwarding_via_directory() {
+    // 3-bridge chain: A — B — C  (NO direct A↔C edge.)
+    //
+    // Phase F regression test. Distinct from `find_peer_multi_hop_chain`
+    // and `proactive_announce_propagates_2_hops` in that it exercises
+    // the *live forwarding path* end-to-end after proactive announces
+    // populate the directory: a Federated envelope injected at C must
+    // arrive at client_x on A, traversing C→B→A via directory lookup
+    // at each transit hop.
+    //
+    // Pre-fix bug (before the case-2/case-3 consolidation): B
+    // receives the envelope with target_bridge_pub = B_pub (rewritten
+    // by C since B is the immediate announcer of X in C's directory).
+    // Old case 2 fired ("we're the destination bridge"), tried local
+    // delivery for X, missed (X is on A), and dropped silently. The
+    // unit tests for Phases B and C bypass this via either
+    // __debug_send_federated_envelope's FindPeer-trigger path or the
+    // directory-state assertions — neither exercises the
+    // re-announce-then-route-back path that the docker pentagon
+    // sweep exposed.
+    let bridge_a = build_transport([0xA7; 32]).await;
+    let a_pub = Identity::from_secret_bytes([0xA7; 32]).public_bytes();
+    let bridge_b = build_transport([0xB8; 32]).await;
+    let b_pub = Identity::from_secret_bytes([0xB8; 32]).public_bytes();
+    let bridge_c = build_transport([0xC9; 32]).await;
+    let c_pub = Identity::from_secret_bytes([0xC9; 32]).public_bytes();
+
+    let (_a_to_b, _b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
+    let (b_to_c, _c_to_b) = federate(&bridge_b, &b_pub, &bridge_c, &c_pub).await;
+    // Deliberately do NOT federate A and C.
+
+    let client_x_secret = [0xDF; 32];
+    let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
+    let (client_x, _x_to_a) =
+        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+
+    // Drive announces both hops:
+    //   1) A → B: B learns X with hops=0 (direct).
+    //   2) B → C: B's announce includes X as a transitive entry
+    //      (hops=1). C records X → (B's peer_id, hops=1).
+    let a_entries = bridge_a.established_client_entries().await;
+    bridge_a.announce_directory(&a_entries).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        bridge_b.peer_directory_contains(&client_x_pub),
+        "precondition: B should know X directly from A's announce"
+    );
+
+    let b_entries = bridge_b.established_client_entries().await;
+    bridge_b.announce_directory(&b_entries).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        bridge_c.peer_directory_contains(&client_x_pub),
+        "precondition: C should know X transitively via B"
+    );
+
+    // Drain any background blips on X's recv channel so the
+    // final assertion observes the specific payload we send.
+    while tokio::time::timeout(Duration::from_millis(50), client_x.recv())
+        .await
+        .is_ok()
+    {}
+
+    // Trigger: inject a Federated envelope INTO bridge_c. The
+    // envelope is shipped from B's perspective (B is in C's
+    // federation_table, so C trusts B's source-claim fields).
+    // C looks up X in its directory → announcer = B → forwards
+    // to B with target_bridge_pub rewritten to B_pub.
+    //
+    // After Phase F: B receives, sees target_bridge_pub == own_pub,
+    // local-miss on X, falls through to directory lookup, finds
+    // X → A, forwards to A with target_bridge_pub = A_pub. A
+    // receives, X IS local, delivers via session. X's recv()
+    // surfaces the payload via case-1 (target_client_pub == our_pub).
+    let payload = b"live-multi-hop-phase-f";
+    let env = build_unknown_target_envelope(
+        &client_x_pub,
+        &c_pub,           // source_bridge: the envelope claims to come from a client on C
+        &[0xEE; 32],      // source_client: hypothetical
+        payload,
+    );
+    bridge_b
+        .__debug_send_federated_envelope(&b_to_c, &env)
+        .await
+        .unwrap();
+
+    // Wait up to 2 s for the C → B → A → X delivery chain.
+    let pkt = tokio::time::timeout(Duration::from_secs(2), client_x.recv())
+        .await
+        .expect("PHASE F: multi-hop delivery to client_x timed out — the case-2/case-3 fallback is broken")
+        .expect("PHASE F: client_x recv channel closed unexpectedly");
+    assert_eq!(
+        pkt.payload, payload,
+        "PHASE F: payload should round-trip C→B→A→X intact"
+    );
+    assert_eq!(
+        pkt.federated_from,
+        Some([0xEE; 32]),
+        "PHASE F: federated_from should preserve the originating client pubkey"
     );
 }
 
