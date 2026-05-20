@@ -1,0 +1,8 @@
+default_bridge = "150fbc98be2768232f316393635039e0696b53dd6546e49b8ce07ba32e9a891e"
+
+[network]
+name = "federation-pentagon"
+
+[hosts.local-bridge]
+pubkey = "150fbc98be2768232f316393635039e0696b53dd6546e49b8ce07ba32e9a891e"
+endpoints = ["udp://10.55.0.12:51820"]
