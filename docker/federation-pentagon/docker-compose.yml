@@ -49,10 +49,11 @@ services:
     command: >
       drift --identity /identities/b1.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://10.55.0.12:51820@${PUB_B2}
-        --federate udp://10.55.0.13:51820@${PUB_B3}
-        --federate udp://10.55.0.14:51820@${PUB_B4}
-        --federate udp://10.55.0.15:51820@${PUB_B5}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://10.55.0.12:51827@${PUB_B2}
+        --federate h2s://10.55.0.13:51827@${PUB_B3}
+        --federate h2s://10.55.0.14:51827@${PUB_B4}
+        --federate h2s://10.55.0.15:51827@${PUB_B5}
 
   bridge-b2:
     <<: *base-build
@@ -65,10 +66,11 @@ services:
     command: >
       drift --identity /identities/b2.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://10.55.0.11:51820@${PUB_B1}
-        --federate udp://10.55.0.13:51820@${PUB_B3}
-        --federate udp://10.55.0.14:51820@${PUB_B4}
-        --federate udp://10.55.0.15:51820@${PUB_B5}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://10.55.0.11:51827@${PUB_B1}
+        --federate h2s://10.55.0.13:51827@${PUB_B3}
+        --federate h2s://10.55.0.14:51827@${PUB_B4}
+        --federate h2s://10.55.0.15:51827@${PUB_B5}
 
   bridge-b3:
     <<: *base-build
@@ -81,10 +83,11 @@ services:
     command: >
       drift --identity /identities/b3.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://10.55.0.11:51820@${PUB_B1}
-        --federate udp://10.55.0.12:51820@${PUB_B2}
-        --federate udp://10.55.0.14:51820@${PUB_B4}
-        --federate udp://10.55.0.15:51820@${PUB_B5}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://10.55.0.11:51827@${PUB_B1}
+        --federate h2s://10.55.0.12:51827@${PUB_B2}
+        --federate h2s://10.55.0.14:51827@${PUB_B4}
+        --federate h2s://10.55.0.15:51827@${PUB_B5}
 
   bridge-b4:
     <<: *base-build
@@ -97,10 +100,11 @@ services:
     command: >
       drift --identity /identities/b4.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://10.55.0.11:51820@${PUB_B1}
-        --federate udp://10.55.0.12:51820@${PUB_B2}
-        --federate udp://10.55.0.13:51820@${PUB_B3}
-        --federate udp://10.55.0.15:51820@${PUB_B5}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://10.55.0.11:51827@${PUB_B1}
+        --federate h2s://10.55.0.12:51827@${PUB_B2}
+        --federate h2s://10.55.0.13:51827@${PUB_B3}
+        --federate h2s://10.55.0.15:51827@${PUB_B5}
 
   bridge-b5:
     <<: *base-build
@@ -113,10 +117,11 @@ services:
     command: >
       drift --identity /identities/b5.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://10.55.0.11:51820@${PUB_B1}
-        --federate udp://10.55.0.12:51820@${PUB_B2}
-        --federate udp://10.55.0.13:51820@${PUB_B3}
-        --federate udp://10.55.0.14:51820@${PUB_B4}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://10.55.0.11:51827@${PUB_B1}
+        --federate h2s://10.55.0.12:51827@${PUB_B2}
+        --federate h2s://10.55.0.13:51827@${PUB_B3}
+        --federate h2s://10.55.0.14:51827@${PUB_B4}
 
   # ─── 5 SERVERS ───────────────────────────────────────────────────
   # Each on a different bridge. Servers know ONLY their on-ramp.

@@ -69,22 +69,25 @@ scp -o BatchMode=yes $WORKDIR/c.hex  root@$D4:/tmp/c.hex  >/dev/null
 start_b1() {
   ssh -o BatchMode=yes root@$D1 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/b.key bridge \
     --listen udp://0.0.0.0:51820 \
-    --federate udp://$D2:51820@$PUB_B2 \
-    --federate udp://$D3:51820@$PUB_B3 \
+    --listen h2s://0.0.0.0:51827 \
+    --federate h2s://$D2:51827@$PUB_B2 \
+    --federate h2s://$D3:51827@$PUB_B3 \
     > /tmp/bridge.log 2>&1 &"
 }
 start_b2() {
   ssh -o BatchMode=yes root@$D2 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/b.key bridge \
     --listen udp://0.0.0.0:51820 \
-    --federate udp://$D1:51820@$PUB_B1 \
-    --federate udp://$D3:51820@$PUB_B3 \
+    --listen h2s://0.0.0.0:51827 \
+    --federate h2s://$D1:51827@$PUB_B1 \
+    --federate h2s://$D3:51827@$PUB_B3 \
     > /tmp/bridge.log 2>&1 &"
 }
 start_b3() {
   ssh -o BatchMode=yes root@$D3 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/b.key bridge \
     --listen udp://0.0.0.0:51820 \
-    --federate udp://$D1:51820@$PUB_B1 \
-    --federate udp://$D2:51820@$PUB_B2 \
+    --listen h2s://0.0.0.0:51827 \
+    --federate h2s://$D1:51827@$PUB_B1 \
+    --federate h2s://$D2:51827@$PUB_B2 \
     > /tmp/bridge.log 2>&1 &"
 }
 

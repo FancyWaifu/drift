@@ -28,7 +28,8 @@ services:
     command: >
       drift --identity /identities/d2.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://172.30.0.13:51820@${PUB_D3}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://172.30.0.13:51827@${PUB_D3}
 
   bridge-d3:
     build:
@@ -45,7 +46,8 @@ services:
     command: >
       drift --identity /identities/d3.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://172.30.0.12:51820@${PUB_D2}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://172.30.0.12:51827@${PUB_D2}
 
   mosh-server:
     build:

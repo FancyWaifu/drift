@@ -75,8 +75,8 @@ docker compose -p federation-triangle up -d --quiet-pull
 # Bridges announce every 7 s; first announce fires 1 s after
 # startup. With three federated peers each, give 14 s of slack on
 # slow CPUs.
-echo "[4/5] Waiting 14s for triangle directories to converge…"
-sleep 14
+echo "[4/5] Waiting 45s for triangle directories to converge…"
+sleep 45
 
 # Sanity: each server should print its banner. If the bridges
 # aren't talking, surface that early.

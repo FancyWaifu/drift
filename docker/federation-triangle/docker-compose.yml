@@ -35,8 +35,9 @@ services:
     command: >
       drift --identity /identities/b1.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://172.31.0.13:51820@${PUB_B2}
-        --federate udp://172.31.0.14:51820@${PUB_B3}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://172.31.0.13:51827@${PUB_B2}
+        --federate h2s://172.31.0.14:51827@${PUB_B3}
 
   bridge-b2:
     build:
@@ -53,8 +54,9 @@ services:
     command: >
       drift --identity /identities/b2.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://172.31.0.12:51820@${PUB_B1}
-        --federate udp://172.31.0.14:51820@${PUB_B3}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://172.31.0.12:51827@${PUB_B1}
+        --federate h2s://172.31.0.14:51827@${PUB_B3}
 
   bridge-b3:
     build:
@@ -71,8 +73,9 @@ services:
     command: >
       drift --identity /identities/b3.key bridge
         --listen udp://0.0.0.0:51820
-        --federate udp://172.31.0.12:51820@${PUB_B1}
-        --federate udp://172.31.0.13:51820@${PUB_B2}
+        --listen h2s://0.0.0.0:51827
+        --federate h2s://172.31.0.12:51827@${PUB_B1}
+        --federate h2s://172.31.0.13:51827@${PUB_B2}
 
   server-s1:
     build:

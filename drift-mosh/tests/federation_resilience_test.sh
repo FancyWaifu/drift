@@ -46,7 +46,8 @@ scp -o BatchMode=yes $WORKDIR/d4.hex root@$D4:/tmp/id.hex >/dev/null 2>&1
 start_d2_bridge() {
   ssh -o BatchMode=yes root@$D2 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/id.key bridge \
     --listen udp://0.0.0.0:51820 \
-    --federate udp://$D3:51820@$PUB_D3 \
+    --listen h2s://0.0.0.0:51827 \
+    --federate h2s://$D3:51827@$PUB_D3 \
     > /tmp/bridge.log 2>&1 &"
 }
 start_d3_bridge() {
@@ -55,7 +56,8 @@ start_d3_bridge() {
   # envelopes relayed by D2.
   ssh -o BatchMode=yes root@$D3 "rm -f /tmp/bridge.log; nohup $DRIFT --identity /tmp/id.key bridge \
     --listen udp://0.0.0.0:51820 \
-    --federate udp://$D2:51820@$PUB_D2 \
+    --listen h2s://0.0.0.0:51827 \
+    --federate h2s://$D2:51827@$PUB_D2 \
     > /tmp/bridge.log 2>&1 &"
 }
 kill_d2() { ssh -o BatchMode=yes root@$D2 'pkill -9 -f drift_bin/drift 2>/dev/null'; }
