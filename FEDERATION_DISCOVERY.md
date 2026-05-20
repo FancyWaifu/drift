@@ -423,7 +423,7 @@ Suggested incremental rollout — each phase is independently usable:
 - ✓ Prunes expired entries from `pending_finds` (2s lifetime), `recent_queries` (10s), `neg_cache` (5s), `forwarded_queries` (slaved to recent_queries — same query_id key).
 - ✓ Bounds memory growth across long-lived bridge processes.
 
-**Phase F — Case-2 fallback on local miss (multi-hop forwarding fix). PLANNED.**
+**Phase F — Case-2 fallback on local miss (multi-hop forwarding fix). DONE.**
 
 The 4×3 topology sweep in `docker/federation-topology/` (2026-05-19)
 exposed a forwarding bug in the live `drift bridge` subcommand.
@@ -451,46 +451,77 @@ points at A (the immediate announcer), not C.
 
 **Fix (Phase F-1):** When case 2 (`target_bridge_pub == our_pub`)
 local-delivery lookup misses, fall through to case 3 (directory
-lookup). This keeps the wire format unchanged and handles the
-transit case correctly:
+lookup). Implementation details:
 
-  - A receives Federated envelope with `target_bridge_pub = A_pub`.
-  - A's local clients don't include X → fall through.
-  - A's directory has `X → (C's_peer_id, ts)` (A learned it
-    from C directly, hops=0).
-  - A rewrites `target_bridge_pub = C_pub`, forwards to C.
-  - C receives, case 2 hits, X IS a local client of C → deliver.
+  - The `unknown` predicate is now `!fed_table_has_target` —
+    folding three cases into the consolidated directory-lookup
+    path: UNKNOWN_BRIDGE_PUB, our_pub, AND any specific bridge
+    that isn't in our federation_table (the latter handles
+    REPLY traffic where the destination is reachable only via
+    a multi-hop chain through federation peers we don't
+    directly know about).
+  - Case 2's explicit block is gone; local delivery is the
+    `local_hit` sub-branch of case 3.
 
-Tests:
-  - New integration test `federation_discovery::live_ring_multi_hop_chain`
-    that mirrors the docker pentagon ring topology but in-process,
-    so CI catches the bug without needing Docker.
-  - Existing unit tests (`find_peer_multi_hop_chain`,
-    `proactive_announce_propagates_2_hops`) continue to pass —
-    they exercise the FindPeer/PeerHere reactive path, which is
-    unaffected.
-  - `docker/federation-pentagon` sweep expected to flip from
-    10-14/20 (ring) to 20/20 after the fix lands.
+  ✓ `drift/src/transport/mod.rs::handle_federated` —
+    consolidated `unknown` predicate, `fed_table_has_target`
+    fast-path check, transit-hop drop logging cleaned up.
+  ✓ Integration test `live_multi_hop_forwarding_via_directory`
+    in `drift/tests/federation_discovery.rs` — exercises
+    real packet flow through a 3-bridge chain. Fails on
+    pre-Phase-F code; passes after the fix.
+  ✓ All 13 existing federation_discovery tests continue to
+    pass.
 
-**Phase G — Configurable `MAX_ANNOUNCE_HOPS`. PLANNED.**
+**Phase F-2 — drift-mosh-client presence registration. DONE.**
 
-Current cap is hardcoded at 2 (one transitive re-announce). That
-covers 5-bridge mesh and ring (max shortest-path = 2) but NOT
-5-bridge chain (max shortest-path = 4) or arbitrary larger
-topologies the user wants to deploy (target: 20 bridges).
+Federation discovery wouldn't actually deliver REPLY traffic
+even after Phase F-1 landed, because drift-mosh-client never
+called `register_presence_to`. Consequence: a server's reply
+to a client could traverse the federation but no intermediate
+bridge could answer FindPeer about the client (handle_find_peer
+gates target_is_local on ticket existence) — and the client's
+local bridge couldn't include it in proactive announces either.
 
-**Fix (Phase G-1):** Add `--max-announce-hops <N>` CLI flag on
-`drift bridge`, plumbed through `TransportConfig` to the
-`announce_directory` re-emission gate. Default 4 (covers up to
-~16-bridge chain or full mesh up to any size). Per-bridge
-configuration — bridges in the same federation can pick different
-caps; receivers honor whatever hops value arrived.
+  ✓ `drift-mosh/src/bin/client.rs` calls
+    `register_presence_to` with a 60 s lifetime immediately
+    after the bridge HELLO completes. Failure is non-fatal:
+    the outbound dial works regardless; only inbound replies
+    via federation discovery are affected if registration
+    fails.
 
-Tests:
-  - `docker/federation-topology/chain × {h2s,h2,webtransport}`
-    expected to flip from 8/20 to 20/20 after Phase F+G land
-    (chain needs both: directory entries propagating ≥3 hops, AND
-    each transit bridge actually forwarding via its directory).
+This is conceptually still "Phase F" because it's the
+reply-direction sibling of the case-2/case-3 forwarding fix:
+both are required to make the dial/reply round-trip work
+across multi-hop federation. Long-lived clients should refresh
+the ticket periodically (lifetime_ms / 2 cadence).
+
+**Phase G — Configurable `MAX_ANNOUNCE_HOPS`. DONE.**
+
+Pre-Phase-G the cap was hardcoded at `2` (one transitive
+re-announce). That covered 5-bridge mesh and ring (max
+shortest-path = 2) but NOT 5-bridge chain (max shortest-path =
+4) — and didn't accommodate the 20-bridge federation target.
+
+Implementation:
+
+  ✓ `TransportConfig::max_announce_hops: u8` field, default
+    `4`. Threaded through `announce_directory`'s re-emission
+    gate (replaces the hardcoded `MAX_ANNOUNCE_HOPS`
+    constant reference). Receivers honor whatever hops value
+    arrived; this cap only governs THIS bridge's re-emission.
+  ✓ `drift bridge --max-announce-hops <N>` CLI flag with the
+    same default.
+  ✓ The `federated::MAX_ANNOUNCE_HOPS` constant remains as
+    the historical default reference, bumped from 2 → 4 to
+    match. Only used in doc comments now — actual cap is in
+    `TransportConfig`.
+  ✓ Integration test
+    `proactive_announce_respects_configurable_hops_cap` in
+    `drift/tests/federation_discovery.rs` — 4-bridge chain
+    confirms directory entries propagate 3 hops with the new
+    default. Would have clamped at 1 hop under the legacy
+    cap of 2.
 
 ---
 
