@@ -62,8 +62,39 @@ const MAX_H2_FRAME: usize = 65535;
 
 /// Bounded channels keep per-stream memory in a predictable
 /// range; backpressure is real if either direction stalls.
-const SEND_QUEUE_DEPTH: usize = 256;
-const RECV_QUEUE_DEPTH: usize = 256;
+///
+/// Bumped from 256 → 4096 after the K=17 corporate-federation
+/// test exposed tail latency degradation at the 4-hop diameter.
+/// 256 × ~200 B/packet = ~50 KB of buffer, which matched the
+/// HTTP/2 default 64 KB window — meaning channel backpressure
+/// kicked in roughly when h2 flow control did. Bumping to 4096
+/// (~800 KB) lets the channel absorb burst load that fits within
+/// the larger 2 MiB h2 windows configured below in `tune_h2_*`.
+const SEND_QUEUE_DEPTH: usize = 4096;
+const RECV_QUEUE_DEPTH: usize = 4096;
+
+/// Per-stream HTTP/2 flow-control window. Spec default is 64 KB,
+/// which forces a WINDOW_UPDATE round-trip every ~100-150 drift
+/// packets. For a relay seeing sustained federation traffic
+/// across multi-hop paths, those round-trips compound and
+/// produce the tail latency pattern we see at K=17. 2 MiB gives
+/// the bridge ~4000 packets of credit before any window update
+/// is needed — comfortably more than typical burst sizes.
+const H2_INITIAL_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
+
+/// Per-connection HTTP/2 flow-control window. Same logic as
+/// the per-stream window. Since drift uses one stream per
+/// federation peer, the connection window and stream window
+/// govern the same traffic; setting both to the same generous
+/// value avoids stalls at either layer.
+const H2_INITIAL_CONNECTION_WINDOW: u32 = 2 * 1024 * 1024;
+
+/// Maximum HTTP/2 DATA frame size we'll emit. Default is 16 KB.
+/// Bumping to 64 KB means coalesced drift packets (item 4 in
+/// the optimization plan, future) can ride in fewer frames, and
+/// today's single-packet-per-frame path has more headroom for
+/// the occasional larger payload.
+const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 
 type RespBody = BoxBody<Bytes, io::Error>;
 
@@ -73,6 +104,14 @@ type RespBody = BoxBody<Bytes, io::Error>;
 /// listener side and the connector side both produce one of
 /// these per accepted / opened connection. From here on the
 /// drift transport doesn't distinguish h2 from raw TCP.
+/// Amortizing arena size for the outbound framing buffer.
+/// One 64 KiB allocation backs ~600 typical-sized drift control
+/// packets (~100 B each) before a fresh allocation is needed,
+/// dramatically reducing allocator churn on the federation hot
+/// path. The arena is refilled lazily when its remaining
+/// capacity dips below what the next packet needs.
+const SEND_ARENA_CHUNK: usize = 64 * 1024;
+
 pub struct H2StreamPacketIO {
     /// Caller's outbound bytes flow into this channel; the
     /// `body_pump` task drains it and writes framed packets
@@ -85,6 +124,22 @@ pub struct H2StreamPacketIO {
     /// wraps this is the bridge's TCP address; for server-side
     /// wraps it's the connecting peer's TCP address.
     addr: SocketAddr,
+    /// Recyclable framing arena for outbound packets.
+    ///
+    /// Each `send_to` call writes `[len:u16][packet bytes]` into
+    /// this arena, then `BytesMut::split()` hands off the freshly
+    /// written region as an immutable `Bytes`. The arena retains
+    /// the unfilled remainder for the next packet — same
+    /// underlying refcounted Vec<u8> backs many frames. When the
+    /// arena's remaining capacity is too small for the next
+    /// frame, a fresh `SEND_ARENA_CHUNK`-sized allocation
+    /// replaces it.
+    ///
+    /// Standard `std::sync::Mutex` (not tokio's async Mutex):
+    /// we never hold the guard across an `.await`. In practice
+    /// the lock is uncontended because each H2StreamPacketIO is
+    /// driven by a single transport-layer task at a time.
+    send_arena: std::sync::Mutex<BytesMut>,
 }
 
 impl H2StreamPacketIO {
@@ -97,6 +152,7 @@ impl H2StreamPacketIO {
             send_tx,
             recv_rx: Mutex::new(recv_rx),
             addr,
+            send_arena: std::sync::Mutex::new(BytesMut::with_capacity(SEND_ARENA_CHUNK)),
         }
     }
 }
@@ -110,13 +166,35 @@ impl PacketIO for H2StreamPacketIO {
                 format!("h2 packet too large: {} > {}", buf.len(), MAX_H2_FRAME),
             ));
         }
-        // Frame on the way out so the remote's `body_drain` can
-        // parse without re-allocating per packet.
-        let mut framed = BytesMut::with_capacity(FRAME_LEN_PREFIX + buf.len());
-        framed.extend_from_slice(&(buf.len() as u16).to_be_bytes());
-        framed.extend_from_slice(buf);
+        let needed = FRAME_LEN_PREFIX + buf.len();
+        // Frame into the recyclable arena. The arena's underlying
+        // allocation is shared (via Bytes refcount) with every
+        // frame we've split off recently; when the arena runs low,
+        // we drop the reference and allocate a fresh chunk. Old
+        // chunks stay alive only as long as some in-flight frame
+        // still references them.
+        let framed: Bytes = {
+            let mut arena = self.send_arena.lock().unwrap();
+            if arena.capacity() < needed {
+                // Either we never allocated (capacity was set in
+                // new()) or we drained below threshold. Allocate
+                // a fresh chunk sized to comfortably hold many
+                // typical frames.
+                *arena = BytesMut::with_capacity(needed.max(SEND_ARENA_CHUNK));
+            }
+            arena.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+            arena.extend_from_slice(buf);
+            // split_to len(): hand off the just-written region as
+            // a separate BytesMut sharing the same allocation.
+            // The original arena keeps the unfilled remainder.
+            let frame = arena.split();
+            frame.freeze()
+            // Mutex guard drops here; we're about to await on
+            // send_tx which we MUST NOT do while holding the
+            // std::sync::Mutex.
+        };
         self.send_tx
-            .send(framed.freeze())
+            .send(framed)
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "h2 send pump gone"))?;
         Ok(buf.len())
@@ -311,6 +389,16 @@ async fn serve_one_h2_connection<S>(
     });
     let conn = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
         .timer(TokioTimer::new())
+        // Flow-control tuning for relay traffic — see
+        // `H2_INITIAL_STREAM_WINDOW` doc above. Adaptive
+        // window adjusts the receive window from the
+        // bandwidth-delay product, which is the right policy
+        // for long-lived high-rate streams; the explicit
+        // initial values are the floor while it ramps up.
+        .adaptive_window(true)
+        .initial_stream_window_size(H2_INITIAL_STREAM_WINDOW)
+        .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW)
+        .max_frame_size(H2_MAX_FRAME_SIZE)
         .serve_connection(io, svc);
     if let Err(e) = conn.await {
         tracing::debug!(?peer, error = ?e, "h2 connection ended");
@@ -419,8 +507,19 @@ where
 
     // Set up the HTTP/2 client connection. http2::handshake gives
     // us the SendRequest handle to issue our single POST.
+    //
+    // Same flow-control tuning as the server side — see the
+    // `H2_INITIAL_*` doc above. Both peers in the bridge ↔ bridge
+    // pair need the bigger windows for them to actually take
+    // effect; HTTP/2 flow control is the MIN of what both sides
+    // advertised, so a tuned client talking to an untuned server
+    // (or vice versa) still stalls at 64 KB.
     let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
         .timer(TokioTimer::new())
+        .adaptive_window(true)
+        .initial_stream_window_size(H2_INITIAL_STREAM_WINDOW)
+        .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW)
+        .max_frame_size(H2_MAX_FRAME_SIZE)
         .handshake::<_, StreamBody<Pin<Box<dyn futures_util::Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>>>(io)
         .await
         .map_err(io::Error::other)?;
