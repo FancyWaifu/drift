@@ -111,6 +111,22 @@ struct Cli {
     /// Only meaningful with `--exec`.
     #[clap(long, default_value = "3")]
     exec_timeout: u64,
+
+    /// How long to wait for the server's `AttachAck` reply after
+    /// sending the attach control frame.
+    ///
+    /// 5 s is fine on direct sessions and on triangle-scale (≤3
+    /// bridges) federation. Larger federation meshes can need
+    /// more — first-time attach via federation goes
+    /// client→bridge-A → (federation forward) → bridge-B → server,
+    /// and on Docker Desktop / macOS or on bridges with many
+    /// federation peers, the cumulative latency on the
+    /// reverse-path setup occasionally exceeds 5 s. Bumping this
+    /// to 15-20 s gives federation cold-start enough headroom
+    /// without changing steady-state behavior (once the path is
+    /// warm, AttachAcks arrive in <100 ms).
+    #[clap(long, default_value = "5")]
+    attach_timeout_secs: u64,
 }
 
 struct RawModeGuard;
@@ -352,10 +368,18 @@ async fn run() -> Result<()> {
     };
     ctrl_stream.send(&bincode::serialize(&attach)?).await?;
 
-    let ack_bytes = tokio::time::timeout(std::time::Duration::from_secs(5), ctrl_stream.recv())
-        .await
-        .map_err(|_| anyhow!("no AttachAck from server within 5 s"))?
-        .ok_or_else(|| anyhow!("server closed control stream before AttachAck"))?;
+    let ack_bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(cli.attach_timeout_secs),
+        ctrl_stream.recv(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "no AttachAck from server within {} s",
+            cli.attach_timeout_secs
+        )
+    })?
+    .ok_or_else(|| anyhow!("server closed control stream before AttachAck"))?;
     let ack: Ctrl = bincode::deserialize(&ack_bytes).context("decoding AttachAck")?;
     let (got_session_id, reattach_ok, scrollback, server_name) = match ack {
         Ctrl::AttachAck {
