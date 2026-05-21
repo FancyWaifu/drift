@@ -49,19 +49,28 @@ adaptive window.
 
 ## TL;DR — what to do first
 
-| Rank | Optimization | Effort | Expected impact at K=17 |
-| ---- | ------------ | ------ | ----------------------- |
-| 1 | **Tune hyper HTTP/2 flow control**: `adaptive_window(true)`, bump `initial_stream_window_size` and `initial_connection_window_size` to 2-4 MiB | 1 hour | **Likely the single biggest fix**. Default 64 KB window means every 64 KB of relayed traffic stalls for a WINDOW_UPDATE round-trip. 4-hop chain hits ≥ 4 of these. Tail latency degradation matches the symptom exactly. |
-| 2 | Bump `SEND_QUEUE_DEPTH` / `RECV_QUEUE_DEPTH` from 256 → 4096 | 1 line each | Reduces back-pressure stalls under burst. Cheap. |
-| 3 | Buffer pool for outgoing `BytesMut` framing | half a day | Eliminates per-packet allocator pressure on the send path. |
-| 4 | Coalesce multiple drift packets into a single h2 DATA frame on the send side | 1-2 days | Reduces h2 frame header overhead (9 bytes per frame) and rustls per-encryption setup cost. Receiver already handles arbitrary chunking (length-prefix splitter is independent of frame boundaries). |
-| 5 | TLS session resumption (rustls session ticket cache) | 1 day | First TLS handshake is expensive; reconnects today do full handshakes. Session resumption is one round-trip. |
-| 6 | Explicit tokio runtime config (cap worker_threads on small hosts) | 1 hour | On 2-core hosts running 17 bridges, default tokio multi_thread creates 34 worker threads competing — pure scheduler churn. |
-| 7 | Reduce peer-table lock contention (146 lock sites in `transport/`) | medium-large | Real if profiling shows it, but second-order vs items 1-4. |
+| Rank | Optimization | Effort | Status (2026-05-20) |
+| ---- | ------------ | ------ | ------------------- |
+| 1 | **Tune hyper HTTP/2 flow control**: `adaptive_window(true)`, bump `initial_stream_window_size` and `initial_connection_window_size` to 2-4 MiB | 1 hour | **Shipped `5182375`**: 66/96 → 73-82/96. Single biggest measured fix. |
+| 2 | Bump `SEND_QUEUE_DEPTH` / `RECV_QUEUE_DEPTH` from 256 → 4096 | 1 line each | **Shipped `5182375`** (paired with item 1). |
+| 3 | Buffer pool for outgoing `BytesMut` framing | half a day | **Shipped `5182375`**: amortizing arena, 64 KiB chunk backs ~600 frames. |
+| 4 | Coalesce multiple drift packets into a single h2 DATA frame on the send side | 1-2 days | **Deferred** (post-research re-rank: 0.6% wire savings + adds latency, gRPC doesn't recommend). |
+| 5 | TLS session resumption + 0-RTT (rustls session tickets) | 1 day | **Shipped `9c4ba24`** (forward-compatible 0-RTT plumbing). |
+| 5b | HTTP/2 PING keepalive for fast dead-peer detection | 1 hour | **Shipped `9c4ba24`** (30s/20s, gRPC-shaped defaults). |
+| 6 | Tokio runtime config — operator lever, not default | 1 hour | **Shipped `9c4ba24`** as `DRIFT_TOKIO_WORKER_THREADS` env var; "cap to 1" default was attempted and reverted (regression). |
+| 7 | Reduce peer-table lock contention (146 lock sites in `transport/`) | medium-large | **Deferred** (premature without profiling; arc-swap on `peer_directory` is the textbook target if it becomes a hotspot). |
+| 8 | Drop-on-full + stale-drop at h2 send queue (IP-router style) | half a day | **Shipped `3fcfab8`** (correct under overload; bench-neutral on dial loop). |
+| 9 | ECN-style backpressure, ECMP multi-path, per-source fair queue | days each | **Deferred** (research showed weak fit for DRIFT's current bottleneck). |
 
-The first three are all small, contained changes. Items 4-7 are
-larger but well-understood. None requires architectural changes
-to the federation protocol.
+The first three were the high-leverage initial wins. Items 5,
+5b, 6, 8 are smaller wins that also went in; their value shows
+mostly in failure modes the corporate dial bench doesn't
+exercise (reconnects, dead-link detection, overload bursts).
+Items 4, 7, 9 are deferred with reasons in their sections.
+
+For the deep post-research re-ranking that landed items 5/5b/6,
+see [`docker/federation-corporate/RESULTS.md`](../docker/federation-corporate/RESULTS.md)
+sections "third follow-up" and "fourth follow-up."
 
 ## Detailed: each optimization
 
@@ -187,58 +196,111 @@ This is the same logical pattern as UDP `sendmmsg`, applied at
 the application framing level instead of the kernel syscall
 level. Receivers don't need to change.
 
-### 5. TLS session resumption (h2s only)
+### 5. TLS session resumption + 0-RTT (h2s only)
+
+> **Status (2026-05-20):** Shipped in commit `9c4ba24`. Server-side
+> ticketer (`rustls::crypto::ring::Ticketer`) is enabled,
+> `max_early_data_size = 16 KiB` advertises 0-RTT capacity, and
+> client-side `enable_early_data = true` opts in. The hyper h2
+> client doesn't yet issue an EarlyData write before the handshake
+> completes, so this is forward-compatible plumbing — when the
+> application opts in, the TLS layer is ready.
 
 rustls supports TLS 1.3 session resumption via session tickets
-or PSK. With it, a reconnecting peer can skip the certificate /
-key-exchange round-trip and resume in 1-RTT.
+or PSK. **Key correction from the original write-up:** TLS 1.3
+*fresh* handshakes are already 1-RTT, so plain resumption saves
+only the CPU cost of cert chain verification + key derivation,
+not round trips. The real RTT win is 0-RTT data — normally
+dangerous because of replay attacks, but **uniquely safe for
+DRIFT** because the inner AEAD already carries a sequence number
++ replay window. A replayed federation packet at the TLS layer
+is rejected by the inner transport before any side effect.
 
 For drift, federation sessions are long-lived (no reason to
 reconnect under normal operation), so this is only relevant for
-recovery after a TCP teardown. But under K=17 load with
-occasional sessions getting reset (e.g. by `recv_from failed;
-evicting interface` we saw in the corporate test logs), faster
-reconnect = less window during which a federation peer is
-unreachable.
+recovery after a TCP teardown.
 
-`rustls::ServerConfig` has `session_storage`; `rustls::ClientConfig`
-has `resumption`. Both off by default in drift currently.
+`rustls::ServerConfig` has `ticketer` + `max_early_data_size`;
+`rustls::ClientConfig` has `enable_early_data`. Client-side
+resumption storage is already on by default (rustls
+`Resumption` defaults to 256 server names × 8 tickets).
+
+### 5b. HTTP/2 PING keepalive for fast dead-peer detection
+
+> **Status (2026-05-20):** Shipped in commit `9c4ba24`. Both
+> server and client h2 builders configured with
+> `keep_alive_interval(30s)` + `keep_alive_timeout(20s)`; client
+> also sets `keep_alive_while_idle(true)`.
+
+Linux's default TCP keepalive needs ~2h 11min to detect a dead
+peer (`tcp_keepalive_time=7200s` idle + 9 × 75s probes), and
+most apps don't even enable `SO_KEEPALIVE`. With h2 PING at
+30s/20s, a dead peer is detected in ≤ 50s. PING frames are
+17 bytes; at the default cadence that's ~0.6 B/sec/connection
+— invisible overhead.
+
+The 30s/20s setting matches gRPC's well-trodden production
+defaults and stays above gRPC's 5-minute minimum-receive-ping
+interval, so this won't trip the "ENHANCE_YOUR_CALM" / ping-
+strike failure mode in heterogeneous federations.
+
+Negligible bench impact (the corporate dial test doesn't drop
+connections), but the real-world payoff on flaky WAN /
+mobile / corporate-firewall federation is the difference
+between "30-second blip" and "2-hour silent outage."
 
 ### 6. Explicit tokio runtime configuration
 
-Today `drift/src/main.rs::main` uses `#[tokio::main]` with the
-default `multi_thread` runtime. That spawns one worker per CPU.
-On a 2-core host running 17 bridge processes, that's 34 worker
-threads competing — pure scheduler churn.
+> **Status (2026-05-20):** Partially shipped in commit `9c4ba24`.
+> The `DRIFT_TOKIO_WORKER_THREADS` env var is now an operator
+> lever (0 → `current_thread`; N → `multi_thread` workers=N).
+> **Default is unchanged** — tokio's native `num_cpus`. The
+> "cap workers to 1 by default" experiment was attempted and
+> measurably regressed the K=17 LXC bench (see below).
 
-Fix: in `main.rs`, replace `#[tokio::main]` with an explicit
-builder:
+Today `drift/src/main.rs::main` uses an explicit runtime builder
+that reads the env var; with no env var set, it falls through
+to `Builder::new_multi_thread().enable_all().build()`, which
+matches the prior `#[tokio::main]` behavior (workers = `num_cpus`).
 
-```rust
-fn main() -> anyhow::Result<()> {
-    let workers = std::env::var("DRIFT_WORKERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| num_cpus::get().clamp(1, 4));
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
-        .thread_name("drift-rt")
-        .enable_all()
-        .build()?;
-    rt.block_on(async_main())
-}
-```
+#### The "cap to 1" regression
 
-The `clamp(1, 4)` cap matters on small hosts. On a 2-core host
-where we want to run many bridges, capping at 2 workers per
-bridge process gives each process 2 threads × 17 processes = 34
-threads, same as default. Capping at 1 gives 17 — better. The
-ideal is environment-specific.
+The "thread-per-core via N processes" pattern has well-cited
+benchmarks showing 1.5-2× wins for shard-per-core / lock-free
+workloads. We tried setting the worker_threads default to 1 on
+the assumption that DRIFT's bridge workload was a fit (lots of
+single-core processes, oversubscription elsewhere). It wasn't:
+
+| Drift-4 (2-core LXC), K=17 bench | total | 4 hop |
+| -------------------------------- | ----- | ----- |
+| workers=1 default (FAILED)       | 62/96 | 6/36  |
+| workers=2 explicit               | 77/96 | 18/36 |
+| native default (`num_cpus`)      | 75/96 | 19/36 |
+
+Why it regressed: hyper's h2 connection task, the per-stream
+body-drain task, and the request handler all need to run
+concurrently within a single bridge process. With one worker,
+those tasks serialize on the single thread — the h2 connection
+task can't drain frames while a handler is busy, and vice
+versa. Transit hops starved, and 4-hop pass rate collapsed.
+
+The lever stays for operators who measurably want the pattern
+on their workload (e.g., very high process counts on small
+hosts) — but the safe default is letting tokio use `num_cpus`.
+
+#### When to actually reach for `current_thread`
+
+Set `DRIFT_TOKIO_WORKER_THREADS=0` if your workload genuinely
+has zero useful intra-process parallelism (single peer,
+single stream, no fan-out). For multi-peer federation
+bridges, leave it alone.
 
 For relay-shaped workloads specifically (which drift is), the
-`current_thread` runtime is often the right answer — eliminates
-work-stealing overhead entirely, at the cost of no
-intra-process parallelism. monoio / glommio embrace this.
+single-process `current_thread` runtime would only be the
+right answer if hyper's h2 internals didn't depend on
+concurrent task scheduling — which they do. monoio / glommio
+embrace per-core-with-no-work-stealing because their h2
+equivalents are co-designed for it.
 
 ### 7. Reduce peer-table lock contention
 
@@ -258,22 +320,38 @@ Standard mitigations:
 
 Profile-first. Won't matter if items 1-4 close the gap.
 
-## What I'd do this week
+## What's left after the 2026-05-20 round
 
-1. **Tune hyper HTTP/2 flow control** (item 1) — 1 hour. Bump
-   initial windows + enable adaptive. Single biggest expected
-   win.
-2. **Bump channel depths to 4096** (item 2) — 1 line.
-3. **Re-run corporate federation test**. Bet: 81/96 → 95%+ with
-   just items 1+2. If yes, ship those changes and move on.
-4. If still tail-degrades: profile with `tokio-console` and
-   `perf record / flamegraph` on a hot bridge to see whether
-   the remaining bottleneck is allocation churn, lock contention,
-   or rustls cost. Then pick item 3, 5, or 7 accordingly.
+Items 1-3, 5, 5b, 6, 8 all shipped. The K=17 bench on a 2-core /
+512 MB LXC is now in the 73-82/96 band, with the 4-hop tail (50-
+67% pass rate) bounded by **CPU scheduler contention across 17
+concurrent bridge processes**, not by the federation protocol or
+the h2 transport layer.
 
-Items 5-7 should wait on data from item 1+2 before committing.
-Premature optimization without measurement is how protocols
-become Frankenstein.
+The remaining levers are diagnostic, not optimization:
+
+1. **Profile a hot bridge under load** — `tokio-console` for task
+   scheduling visibility, `perf record / flamegraph` for hot
+   allocation sites and lock contention. If item 7's lock
+   contention shows up in the top 3, do the arc-swap rewrite of
+   `peer_directory`. If allocator pressure does, hunt the
+   remaining allocation sites (the BytesMut arena from item 3
+   was the obvious one).
+2. **Bench on a host that isn't resource-starved** — the K=17
+   topology on an 8-core / 8 GB box should hit ~100% pass rate;
+   that experiment would confirm the "now CPU-bound" diagnosis
+   and tell us whether there's anything left at the protocol
+   layer.
+3. **Real-world federation logs** — items 5 / 5b / 6 target
+   reconnect cost, dead-link detection, and operator-tunability.
+   Their value shows on flaky WAN federation, not on the corporate
+   dial bench. Collect data from a deployment that actually
+   experiences blips, then iterate.
+
+Items 4, 9 (h2 frame coalescing, ECN/ECMP/fair-queue) are well-
+understood but research-confirmed low-value-per-effort for DRIFT
+specifically. Skip until a future bench exposes them as the
+actual bottleneck.
 
 ## What I'd defer / not do (yet)
 
