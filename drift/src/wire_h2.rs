@@ -108,6 +108,22 @@ const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 /// retransmit timeout, so we drop before the upstream gives up.
 const MAX_FORWARD_AGE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// HTTP/2 PING keepalive interval and timeout.
+///
+/// Linux's default TCP keepalive needs ~2h 11min to detect a
+/// dead peer (7200s idle + 9 × 75s probes) — far too slow for a
+/// federation backbone. With h2 PING at this cadence, a dead
+/// peer is detected in ≤ 50s, after which hyper closes the h2
+/// connection and DRIFT's reconnect logic kicks in.
+///
+/// 30s / 20s is the well-trodden gRPC production setting: short
+/// enough to recover from network blips within an SLO budget,
+/// long enough that PING traffic is invisible (~0.6 B/s/conn).
+/// Both sides agreeing on the cadence avoids the gRPC
+/// "ENHANCE_YOUR_CALM" mis-tuning failure mode.
+const H2_KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const H2_KEEP_ALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Item carried through the per-stream outbound channel.
 /// The `Instant` is the enqueue timestamp; the stream pump checks
 /// it against `MAX_FORWARD_AGE` at dequeue and drops stale items
@@ -380,6 +396,23 @@ impl H2ListenerIO {
             .with_single_cert(certs, key)
             .map_err(|e| io::Error::other(format!("rustls server config: {}", e)))?;
         server_cfg.alpn_protocols = vec![b"h2".to_vec()];
+        // Enable TLS 1.3 session tickets so federation peers can
+        // resume sessions cheaply on reconnect. Without this, every
+        // reconnect repays the full cert chain verification cost on
+        // a 2-core LXC — not the dominant cost, but worth the ~10
+        // LOC. The default in-memory ticketer rotates keys hourly.
+        if let Ok(ticketer) = rustls::crypto::ring::Ticketer::new() {
+            server_cfg.ticketer = ticketer;
+        }
+        // Allow 0-RTT early data. DRIFT's inner AEAD already carries
+        // a sequence number + replay window, which neutralizes the
+        // replay risk that makes 0-RTT dangerous for typical HTTP
+        // apps — a replayed federation packet at the TLS layer is
+        // detected and dropped by the inner transport before causing
+        // any side effect. Setting >0 advertises the limit; the
+        // hyper h2 path doesn't currently issue early data frames,
+        // so this is forward-compatible plumbing.
+        server_cfg.max_early_data_size = 16 * 1024;
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
 
         let (ready_tx, ready_rx) = mpsc::channel::<Arc<dyn PacketIO>>(16);
@@ -459,6 +492,8 @@ async fn serve_one_h2_connection<S>(
         .initial_stream_window_size(H2_INITIAL_STREAM_WINDOW)
         .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW)
         .max_frame_size(H2_MAX_FRAME_SIZE)
+        .keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+        .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
         .serve_connection(io, svc);
     if let Err(e) = conn.await {
         tracing::debug!(?peer, error = ?e, "h2 connection ended");
@@ -551,6 +586,14 @@ async fn connect_h2s_client(
     // doesn't care about hostname (NoCertVerifier accepts all),
     // so the SNI value is arbitrary.
     cfg.alpn_protocols = vec![b"h2".to_vec()];
+    // Opt into 0-RTT early-data acceptance from servers that
+    // advertise a non-zero max_early_data_size. The DRIFT inner
+    // transport's replay window makes this safe for federation
+    // traffic where it isn't for typical HTTP. Client-side session
+    // resumption is on by default (rustls Resumption store, 256
+    // server names, up to 8 tickets each), so no additional setup
+    // is needed for session ticket caching.
+    cfg.enable_early_data = true;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
     // Use the connect-target IP as the SNI value so reverse
     // proxies that pick certs by SNI (caddy `tls internal`,
@@ -590,6 +633,9 @@ where
         .initial_stream_window_size(H2_INITIAL_STREAM_WINDOW)
         .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW)
         .max_frame_size(H2_MAX_FRAME_SIZE)
+        .keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+        .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
+        .keep_alive_while_idle(true)
         .handshake::<_, StreamBody<Pin<Box<dyn futures_util::Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>>>(io)
         .await
         .map_err(io::Error::other)?;

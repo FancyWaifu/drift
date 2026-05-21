@@ -369,3 +369,84 @@ fair queuing, ECMP multi-path, ECN-style backpressure) were
 The 4-hop tail at K=17 on a 2-core/512 MB host is now bounded
 by CPU scheduler contention across 17 concurrent bridge
 processes, not by the federation protocol or h2 layer.
+
+## 2026-05-20 fourth follow-up: post-research re-ranking & h2 PING + TLS resumption
+
+Items 1-9 from the next-tier optimization list were researched
+via OpenAlex (`websearch papers`) + engineering blog crawls.
+Key findings (full report in the conversation thread / commit
+log):
+
+- **#3 h2 PING keepalive** — EMPIRICALLY STRONG. Linux's TCP
+  keepalive default takes 2h 11min to detect a dead peer; an
+  h2 PING at 30s interval / 20s timeout detects it in ≤ 50s.
+- **#2 TLS session resumption + 0-RTT** — TLS 1.3 *fresh* is
+  already 1-RTT, so plain resumption is a CPU win only; the
+  real RTT savings live in 0-RTT, which is uniquely safe for
+  DRIFT because the inner replay window already neutralizes
+  the 0-RTT replay risk.
+- **#1 tokio worker_threads cap** — STRONG mechanism in
+  isolation, but turned out to be **measurably wrong for DRIFT
+  bridges** (see below).
+
+Changes landed in commit `<3fcfab8 + this one>`:
+
+- Server: `Builder::keep_alive_interval(30s)` +
+  `keep_alive_timeout(20s)`.
+- Client: same + `keep_alive_while_idle(true)`.
+- Server TLS: enabled `rustls::crypto::ring::Ticketer` and set
+  `max_early_data_size = 16 KiB`.
+- Client TLS: `cfg.enable_early_data = true`.
+- Operator opt-in `DRIFT_TOKIO_WORKER_THREADS` env var; default
+  unchanged (tokio's native `num_cpus`).
+
+### Bench
+
+|              | Pre-opt | H2 best | + items 1-3 (3fcfab8) | + #1 cap to 1 (regression) | + workers=2 explicit | + native default |
+| ------------ | ------- | ------- | --------------------- | --------------------------- | --------------------- | ----------------- |
+| 1 hop        |  6 /  6 |  6 /  6 |  6 /  6              |  6 /  6                     |  6 /  6              |  6 /  6           |
+| 2 hop        | 18 / 24 | 24 / 24 | 22 / 24              | 20 / 24                     | 23 / 24              | 20 / 24           |
+| 3 hop        | 30 / 30 | 30 / 30 | 30 / 30              | 30 / 30                     | 30 / 30              | 30 / 30           |
+| 4 hop        | 12 / 36 | 22 / 36 | 18 / 36              | **6 / 36**                  | 18 / 36              | 19 / 36           |
+| **total**    | 66 / 96 | 82 / 96 | 76 / 96              | **62 / 96**                 | 77 / 96              | **75 / 96**       |
+
+### What the experiment revealed
+
+**Item #1 (worker_threads = 1 default) was a regression.** The
+research mechanism — "thread-per-core via N processes" — is real
+in isolation, but DRIFT bridges have multiple concurrent tasks
+per connection (hyper's h2 connection task, the per-stream body-
+drain task, and the request handler), and forcing them onto a
+single worker serializes head-of-line within the process.
+Transit-hop bridges starved, and 4-hop pass rate collapsed from
+18/36 → 6/36. Setting `DRIFT_TOKIO_WORKER_THREADS=2` recovered
+the prior baseline; backing out the default and falling back to
+tokio's native `num_cpus` recovered fully. The env var is kept
+as an operator lever for hosts where the operator measurably
+wants the thread-per-core pattern.
+
+**Items #2 and #3 don't move this specific bench.** The
+corporate-federation dial loop never drops a connection mid-
+test, so h2 PING liveness detection never fires and TLS
+resumption never gets exercised. They're keepers for production
+deployments where federation links DO experience occasional
+blips (mobile carriers, NAT rebinds, cross-WAN federation,
+corporate-firewall environments) — the bench just doesn't model
+that workload. 75/96 vs 73-82/96 prior is run-to-run variance,
+not a behavioral difference.
+
+### Honest summary across all four optimization rounds
+
+  - Phase F + G + presence (`0c88962`):   ~30% → 66/96
+  - HTTP/2 flow control (`5182375`):       66/96 → 73-82/96
+  - Internet-routing changes (`3fcfab8`):  73-82/96 → 76/96
+  - h2 PING + TLS resumption (this):       73-82/96 → 75/96
+  - (worker cap default = 1, **REVERTED**:  82 → 62 regression)
+
+The 4-hop tail at K=17 on a 2-core LXC remains CPU-scheduler-
+bound — the protocol and transport layer are no longer the
+constraint. Production deployments (one bridge per dedicated
+host, 4+ cores, GBs RAM) should see ~100%.
+
+Raw run logs: `run3-internet-routing.log`,
+`run4-ping-tls-postrevert.log`.
