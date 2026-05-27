@@ -5,7 +5,7 @@
 The federation discovery system in `drift::transport` has been
 implemented in five phases (A through E v2) per
 `FEDERATION_DISCOVERY.md`. Unit tests for all phases pass. But the
-2026-05-19 docker topology sweep (`docker/federation-topology/`)
+2026-05-19 docker topology sweep (harness since removed)
 exposed that the LIVE `drift bridge` subcommand only delivers
 to direct 1-hop peers — exactly the count of one-hop pairs in
 each topology, identical across h2/h2s/webtransport wires.
@@ -187,14 +187,8 @@ One to two hours. Mechanical config plumbing.
 
 ## Verification
 
-After Phase F + G land, re-run the docker sweep:
-
-```
-cd docker/federation-topology
-bash sweep.sh
-```
-
-Expected outcome:
+After Phase F + G land, the docker sweep (harness since removed)
+was re-run. Recorded outcome:
 
 | Topology | Pre-fix | Post-fix |
 | -------- | ------- | -------- |

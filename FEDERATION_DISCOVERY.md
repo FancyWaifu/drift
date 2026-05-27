@@ -425,7 +425,7 @@ Suggested incremental rollout — each phase is independently usable:
 
 **Phase F — Case-2 fallback on local miss (multi-hop forwarding fix). DONE.**
 
-The 4×3 topology sweep in `docker/federation-topology/` (2026-05-19)
+The 4×3 topology sweep (2026-05-19, harness since removed)
 exposed a forwarding bug in the live `drift bridge` subcommand.
 The unit tests for Phases B/C pass; the bug only manifests with
 real packet flow through the bridge:

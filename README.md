@@ -54,7 +54,6 @@ Phase F added a privacy layer on top: bridges announce a **DP-noised bloom filte
 | Authoritative wire-format spec | [`SPEC.md` §10](SPEC.md) |
 | Design doc + threat model + algorithm sketches | [`FEDERATION_DISCOVERY.md`](FEDERATION_DISCOVERY.md) |
 | Integration tests (11 cases covering all phases) | [`drift/tests/federation_discovery.rs`](drift/tests/federation_discovery.rs) |
-| Adapter test driver (native + WASM groups) | [`scripts/test-adapters.sh`](scripts/test-adapters.sh) |
 | WASM cross-stack smoke (Node 22+ runs the browser-side adapters against the native bridge) | [`drift-wasm/test/network-ws-node.js`](drift-wasm/test/network-ws-node.js), [`network-http-node.js`](drift-wasm/test/network-http-node.js) |
 
 ### Privacy controls — `TransportConfig` knobs
@@ -95,7 +94,7 @@ loopback_full_mesh:              5 ✓  (webrtc ignored on macOS — env-specifi
 drift-config + others:          56 ✓
 ```
 
-Plus three Docker harnesses (`federation-discovery`, `federation-triangle`, `two-bridge`) all green, and a live Mac↔LXC drift-vpn tunnel proving end-to-end usability.
+Plus a live Mac↔LXC drift-vpn tunnel proving end-to-end usability.
 
 ## Features
 
@@ -111,7 +110,7 @@ Plus three Docker harnesses (`federation-discovery`, `federation-triangle`, `two
 
 **Medium-agnostic** — `PacketIO` trait with built-in adapters for UDP, TCP (length-prefix framing), WebSocket (binary messages), WebSocketStream (Chromium-only, automatic backpressure), TLS-wrapped TCP (length-prefix inside a TLS record stream — DRIFT shaped to look like HTTPS), plain HTTP/SSE (`GET /drift-sse` downstream + `POST /drift-send` per-packet upstream — fallback for proxies that strip WS upgrades), HTTP/2 cleartext (`h2://` — one TCP + one HTTP/2 bidi stream pair carrying length-prefixed DRIFT packets), HTTP/2 over TLS (`h2s://` — same as `h2://` with ALPN=h2, federation-grade over HTTPS), WebTransport (`webtransport://` — QUIC + HTTP/3, one DRIFT packet per QUIC datagram, native CLI-accessible and browser-shipping), Tor onion services (opt-in via `--features onion`, hidden-service hosting + dialing via [arti](https://gitlab.torproject.org/tpo/core/arti)), WebRTC data channels (browser-to-browser, no server in the data path), and in-memory channels. Plug in serial, BLE, I2P, or anything else.
 
-**Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, drift-bench, and any other tool gain that wire for free, with zero source edits.
+**Plug-and-play transports** — Adapters self-register at link time via `inventory::submit!`. The URL dispatcher (`Transport::bind_url("tcp://0.0.0.0:9100")`, `Transport::connect_url("ws://example.com:443")`) finds them at runtime. Adding a new transport means writing one `Listener` impl + one `inventory::submit!` block — drift-mosh, drift-http, and any other tool gain that wire for free, with zero source edits.
 
 **Browser-native** — `drift-wasm` compiles the full DRIFT protocol to WebAssembly. Same `drift-core` code as the native stack; interoperates with native peers through a bridge. Supports all three browser wire transports (WebSocket, WebRTC data channel, WebTransport) behind one `DriftClient` API.
 
@@ -130,7 +129,6 @@ End-user binaries shipped from this repo. Each has its own README with install +
 | **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`, `bridge`. | `cargo install --path drift` |
 | **[drift-config](drift-config/README.md)** | Identity + inventory manager — one declarative `drift.toml` per host that every DRIFT tool reads. Eliminates manual pubkey cross-filling. | `cargo install --path drift-config` |
 | **[drift-wormhole](drift-wormhole/README.md)** | Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, no rendezvous server. | `cargo install --path drift-wormhole --bin drift-wormhole` |
-| **[drift-bench](drift-bench/)** | Cross-protocol benchmark: DRIFT vs QUIC vs WireGuard, identical workloads. | `cargo build --release -p drift-bench` |
 | **[drift-ffi](drift-ffi/README.md)** | C ABI — call DRIFT from C, C++, Python, Go, Swift, anything. | `cargo build --release -p drift-ffi` |
 
 ## Workspace layout
@@ -226,7 +224,6 @@ drift-git/       Git over DRIFT: `git push drift://<peerhex>@<host>:<port>/<repo
                    Git remote helper + bare-repo serving daemon, ACL'd by pubkey.
 drift-wormhole/  Magic-Wormhole-shaped file transfer over DRIFT. SHA-256
                    byte-fidelity, progress bar, scheme-prefixed peer URLs.
-drift-bench/     Cross-protocol benchmark harness (DRIFT vs QUIC vs WireGuard).
 drift-config/    Identity + inventory manager. One declarative drift.toml per
                    host; every DRIFT tool reads from it. Eliminates the manual
                    pubkey cross-filling pain on multi-node deployments.
@@ -279,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### URL-shaped transports
 
-The same scheme-prefixed addresses work everywhere — drift-mosh, drift-http, drift-bench, the `drift` CLI, and library callers all use `Transport::bind_url` / `Transport::connect_url`. The URL dispatcher resolves the scheme to a registered adapter at runtime; bare `host:port` (no scheme) defaults to UDP for back-compat.
+The same scheme-prefixed addresses work everywhere — drift-mosh, drift-http, the `drift` CLI, and library callers all use `Transport::bind_url` / `Transport::connect_url`. The URL dispatcher resolves the scheme to a registered adapter at runtime; bare `host:port` (no scheme) defaults to UDP for back-compat.
 
 ```rust
 // Server: bind to whichever transport(s) you want. First call uses
@@ -526,7 +523,7 @@ If your transport's underlying library needs a global one-shot setup (rustls's c
 
 Add a script under `drift-http/tests/multi_transport_*.sh` (or a Rust integration test under `drift/tests/`) that spins up a server listening on `myscheme://127.0.0.1:0` plus the existing transports, then has clients fetch the same content via every scheme and compares bytes. The 4-way test (`drift-http/tests/multi_transport_4way.sh`) is the current template — adding your scheme means adding one bind line and one row to the loop.
 
-That's it. From now on `Transport::bind_url("mytransport://addr")` and `Transport::connect_url("mytransport://...")` work, and every drift-shaped tool (`drift-mosh`, `drift-http`, `drift-wormhole`, `drift-bench`, the `drift` CLI) can route over it without a single line of source change.
+That's it. From now on `Transport::bind_url("mytransport://addr")` and `Transport::connect_url("mytransport://...")` work, and every drift-shaped tool (`drift-mosh`, `drift-http`, `drift-wormhole`, the `drift` CLI) can route over it without a single line of source change.
 
 ## Quick Start (browser / WASM)
 
@@ -564,10 +561,9 @@ drift relay                               # run a mesh relay node
 ## Runnable Examples
 
 - **`drift-chat`** (`drift/examples/drift_chat.rs`) — four-node chat, one per medium (UDP / TCP / WebSocket / WebRTC) on distinct loopback IPs, all talking through a bridge that also accepts WebTransport. Auto mode or interactive stdin.
-- **`drift-shell`** (`drift/examples/drift_shell.rs`) — tiny command server (`time`, `count`, `whoami`, `echo`, …) reachable over DRIFT. Used by `demo-shell.sh` to demonstrate server mobility: one identity migrates across IPs, clients keep reaching it by peer_id.
+- **`drift-shell`** (`drift/examples/drift_shell.rs`) — tiny command server (`time`, `count`, `whoami`, `echo`, …) reachable over DRIFT.
 - **`drift-kv`** (`drift/examples/drift_kv.rs`) — port of the Tokio team's `mini-redis` to run over DRIFT. Implements the Redis RESP protocol (PING / GET / SET / DEL) with the bridge accepting clients on UDP / TCP / WS / WebRTC simultaneously.
 - **`drift-medium-demo`** (`drift/examples/medium_demo.rs`) — three distinct source IPs on three mediums bridged end to end.
-- **`two-bridge-demo`** (`drift/examples/two_bridge_demo.rs`, run via [`docker/two-bridge/run.sh`](docker/two-bridge/run.sh)) — 12 Docker containers: 2 DRIFT bridges + 10 clients (5 connected to each bridge). 90 directed messages all-to-all; cross-bridge sends prove mesh routing forwards through chained bridges with E2E AEAD intact.
 - **`drift-wasm-test/`** — end-to-end Node harness that loads the compiled WASM and verifies (a) a direct DRIFT handshake against a native bridge over WebSocket, and (b) full mesh routing — a browser-equivalent client sending to a UDP peer through the bridge with DRIFT's E2E crypto intact.
 
 ## Wire Format
@@ -611,70 +607,21 @@ Extensive coverage across 60+ integration test files, drift-core unit tests, and
 - **WASM interop**: `drift-wasm-test/` — compiled WASM handshakes with native bridge + mesh-routes to a UDP peer. Confirmed: bridge log shows `recv from peer=<wasm-id> 16B: "hello from wasm!"` (test-wasm) and the cross-medium UDP peer's log shows `RECV <- ?peer=<wasm-id>: hello-from-wasm-through-bridge-to-udp-peer` (test-mesh — bridge never sees plaintext).
 - **HTTP/SSE fallback**: `drift-wasm-test/test-http.mjs` — WASM client (no WebSocket, no streams, just `EventSource` + `fetch()` POST) handshakes with the native bridge over plain HTTP/1.1. Confirmed: bridge log shows `recv from peer=<wasm-id> 26B: "hello from wasm over http!"`. Routes through anything that proxies HTTP at all.
 - **Onion over Tor**: `drift/tests/onion_self_dial.rs` — gated `#[ignore]`, opt-in via `--features onion`. Hosts an onion service in-process, retrieves its `<base32>.onion` address, dials it back through the live Tor network, runs a full handshake + DATA exchange. Confirmed end-to-end in 117s on a real network.
-- **Multi-bridge Docker mesh**: `docker/two-bridge/` — 12 containers, 90 directed messages, 5 of which cross between two bridges
 - **Federation, heterogeneous transports**: `drift-mosh/tests/mixed_transport_federation_test.sh` — runs a full `drift-mosh --exec` shell command end-to-end across `D1 ──UDP──▶ D2 ──TLS──▶ D3 ──WS──▶ D4` (real Proxmox LXCs). Bytes traverse three different DRIFT transports in one chain; the federation envelope is identical regardless of the underlying wire. Also covered with TCP and WebSocket variants — every connection-oriented bridge link now works via `Transport::connect_federate`.
 - **Federation adversarial**: `drift/tests/adversarial_federation.rs` — pure in-process tests (~0.5 s) that lock in three defenses: (1) the bridge rejects envelopes whose `source_client_pub` doesn't match the session-authenticated sender (identity-spoofing prevention); (2) the bridge refuses to insert routing-table entries for `source_bridge_pub` claims that don't match the sender's own pubkey (table-poisoning prevention); (3) only federation peers (entries in our `federation_table`) may write to the peer directory (no random-client directory poisoning).
 - **Federation directory semantics**: `drift/tests/federation_directory_semantics.rs` — three-Transport tests that lock in (1) first-write-wins on cross-announcer conflicts (kills race-to-hijack attacks where a malicious federated bridge tries to steal a pubkey from a legitimate announcer); (2) idempotent-set semantics on announcements (a bridge's announce is the complete current set of its clients, so disconnections propagate to peer directories in one announce interval rather than waiting out the TTL); (3) legitimate client migration is still allowed once the prior announcer cleanly retracts.
 - **Federation presence tickets**: `drift/tests/adversarial_presence_tickets.rs` — five tests covering a malicious federated bridge attempting to announce a victim pubkey with (a) no ticket, (b) a forged ticket signed by the attacker, (c) a real ticket signed for a different bridge, (d) an expired ticket. Plus a sanity-counterpart test confirming legitimate tickets are accepted.
-- **Federation triangle topology**: `drift-mosh/tests/federation_triangle_test.sh` (LXC) and `docker/federation-triangle/` (Docker) — three bridges fully federated in a triangle, every cross-bridge routing direction exercised. Caught the `federated_via` stale-path bug that was fixed in `handle_federated` case 1.
-- **Coverage-guided fuzzing**: `fuzz/` — 7 Tier-1 cargo-fuzz targets covering every wire-format decoder (header, short header, federated envelope, federation directory, dir-message, TCP deframe, stream frame), plus a stateful handshake-FSM target. PR-smoke CI workflow at `.github/workflows/fuzz-smoke.yml`. See `fuzz/README.md`.
-- **Docker discovery end-to-end**: `docker/federation-discovery/run.sh` — builds a 4-container chain (2 bridges + server + client) and verifies a client with only a `default_bridge` in `drift.toml` can dial the server by pubkey alone, with routing resolved entirely through bridge-to-bridge directory announcements.
+- **Federation triangle topology**: `drift-mosh/tests/federation_triangle_test.sh` (LXC) — three bridges fully federated in a triangle, every cross-bridge routing direction exercised. Caught the `federated_via` stale-path bug that was fixed in `handle_federated` case 1.
 - **Tool-level**: drift-mosh's `smoke.exp` / `tcp_transport.exp` / `ws_transport.exp` / `reattach.exp`; drift-http's `serve_static.sh` / `serve_proxy.sh` / `open_url.sh` / `multi_transport_3way.sh` / `multi_transport_4way.sh` (4/4 transports including TLS pass)
 
 ```bash
 cargo test                # full Rust suite
-cargo bench               # throughput benchmarks
-./demo-shell.sh           # live multi-IP rotation + multi-identity demo (needs lo0 aliases)
-docker/two-bridge/run.sh  # 12-container two-bridge mesh demo
+cargo bench               # throughput benchmarks (drift/benches)
 cd drift-wasm-test && npm install && node test-mesh.mjs ...  # WASM↔native E2E
 cargo test --features onion --release --test onion_self_dial -- --ignored --nocapture  # DRIFT over live Tor (~3 min)
 ```
 
 ## Performance
-
-### Cross-protocol benchmark harness
-
-`drift-bench/` is a single binary that speaks DRIFT, QUIC ([quinn](https://docs.rs/quinn)), and WireGuard ([boringtun](https://docs.rs/boringtun)) with identical workloads (handshake, RTT ping-pong, sustained throughput). `drift-bench/docker/run.sh` builds a two-container harness on a shared bridge network and reports each protocol's numbers side-by-side as a Markdown table.
-
-```bash
-cd drift-bench/docker
-./run.sh                                    # default: 1024 B payload, 1000 RTT samples
-NETEM_DELAY=20ms NETEM_LOSS=1% ./run.sh     # simulate WAN with tc/netem
-```
-
-### Methodology
-
-Three workloads, all measured client-side:
-
-- **Handshake**: fresh `Identity::generate()` per iteration (new X25519 static keypair every sample, full HELLO/HELLO_ACK with fresh ephemeral DH). Reports the time from `connect_url` → `send_data("go")` → first byte echoed back. **This includes one application round-trip in the measurement** — there's no public DRIFT API surface that fires precisely at "HELLO_ACK seen and verified," so any split would be fictional. We deliberately report the full first-byte-time so it's directly comparable to QUIC and WireGuard, which report the same thing.
-- **RTT**: single long-lived session, 1000 `send_data` → `recv` ping-pong iterations after a handshake-warm pass. Reports samples in microseconds.
-- **Throughput**: single long-lived session. Client sends 1 KB DATA packets in a tight loop while a *concurrent* recv task counts bytes echoed back by the server. Reports **goodput** (bytes that round-tripped), not pump-rate. The "return ratio" stderr line shows what fraction of sent bytes made it back — anything below ~99% means the recv side is falling behind, which is the honest signal that the client is outpacing the round trip.
-
-### Results (loopback, single Apple Silicon host)
-
-These are local-machine numbers from this repo at the current commit. Docker-bridge numbers (vethpair overhead, two containers, `tc/netem` shaping) are reproduced via `drift-bench/docker/run.sh` and will differ.
-
-**Handshake** (connect → first byte echoed, 30 samples, fresh identity per iter):
-
-| Protocol  | p50    | p95    | p99    |
-|-----------|--------|--------|--------|
-| **DRIFT** | **264 µs** | 437 µs | 611 µs |
-
-**RTT** (ping-pong, 1 KB payload, 1000 samples):
-
-| Protocol  | p50    | p95    | p99    |
-|-----------|--------|--------|--------|
-| **DRIFT** | **30 µs** | 126 µs | 151 µs |
-
-**Throughput** (sustained 1 KB sends, 10 s, round-trip goodput):
-
-| Protocol  | Goodput   | Return ratio |
-|-----------|-----------|--------------|
-| **DRIFT** | **591 Mbps** | 87.3% |
-
-The return ratio < 100% reflects that on loopback DRIFT can pump faster than the recv-side echo loop drains; an application that paces sends to inbound rate would see goodput closer to the line rate.
-
-A previous version of this README reported 1,672 Mbps "with real flow control" — that was a bug in the bench harness. The old code measured pump-rate (`bytes_pushed_into_API / wall_clock`) without draining the receive channel, so it was reporting how fast we could call `send_data` in a loop, not how fast bytes round-tripped. Fixed in `drift_proto.rs` (recv drainer + goodput report); the smaller number is the honest one.
 
 ### Crypto micro-benchmarks
 

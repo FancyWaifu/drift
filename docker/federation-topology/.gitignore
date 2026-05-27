@@ -1,9 +1,0 @@
-# Generated per run.sh invocation — fresh per-run output.
-docker-compose.yml
-identities/
-inventory-c1/
-inventory-c2/
-inventory-c3/
-inventory-c4/
-inventory-c5/
-sweep-*.log
