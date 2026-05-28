@@ -1,0 +1,28 @@
+protocol	workload	trial	samples	p50_us	p95_us	p99_us	goodput_mbps	bytes
+drift	handshake	1	20	795	1007	1393		
+drift	rtt	1	500	43	170	178		
+drift	throughput	1					1519.4	1918526468
+quic	handshake	1	20	3228	3688	4185		
+quic	rtt	1	500	81	181	199		
+quic	throughput	1					1994.7	2493285376
+iroh	handshake	1	20	837	1089	4471		
+iroh	rtt	1	500	67	141	262		
+iroh	throughput	1					1688.3	2131970052
+drift	handshake	2	20	803	980	1367		
+drift	rtt	2	500	39	169	204		
+drift	throughput	2					1515.5	1913452548
+quic	handshake	2	20	3098	3757	4046		
+quic	rtt	2	500	67	178	210		
+quic	throughput	2					1983.1	2478852096
+iroh	handshake	2	20	849	1226	2515		
+iroh	rtt	2	500	68	137	230		
+iroh	throughput	2					1679.3	2120708100
+drift	handshake	3	20	678	794	1138		
+drift	rtt	3	500	88	190	213		
+drift	throughput	3					1524.2	1924469764
+quic	handshake	3	20	3140	3752	4006		
+quic	rtt	3	500	67	181	226		
+quic	throughput	3					1948.5	2435664896
+iroh	handshake	3	20	843	1123	1885		
+iroh	rtt	3	500	76	115	149		
+iroh	throughput	3					1697.7	2143844356

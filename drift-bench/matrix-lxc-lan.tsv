@@ -1,0 +1,64 @@
+context	wire	workload	trial	samples	p50_us	p95_us	p99_us	goodput_mbps	pump_mbps	bytes
+lxc_lan	udp	handshake	1	20	494	649	1069			
+lxc_lan	udp	rtt	1	500	33	47	90			
+lxc_lan	udp	throughput	1					1056.0	1066.5688936231545	1333212164
+lxc_lan	tcp	handshake	1	20	544	684	1035			
+lxc_lan	tcp	rtt	1	500	35	56	138			
+lxc_lan	tcp	throughput	1					1312.0	1326.882732570293	1658898436
+lxc_lan	tls	handshake	1	20	547	627	964			
+lxc_lan	tls	rtt	1	500	37	59	71			
+lxc_lan	tls	throughput	1					754.7	762.3305197320079	952913924
+lxc_lan	ws	handshake	1	20	41741	42108	42166			
+lxc_lan	ws	rtt	1	500	30	43	162			
+lxc_lan	ws	throughput	1					925.0	934.2867109423158	1167858692
+lxc_lan	h2	handshake	1	20	581	622	1079			
+lxc_lan	h2	rtt	1	500	75	90	119			
+lxc_lan	h2	throughput	1					786.6	8158.173637773503	993604612
+lxc_lan	h2s	handshake	1	20	646	730	989			
+lxc_lan	h2s	rtt	1	500	72	100	121			
+lxc_lan	h2s	throughput	1					847.9	7997.794789005085	1071568900
+lxc_lan	webtransport	handshake	1	20	667	709	795			
+lxc_lan	webtransport	rtt	1	500	111	136	152			
+lxc_lan	webtransport	throughput	1					1219.2	3058.601967672555	1540188164
+lxc_lan	udp	handshake	2	20	492	699	1134			
+lxc_lan	udp	rtt	2	500	34	50	63			
+lxc_lan	udp	throughput	2					1002.4	1012.3922025350965	1265490948
+lxc_lan	tcp	handshake	2	20	593	754	1115			
+lxc_lan	tcp	rtt	2	500	36	54	120			
+lxc_lan	tcp	throughput	2					772.5	780.2084767437387	975260676
+lxc_lan	tls	handshake	2	20	546	696	1028			
+lxc_lan	tls	rtt	2	500	37	61	89			
+lxc_lan	tls	throughput	2					753.0	760.5603222190026	950701060
+lxc_lan	ws	handshake	2	20	41578	42505	42807			
+lxc_lan	ws	rtt	2	500	30	37	174			
+lxc_lan	ws	throughput	2					916.1	925.2968133717236	1156621316
+lxc_lan	h2	handshake	2	20	586	623	1104			
+lxc_lan	h2	rtt	2	500	74	92	120			
+lxc_lan	h2	throughput	2					799.2	8146.451090548424	1009261572
+lxc_lan	h2s	handshake	2	20	652	727	983			
+lxc_lan	h2s	rtt	2	500	80	109	125			
+lxc_lan	h2s	throughput	2					738.2	8002.7694919227315	932194308
+lxc_lan	webtransport	handshake	2	20	674	728	980			
+lxc_lan	webtransport	rtt	2	500	118	137	156			
+lxc_lan	webtransport	throughput	2					1215.1	2953.716315447246	1534451716
+lxc_lan	udp	handshake	3	20	529	717	1109			
+lxc_lan	udp	rtt	3	500	34	52	118			
+lxc_lan	udp	throughput	3					1055.0	1065.582910695707	1331979268
+lxc_lan	tcp	handshake	3	20	572	666	1110			
+lxc_lan	tcp	rtt	3	500	36	58	144			
+lxc_lan	tcp	throughput	3					780.8	788.6370494934303	985796612
+lxc_lan	tls	handshake	3	20	539	620	972			
+lxc_lan	tls	rtt	3	500	37	67	107			
+lxc_lan	tls	throughput	3					736.1	743.4840749339921	929355780
+lxc_lan	ws	handshake	3	20	41814	42492	42761			
+lxc_lan	ws	rtt	3	500	30	49	67			
+lxc_lan	ws	throughput	3					913.1	922.3666627758472	1152959492
+lxc_lan	h2	handshake	3	20	582	767	1007			
+lxc_lan	h2	rtt	3	500	67	85	114			
+lxc_lan	h2	throughput	3					785.5	8054.657505709851	991904772
+lxc_lan	h2s	handshake	3	20	644	755	976			
+lxc_lan	h2s	rtt	3	500	71	100	119			
+lxc_lan	h2s	throughput	3					743.5	8103.215859184595	938840068
+lxc_lan	webtransport	handshake	3	20	670	717	874			
+lxc_lan	webtransport	rtt	3	500	117	164	250			
+lxc_lan	webtransport	throughput	3					1199.9	3131.2066604402607	1515512836

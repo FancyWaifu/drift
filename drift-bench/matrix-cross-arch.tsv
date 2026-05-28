@@ -1,0 +1,64 @@
+context	wire	workload	trial	samples	p50_us	p95_us	p99_us	goodput_mbps	pump_mbps	bytes
+cross_arch	udp	handshake	1	20	12197	14417	14698			
+cross_arch	udp	rtt	1	500	5683	6764	10258			
+cross_arch	udp	throughput	1					741.1	748.0938851530574	935019524
+cross_arch	tcp	handshake	1	20	12047	13664	15222			
+cross_arch	tcp	rtt	1	500	6465	7857	13610			
+cross_arch	tcp	throughput	1					713.7	720.8172306569846	901021700
+cross_arch	tls	handshake	1	20	11612	12935	12958			
+cross_arch	tls	rtt	1	500	6163	7400	9090			
+cross_arch	tls	throughput	1					759.8	767.3185685580161	959376388
+cross_arch	ws	handshake	1	20	17303	18978	47979			
+cross_arch	ws	rtt	1	500	6034	7938	23317			
+cross_arch	ws	throughput	1					760.0	768.2277248474198	960284676
+cross_arch	h2	handshake	1	20	11718	13414	14345			
+cross_arch	h2	rtt	1	500	5997	7194	8251			
+cross_arch	h2	throughput	1					612.5	7704.806982810292	773194756
+cross_arch	h2s	handshake	1	20	11636	12389	12700			
+cross_arch	h2s	rtt	1	500	6019	7120	8081			
+cross_arch	h2s	throughput	1					622.3	7798.38541415413	783378436
+cross_arch	webtransport	handshake	1	20	12107	14420	14717			
+cross_arch	webtransport	rtt	1	500	5945	6739	8749			
+cross_arch	webtransport	throughput	1					504.5	549.6494799497207	636743684
+cross_arch	udp	handshake	2	20	11846	12552	12738			
+cross_arch	udp	rtt	2	500	5478	6624	9347			
+cross_arch	udp	throughput	2					743.1	750.0896085234939	937612292
+cross_arch	tcp	handshake	2	20	11794	12214	12552			
+cross_arch	tcp	rtt	2	500	6123	7369	8743			
+cross_arch	tcp	throughput	2					710.8	718.5572087299126	898679812
+cross_arch	tls	handshake	2	20	11501	12819	13442			
+cross_arch	tls	rtt	2	500	6326	7503	9704			
+cross_arch	tls	throughput	2					754.6	763.0241315109918	953780228
+cross_arch	ws	handshake	2	20	17611	24218	24251			
+cross_arch	ws	rtt	2	500	6059	7586	12271			
+cross_arch	ws	throughput	2					754.6	762.6344095621479	954176516
+cross_arch	h2	handshake	2	20	11756	13058	13461			
+cross_arch	h2	rtt	2	500	5966	7365	11814			
+cross_arch	h2	throughput	2					625.5	7712.443114772305	789961732
+cross_arch	h2s	handshake	2	20	11675	12748	12978			
+cross_arch	h2s	rtt	2	500	6057	7360	9466			
+cross_arch	h2s	throughput	2					554.5	7837.8740306785185	700073988
+cross_arch	webtransport	handshake	2	20	11457	13778	15802			
+cross_arch	webtransport	rtt	2	500	5933	6869	9078			
+cross_arch	webtransport	throughput	2					468.5	1367.678947552278	591280132
+cross_arch	udp	handshake	3	20	11727	12681	15267			
+cross_arch	udp	rtt	3	500	5459	6904	11366			
+cross_arch	udp	throughput	3					737.8	744.8512324764524	931037188
+cross_arch	tcp	handshake	3	20	11593	11983	12392			
+cross_arch	tcp	rtt	3	500	6075	7219	7994			
+cross_arch	tcp	throughput	3					708.8	715.7071891987423	895102980
+cross_arch	tls	handshake	3	20	11474	12998	14324			
+cross_arch	tls	rtt	3	500	6052	7232	9187			
+cross_arch	tls	throughput	3					743.6	751.6870484465463	940851204
+cross_arch	ws	handshake	3	20	16780	18252	19562			
+cross_arch	ws	rtt	3	500	6075	7501	12439			
+cross_arch	ws	throughput	3					752.1	759.3900727811703	950936580
+cross_arch	h2	handshake	3	20	11797	12835	20373			
+cross_arch	h2	rtt	3	500	5984	7124	8931			
+cross_arch	h2	throughput	3					629.7	7760.361849006481	794844164
+cross_arch	h2s	handshake	3	20	11760	13190	13328			
+cross_arch	h2s	rtt	3	500	6049	7398	8407			
+cross_arch	h2s	throughput	3					622.1	7777.5725930623985	784653316
+cross_arch	webtransport	handshake	3	20	11993	12725	14274			
+cross_arch	webtransport	rtt	3	500	5103	6452	9335			
+cross_arch	webtransport	throughput	3					508.0	517.2367653850075	641166340

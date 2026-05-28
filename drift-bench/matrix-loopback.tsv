@@ -1,0 +1,64 @@
+context	wire	workload	trial	samples	p50_us	p95_us	p99_us	goodput_mbps	pump_mbps	bytes
+loopback	udp	handshake	1	20	614	667	1073			
+loopback	udp	rtt	1	500	80	126	141			
+loopback	udp	throughput	1					1520.2	1535.5638720378574	1919455236
+loopback	tcp	handshake	1	20	690	763	1022			
+loopback	tcp	rtt	1	500	56	107	133			
+loopback	tcp	throughput	1					2286.2	2309.991118753961	2887489540
+loopback	tls	handshake	1	20	578	662	715			
+loopback	tls	rtt	1	500	60	118	189			
+loopback	tls	throughput	1					1927.6	1946.9748122104802	2433719300
+loopback	ws	handshake	1	20	803	991	1228			
+loopback	ws	rtt	1	500	65	134	208			
+loopback	ws	throughput	1					3569.4	3605.574240634464	4506968068
+loopback	h2	handshake	1	20	725	889	1180			
+loopback	h2	rtt	1	500	87	133	216			
+loopback	h2	throughput	1					3261.3	7111.994858600386	4117913604
+loopback	h2s	handshake	1	20	712	925	1164			
+loopback	h2s	rtt	1	500	75	146	202			
+loopback	h2s	throughput	1					2806.3	7000.519419335073	3543549956
+loopback	webtransport	handshake	1	20	686	891	1077			
+loopback	webtransport	rtt	1	500	73	184	219			
+loopback	webtransport	throughput	1					905.1	914.2844299910331	1142857732
+loopback	udp	handshake	2	20	742	847	1230			
+loopback	udp	rtt	2	500	44	175	201			
+loopback	udp	throughput	2					1521.0	1536.2844735386052	1920356356
+loopback	tcp	handshake	2	20	718	891	1082			
+loopback	tcp	rtt	2	500	63	124	202			
+loopback	tcp	throughput	2					2355.9	2380.3636400206537	2975455236
+loopback	tls	handshake	2	20	685	846	911			
+loopback	tls	rtt	2	500	62	119	193			
+loopback	tls	throughput	2					1925.1	1944.575716286403	2430720004
+loopback	ws	handshake	2	20	692	907	1059			
+loopback	ws	rtt	2	500	65	121	189			
+loopback	ws	throughput	2					3553.1	3589.184208571516	4486480900
+loopback	h2	handshake	2	20	553	721	839			
+loopback	h2	rtt	2	500	84	124	136			
+loopback	h2	throughput	2					3186.2	7049.572029129601	4023068676
+loopback	h2s	handshake	2	20	456	575	728			
+loopback	h2s	rtt	2	500	86	138	212			
+loopback	h2s	throughput	2					2850.7	7064.244572721312	3599510532
+loopback	webtransport	handshake	2	20	635	868	904			
+loopback	webtransport	rtt	2	500	77	166	202			
+loopback	webtransport	throughput	2					901.4	910.5365745021868	1138172932
+loopback	udp	handshake	3	20	738	968	1315			
+loopback	udp	rtt	3	500	80	140	151			
+loopback	udp	throughput	3					1509.8	1525.1274314927923	1906409476
+loopback	tcp	handshake	3	20	529	616	784			
+loopback	tcp	rtt	3	500	63	131	213			
+loopback	tcp	throughput	3					2335.4	2359.9487353156296	2949936132
+loopback	tls	handshake	3	20	604	798	875			
+loopback	tls	rtt	3	500	63	121	207			
+loopback	tls	throughput	3					1915.9	1935.3056908867886	2419132420
+loopback	ws	handshake	3	20	559	704	795			
+loopback	ws	rtt	3	500	63	135	213			
+loopback	ws	throughput	3					3524.7	3560.305266231454	4450381828
+loopback	h2	handshake	3	20	783	970	1264			
+loopback	h2	rtt	3	500	86	130	187			
+loopback	h2	throughput	3					3286.7	7117.4274481253515	4150266884
+loopback	h2s	handshake	3	20	760	920	1082			
+loopback	h2s	rtt	3	500	90	114	133			
+loopback	h2s	throughput	3					2819.0	7079.260271273973	3559099396
+loopback	webtransport	handshake	3	20	624	840	934			
+loopback	webtransport	rtt	3	500	73	174	221			
+loopback	webtransport	throughput	3					900.6	909.7568643745053	1137198084

@@ -16,35 +16,37 @@ Your address is your public key. The same wire protocol runs over UDP, TCP, TLS,
 | Differential-privacy-noised discovery + cover traffic                | ✅                              | ❌                             | ❌                    | partial                |
 | Owner-driven identity rotation                                       | ✅                              | ❌                             | partial              | ❌                      |
 
-**Head-to-head protocol overhead (loopback, single Mac, 1 KB payload, fresh client per handshake iter):**
+**Head-to-head protocol overhead (Mac loopback, 1 KB payload, fresh client per handshake iter, median of 3 trials):**
 
-| Workload                           | DRIFT       | Iroh        | QUIC (quinn)  |
-| ---------------------------------- | ----------- | ----------- | ------------- |
-| Handshake p50 (connect→first byte) | **1650 µs** | 2527 µs     | 1926 µs       |
-| RTT p50                            | **68 µs**   | 65 µs       | 104 µs        |
-| RTT p99 (tail latency)             | **132 µs**  | 302 µs      | 2033 µs       |
+| Workload                           | DRIFT (UDP wire) | Iroh        | QUIC (quinn)  |
+| ---------------------------------- | ---------------- | ----------- | ------------- |
+| Handshake p50 (connect→first byte) | **795 µs**       | 843 µs      | 3140 µs       |
+| Handshake p99                      | **1367 µs**      | 2515 µs     | 4046 µs       |
+| RTT p50                            | **43 µs**        | 68 µs       | 67 µs         |
+| RTT p99                            | **204 µs**       | 230 µs      | 210 µs        |
 
-These measure the protocol's own per-packet overhead — the fair head-to-head. DRIFT wins handshake p50 and has the tightest tail by ~3–15×.
+DRIFT-over-UDP wins handshake p50 by **4× vs raw QUIC** and matches Iroh; wins RTT p50 by 1.5× vs both. This is the regime DRIFT was designed for — short, identity-routed messages.
 
-**Throughput is wire-dependent, not protocol-dependent.** DRIFT runs over twelve different wires. The same DRIFT protocol, same payload — different wire underneath, three contexts. Numbers are server-side **goodput** (bytes that actually arrived), not client-side pump-rate:
+**Throughput is wire-dependent.** Same DRIFT protocol, same 1 KB payload — different wire underneath, three real-network contexts, median of 3 trials per cell (min–max in parens). Server-side goodput, not client pump-rate:
 
-| DRIFT over...   | Mac loopback | LXC↔LXC (1 Gbps LAN) | Mac↔LXC (cross-arch LAN) |
-| --------------- | ------------ | -------------------- | ------------------------ |
-| ws              | **3537**     | 890                  | **767**                  |
-| h2              | 3176         | 775                  | 633                      |
-| h2s             | 2803         | 847                  | 630                      |
-| tcp             | 2279         | 785                  | 714                      |
-| tls             | 1919         | 733                  | 724                      |
-| udp             | 1513         | 1038                 | 728                      |
-| webtransport    | 921          | **1215**             | 504                      |
+| DRIFT over... | Mac loopback         | LXC↔LXC (1 Gbps LAN)    | Mac↔LXC (cross-arch LAN) |
+| ------------- | -------------------- | ----------------------- | ------------------------ |
+| ws            | **3553** (3525–3569) | 916 (913–925)           | **755** (752–760)        |
+| h2            | 3261 (3186–3287)     | 787 (786–799)           | 626 (612–630)            |
+| h2s           | 2819 (2806–2851)     | 744 (738–848)           | 622 (554–622)            |
+| tcp           | 2335 (2286–2356)     | 781 (772–1312)          | 711 (709–714)            |
+| tls           | 1925 (1916–1928)     | 753 (736–755)           | 755 (744–760)            |
+| udp           | 1520 (1510–1521)     | 1055 (1002–1056)        | 741 (738–743)            |
+| webtransport  | 901 (901–905)        | **1215** (1200–1219)    | 504 (468–508)            |
 
-For comparison, on the same Mac loopback (also goodput): raw QUIC 1988 Mbps, Iroh 1709 Mbps.
+Same Mac loopback baseline: raw QUIC 1983 Mbps, Iroh 1688 Mbps.
 
-Two real findings:
-- **Wire choice matters most when you have headroom.** On loopback the spread between wires is 3.8× (921 → 3537 Mbps). On gigabit LAN it compresses to ~1.7× because everything hits near line rate. Pick the wire that fits your environment; the protocol layer is the same.
-- **No single wire wins everywhere.** `ws` wins Mac loopback and cross-arch LAN; `webtransport` wins LXC↔LXC real LAN; `udp` is the steadiest near line-rate across all three contexts. Iroh, by contrast, is QUIC-only at 1709 Mbps — you don't get to pick.
+Three real findings:
+- **Wire choice matters most when you have headroom.** Loopback spread is 3.9× (901 → 3553 Mbps). On gigabit LAN it compresses to 1.7× because every wire hits near line rate.
+- **No single wire wins everywhere.** `ws` wins Mac loopback and cross-arch LAN; `webtransport` wins LXC↔LXC; `udp` is the steadiest near line-rate across all three contexts.
+- **Iroh is QUIC-only at 1688 Mbps.** You don't get to pick.
 
-Full methodology + raw TSVs + the realnet sweep script: [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md).
+Full matrix (handshake + RTT + throughput × 7 wires × 3 contexts × 3 trials), methodology, raw TSVs, and reproducer: [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md).
 
 ## What DRIFT actually is (one paragraph)
 
