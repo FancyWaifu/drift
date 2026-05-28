@@ -16,7 +16,7 @@ Your address is your public key. The same wire protocol runs over UDP, TCP, TLS,
 | Differential-privacy-noised discovery + cover traffic                | ✅                              | ❌                             | ❌                    | partial                |
 | Owner-driven identity rotation                                       | ✅                              | ❌                             | partial              | ❌                      |
 
-**Where DRIFT lands head-to-head on the protocol-overhead metrics (loopback, single Mac, 1 KB payload, fresh client per handshake iter):**
+**Head-to-head protocol overhead (loopback, single Mac, 1 KB payload, fresh client per handshake iter):**
 
 | Workload                           | DRIFT       | Iroh        | QUIC (quinn)  |
 | ---------------------------------- | ----------- | ----------- | ------------- |
@@ -24,9 +24,21 @@ Your address is your public key. The same wire protocol runs over UDP, TCP, TLS,
 | RTT p50                            | **68 µs**   | 65 µs       | 104 µs        |
 | RTT p99 (tail latency)             | **132 µs**  | 302 µs      | 2033 µs       |
 
-These are the metrics where a head-to-head makes sense — they measure the protocol's own per-packet overhead. DRIFT wins handshake p50 and has the tightest tail by ~3-15×.
+These measure the protocol's own per-packet overhead — the fair head-to-head. DRIFT wins handshake p50 and has the tightest tail by ~3–15×.
 
-**Throughput is not a head-to-head metric here.** QUIC is QUIC; Iroh wraps QUIC. DRIFT isn't a single wire — it runs over UDP, TCP, TLS, WebSocket, h2, h2s, WebTransport, DoH, Tor, WebRTC, or in-memory. Each wire has its own throughput ceiling determined by the kernel, the framing, the TLS layer, and whether the middlebox is permissive. DRIFT-over-UDP on loopback hits ~914 Mbps in this bench; DRIFT-over-WebTransport will differ; DRIFT-through-Tor will differ much more. The interesting throughput question for DRIFT is **"how much does the chosen wire cost vs its native equivalent"** — the four-wire sweep in [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md) is the answer in progress.
+**Throughput is wire-dependent, not protocol-dependent.** DRIFT runs over twelve different wires. The same DRIFT protocol, same payload, same loopback — different wire underneath each time:
+
+| DRIFT over... | Mbps     | vs raw QUIC (1935 Mbps) |
+| ------------- | -------- | ----------------------- |
+| **h2**        | **7061** | **3.6× faster**         |
+| **h2s**       | **7052** | **3.6× faster**         |
+| ws            | 3551     | 1.8× faster             |
+| tcp           | 2298     | 1.2× faster             |
+| tls           | 1949     | comparable              |
+| udp           | 1524     | comparable              |
+| webtransport  | 931      | slower                  |
+
+DRIFT does not have a single throughput number. The spread between wires on the same hardware is **7.5×** (931 → 7061 Mbps). Pick the wire that fits your environment; the protocol layer is the same. Iroh, by contrast, is QUIC-only at 1691 Mbps — you can't pick a faster wire. Full methodology: [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md).
 
 ## What DRIFT actually is (one paragraph)
 
