@@ -1,16 +1,39 @@
 # DRIFT
 
-**Deadline-aware, Routed, Identity-based, Fresh-over-stale, Tiny-footprint transport protocol.**
+**DRIFT is the identity-based transport that works through every middlebox, with Matrix-style federation built in.**
 
-DRIFT is an encrypted transport protocol where your address IS your public key, encryption is non-negotiable, and mesh routing is built in. Inspired by [Reticulum](https://reticulum.network/)'s identity-first philosophy, but designed for production IP networks with QUIC-grade performance — and for the browser, via a WASM implementation that speaks the same wire protocol byte-for-byte.
+Your address is your public key. The same wire protocol runs over UDP, TCP, TLS, WebSocket, HTTP/2, HTTP/3 (WebTransport), Tor onion services, DNS, DoH-over-Cloudflare-Worker, WebRTC, and in-memory channels — pick whichever your network actually permits. Bridges federate Matrix-style so two peers behind separate NATs find each other through a shared bridge with no port forwarding. A WASM build of the same protocol runs in browsers, byte-for-byte wire-compatible with native peers.
 
 ## Why DRIFT
 
-Reticulum proved identity-first networking works. DRIFT proves it can also be fast — congestion control, stream multiplexing, session resumption, connection migration — and that the same protocol can run everywhere from a Rust binary on a server to a WASM blob in a browser tab.
+| If you need...                                                       | DRIFT                          | Iroh                          | Tailscale            | Reticulum              |
+| -------------------------------------------------------------------- | ------------------------------ | ----------------------------- | -------------------- | ---------------------- |
+| Pubkey-addressed transport (no DNS, no accounts)                     | ✅                              | ✅                             | ❌ (account-tied)     | ✅                      |
+| 12+ wire transports including DoH-over-Worker, Tor, WebTransport     | ✅                              | ❌ (QUIC-only)                 | ❌ (UDP/TCP only)     | ✅ (radio-first)        |
+| Matrix-style federation with discovery primitives                    | ✅                              | ❌ (relay-only)                | ❌                    | partial (mesh routing) |
+| Browser WASM shipping (not roadmapped)                               | ✅                              | roadmap                       | ❌                    | ❌                      |
+| Production-internet IP throughput                                    | ✅                              | ✅                             | ✅                    | ❌ (LoRa/radio range)   |
+| Differential-privacy-noised discovery + cover traffic                | ✅                              | ❌                             | ❌                    | partial                |
+| Owner-driven identity rotation                                       | ✅                              | ❌                             | partial              | ❌                      |
 
-## Recent work — Federation peer discovery (May 2026)
+**Where DRIFT lands on a head-to-head benchmark vs Iroh (loopback, single Mac, 1 KB payload):**
 
-The last major arc of work was a six-phase implementation of **federation peer discovery** — the protocol layer that lets a DRIFT client reach any peer in a multi-bridge federation by pubkey alone, with privacy-aware variants for the lookup itself. Before this, `drift.toml` host entries needed an explicit `via_bridge` pointing at the bridge holding the target. After it, a host entry can carry only a pubkey and the local bridge handles the routing.
+| Workload                           | DRIFT       | Iroh        | QUIC (quinn)  |
+| ---------------------------------- | ----------- | ----------- | ------------- |
+| Handshake p50 (connect→first byte) | **1650 µs** | 2527 µs     | 1926 µs       |
+| RTT p50                            | **68 µs**   | 65 µs       | 104 µs        |
+| RTT p99 (tail latency)             | **132 µs**  | 302 µs      | 2033 µs       |
+| Throughput (sustained, 10 s)       | 914 Mbps    | 1691 Mbps   | **1935 Mbps** |
+
+DRIFT is **latency-tight, throughput-modest**. Wins handshake and RTT (especially tail latency); loses ~2× sustained throughput to streaming QUIC. The throughput gap is a v1 protocol-shape choice (packet-per-send, no stream batching) — fixable, not fundamental. Full methodology and reproducer: [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md).
+
+## What DRIFT actually is (one paragraph)
+
+A custom 36-byte long-header / 7-byte short-header wire format with X25519 + ChaCha20-Poly1305 (WireGuard primitives) and optional X25519+ML-KEM-768 hybrid for post-quantum. On top: reliable multiplexed streams with NewReno/BBR congestion control, deadline-aware delivery, semantic coalescing, 1-RTT PSK session resumption, RTT-weighted multi-hop mesh routing, federation with bridge-to-bridge directory announcements (XEdDSA-signed presence tickets), and a federation-discovery layer that supports differential-privacy-noised bloom filters + Poisson-timed cover traffic + signed hop attestations. Plus a `PacketIO` trait so any byte-shaped wire — UDP socket, TLS stream, h2 bidi stream, WebTransport datagram, Tor hidden service — can carry the protocol.
+
+## Federation discovery (the privacy story)
+
+The federation layer mentioned above is the result of a six-phase implementation that lets a DRIFT client reach any peer in a multi-bridge federation **by pubkey alone**, with privacy controls applied to the lookup itself. Before this work, `drift.toml` host entries needed an explicit `via_bridge` pointing at the bridge holding the target. After it, a host entry can carry only a pubkey and the local bridge handles the routing.
 
 ### The mental model
 
@@ -82,21 +105,21 @@ Stacked, these defeat bulk traffic analysis: transit bridges see only hashed tar
 - **PIR-based "high-privacy" lookup mode** — lattice-based homomorphic PIR for the case where you can't trust even the answering bridge. See the trade-off discussion in [`FEDERATION_DISCOVERY.md`](FEDERATION_DISCOVERY.md).
 - **`webrtc://` URL scheme** — currently programmatic-only on the native side; adding a CLI-accessible scheme needs a signaling protocol. (`webtransport://` shipped as a CLI scheme in the federation-backbone arc — see below.)
 
-### Test totals after this work
+### Test totals (latest workspace run, 2026-05-27)
 
 ```
-drift unit:                     95 ✓
-federation_discovery:           11 ✓  (Phases A → F end-to-end)
-federation_directory_semantics:  3 ✓
-adversarial_federation:          3 ✓
-adversarial_presence_tickets:    5 ✓
-loopback_full_mesh:              5 ✓  (webrtc ignored on macOS — env-specific)
-drift-config + others:          56 ✓
+cargo test --workspace --release --lib --bins --tests
+→  108 suites, 458 passed, 0 failed, 26 ignored
+   (ignored = onion / browser tests gated behind env vars + features)
 ```
 
-Plus a live Mac↔LXC drift-vpn tunnel proving end-to-end usability.
+Plus a live Mac↔LXC drift-vpn tunnel and a 17-bridge corporate-federation
+benchmark on a 2-core/512MB Proxmox LXC ([`docker/federation-corporate/`](docker/federation-corporate/RESULTS.md))
+proving end-to-end usability.
 
-## Features
+## How — capability map
+
+Concrete pieces that back the positioning sentence above, grouped by what they do.
 
 **Crypto** — X25519 + ChaCha20-Poly1305 (WireGuard-style minimal surface). Optional post-quantum hybrid (X25519 + ML-KEM-768). Adaptive DoS cookies. RFC 9000-style 3× amplification limit. No plaintext mode.
 
@@ -622,6 +645,8 @@ cargo test --features onion --release --test onion_self_dial -- --ignored --noca
 ```
 
 ## Performance
+
+The headline cross-protocol numbers (DRIFT vs Iroh vs QUIC, 1024 B payload, loopback) live in the opening table. Methodology, raw results, and the four-way bench runner: [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md) and [`drift-bench/scripts/run-local-four.sh`](drift-bench/scripts/run-local-four.sh).
 
 ### Crypto micro-benchmarks
 

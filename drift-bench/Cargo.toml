@@ -1,0 +1,32 @@
+[package]
+name = "drift-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Real-network benchmark: DRIFT vs QUIC vs WireGuard vs Iroh"
+
+[dependencies]
+drift = { path = "../drift" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# QUIC
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rcgen = "0.13"
+bytes = "1"
+
+# WireGuard
+boringtun = "0.7"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# Iroh — n0-computer's pubkey-addressed QUIC overlay.
+# Default features include relay infrastructure; we don't need
+# it on loopback so opt out where possible.
+iroh = { version = "1.0.0-rc.1", default-features = false, features = ["tls-ring"] }
+
+[[bin]]
+name = "drift-bench"
+path = "src/main.rs"
