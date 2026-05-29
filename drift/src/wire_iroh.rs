@@ -43,10 +43,59 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
+
+/// Process-wide singleton iroh `Endpoint`. Iroh's own docs
+/// recommend "It is recommended to only create a single instance
+/// per application. This ensures all the connections made share
+/// the same peer-to-peer connections to other iroh endpoints."
+///
+/// Without this, a bridge that both listens (via `--listen iroh://`)
+/// and federates outbound (via `--federate iroh://`) ends up with
+/// two separate Endpoints — incoming + outgoing — and iroh's
+/// connection-per-peer dedup can't fire across them. That triggers
+/// the K=3 mutual-init asymmetry bug documented in
+/// `drift-bench/FEDERATION-IROH-VS-H2S.md`: bridge2 dials bridge3
+/// AND bridge3 dials bridge2 simultaneously, both succeed because
+/// each Endpoint is unaware of the other, DRIFT's dual-init handler
+/// merges the sessions but the mesh-routing table only records
+/// one direction.
+///
+/// With the shared Endpoint, iroh's built-in connection dedup
+/// fires before DRIFT ever sees the dual-init: only ONE
+/// Connection per peer ever exists per process.
+static SHARED_ENDPOINT: OnceCell<Endpoint> = OnceCell::const_new();
+
+/// Gets or initializes the process-wide iroh `Endpoint`. The
+/// first caller's `bind_hint` (if Some and port != 0) determines
+/// the bound UDP port; subsequent calls ignore the hint and
+/// reuse the existing endpoint. Listeners pass the URL's port
+/// hint; connectors pass None.
+async fn shared_endpoint(bind_hint: Option<SocketAddr>) -> io::Result<Endpoint> {
+    SHARED_ENDPOINT
+        .get_or_try_init(|| async {
+            let mut builder = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]);
+            if let Some(sk) = iroh_secret_from_env() {
+                builder = builder.secret_key(sk);
+            }
+            if let Some(hint) = bind_hint {
+                if hint.port() != 0 {
+                    builder = builder.bind_addr(hint).map_err(|e| {
+                        io::Error::other(format!("iroh bind_addr {}: {}", hint, e))
+                    })?;
+                }
+            }
+            builder
+                .bind()
+                .await
+                .map_err(|e| io::Error::other(format!("iroh shared endpoint bind: {}", e)))
+        })
+        .await
+        .cloned()
+}
 
 const ALPN: &[u8] = b"drift/iroh/1";
 const MAX_FRAME: usize = 64 * 1024;
@@ -205,24 +254,16 @@ fn iroh_secret_from_env() -> Option<iroh::SecretKey> {
 
 impl IrohListenerIO {
     pub async fn bind(hint: SocketAddr) -> io::Result<Self> {
-        let mut builder = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]);
-        if let Some(sk) = iroh_secret_from_env() {
-            builder = builder.secret_key(sk);
-        }
-        // Honor a fixed bind addr from the listener URL when
-        // the caller passed one (port != 0). Stable port +
-        // stable endpoint id together give federation
-        // configurations a reachable `iroh://<id>@<host:port>`
-        // tuple that survives restarts.
-        if hint.port() != 0 {
-            builder = builder
-                .bind_addr(hint)
-                .map_err(|e| io::Error::other(format!("iroh bind_addr {}: {}", hint, e)))?;
-        }
-        let endpoint = builder
-            .bind()
-            .await
-            .map_err(|e| io::Error::other(format!("iroh endpoint bind: {}", e)))?;
+        // Use the process-wide shared Endpoint so a bridge that
+        // both listens and federates outbound has ONE iroh
+        // Endpoint for both directions. This is what enables
+        // iroh's built-in per-peer connection dedup across
+        // accept and connect paths — without it, mutual-init
+        // federation (K≥3) produces two ambiguous Connections
+        // per peer which DRIFT's dual-init handler half-resolves,
+        // leaving the mesh routing asymmetric. See the doc on
+        // SHARED_ENDPOINT.
+        let endpoint = shared_endpoint(Some(hint)).await?;
         let id = endpoint.id();
         let bound: Vec<SocketAddr> = endpoint.bound_sockets();
         tracing::info!(
@@ -324,22 +365,17 @@ async fn connect_iroh_client(
         .map_err(|e| io::Error::other(format!("iroh direct addr parse: {}", e)))?;
     let target = EndpointAddr::new(id).with_ip_addr(direct);
 
-    // Apply DRIFT_IROH_SECRET_HEX to the connector too, so this
-    // bridge's outgoing iroh connections use the SAME endpoint id
-    // as its listener. Without this, every connector binds with a
-    // fresh ephemeral key and the remote sees us at a different
-    // iroh id from each direction — which the deterministic-addr
-    // hash maps to two different SocketAddrs, breaking DRIFT's
-    // session correlation across incoming/outgoing paths to the
-    // same peer (notably hits dual-init federation handshake).
-    let mut builder = Endpoint::builder(presets::Minimal);
-    if let Some(sk) = iroh_secret_from_env() {
-        builder = builder.secret_key(sk);
-    }
-    let endpoint = builder
-        .bind()
-        .await
-        .map_err(|e| io::Error::other(format!("iroh client bind: {}", e)))?;
+    // Use the same process-wide shared Endpoint as the listener
+    // (and as any other concurrent connect call). This is the
+    // key to iroh's per-peer connection dedup: when bridge1's
+    // listener already has an accepted Connection from bridge2
+    // AND bridge1's federation code tries to dial bridge2, iroh
+    // recognizes the existing Connection and reuses it instead
+    // of opening a second one. Without sharing, dual-init goes
+    // through DRIFT's session-merge handler, which doesn't
+    // populate both sides' federation_table — that's the K=3
+    // BEACON-asymmetry bug.
+    let endpoint = shared_endpoint(None).await?;
     let conn: Connection = endpoint
         .connect(target, ALPN)
         .await

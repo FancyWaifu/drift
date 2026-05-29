@@ -86,36 +86,85 @@ original race. **It exposes a different bug at K=3 density**
 — the interaction between iroh's bidirectional Connection
 abstraction and DRIFT's dual-init session-table is wrong.
 
-## Implications
+## Implications (updated post-fix)
 
-For pair-wise federation: iroh is a fine choice.
+**iroh and h2s are now equivalent for federation at K=3** —
+all 6 directed edges active on both wires, zero auth failures,
+matching BEACON cadence. The "h2s is more reliable" caveat
+from before only applied to the pre-fix iroh adapter.
 
-For K≥3 federation topology: **h2s is the more reliable wire**
-for now. Use iroh only between specific bridge pairs that
-don't mutual-initiate (one side is `--federate`, the other
-side just `--listen`), or accept half-duplex BEACON flow on
-mutual-init pairs (federation still works for routing, just
-sub-optimal mesh visibility).
+iroh remains a valid federation wire choice, with the same
+tradeoffs as documented in `RESULTS-2026-05-27.md` Phase 4:
 
-## Fixing the K=3 regression
+- **Throughput overhead** (~50% efficiency vs native iroh
+  streams) — the cross-wire portability tax.
+- **Middlebox compatibility** (iroh is UDP/QUIC; h2s is
+  HTTPS-shaped) — pick based on what your federation links
+  actually traverse.
+- **Operator-config burden** (`DRIFT_IROH_SECRET_HEX` env
+  var, fixed UDP port, longer URL format) — works once you
+  know it, not self-documenting.
 
-Two paths:
+## Fix: process-wide shared iroh `Endpoint` (status: FIXED)
 
-1. **Don't dual-init on iroh.** Add a "we already have an
-   accepted session from this peer; don't open one ourselves"
-   guard in `connect_federate`'s outbound path when the wire
-   is iroh. Lower-effort, narrowly-scoped.
+After researching iroh's own documentation, found this in
+the `Endpoint` rustdoc:
 
-2. **Fix the dual-init handler to populate both
-   federation_table entries.** When the loser's HELLO is
-   dropped in favor of the winner's, the loser still needs
-   to record the merged session in its federation_table so
-   mesh routing fires. Lower-blast-radius but more
-   architectural.
+> It is recommended to only create a single instance per
+> application. This ensures all the connections made share
+> the same peer-to-peer connections to other iroh endpoints.
 
-Either approach unblocks K≥3 iroh federation. Filing as a
-known issue; the artifacts in `drift-bench/fed-k3-iroh-*`
-have the per-bridge log evidence.
+That was the root cause. My original adapter created:
+- one `Endpoint` for the listener (in `IrohListenerIO::bind`)
+- one new `Endpoint` per outbound dial (in
+  `connect_iroh_client`)
+
+Because each `Endpoint` is independent, iroh's built-in
+**per-peer connection deduplication** could never fire across
+the listener and the connector. When bridge2 accepted bridge3's
+incoming connection AND simultaneously dialed bridge3 itself,
+both succeeded and produced two independent Connections (since
+they lived on two independent Endpoints). DRIFT's session-layer
+dual-init handler then merged them into one session, but the
+federation_table only recorded one direction.
+
+The fix: a `tokio::sync::OnceCell<Endpoint>` that holds the
+process-wide singleton. Both `IrohListenerIO::bind` and
+`connect_iroh_client` now go through `shared_endpoint(hint)`,
+which lazily initializes the singleton with the listener's
+bind hint and returns clones for subsequent calls. With a
+single Endpoint, iroh's per-peer dedup works as designed:
+when bridge2's listener already has an accepted Connection
+from bridge3, bridge2's dial to bridge3 reuses that same
+Connection instead of opening a second one.
+
+### Result — same K=3 test, with the shared-Endpoint fix
+
+iroh K=3 — **all 6 of 6 directed edges active**:
+| from | → bridge1 | → bridge2 | → bridge3 |
+|---|---|---|---|
+| bridge1 | — | 89 ✓ | 89 ✓ |
+| bridge2 | 90 ✓ | — | **90 ✓** |
+| bridge3 | 90 ✓ | **90 ✓** | — |
+
+Aggregate: **538 BEACONs total** vs h2s's 536. iroh is
+now indistinguishable from h2s on the K=3 BEACON matrix.
+
+Two dual_init events still fire in the iroh log — DRIFT's
+dual-init session-merge runs at the protocol layer regardless
+of how iroh deduplicates at the transport layer — but with
+the shared Endpoint, both bridges end up with the SAME single
+Connection in their session table, so the federation_table
+entry gets populated correctly on both sides and mesh routing
+fires symmetrically.
+
+Raw post-fix evidence: `drift-bench/fed-k3-iroh-k3-b{1,2,3}-fixed.log`.
+
+This is the architecturally correct fix per iroh's own
+guidance, not a workaround. It would also have been needed
+eventually for relay-mode federation (where each `Endpoint`
+maintains its own relay connection — having multiple per
+process would be wasteful).
 
 ## Reproduce
 
