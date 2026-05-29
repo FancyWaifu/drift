@@ -324,7 +324,19 @@ async fn connect_iroh_client(
         .map_err(|e| io::Error::other(format!("iroh direct addr parse: {}", e)))?;
     let target = EndpointAddr::new(id).with_ip_addr(direct);
 
-    let endpoint = Endpoint::builder(presets::Minimal)
+    // Apply DRIFT_IROH_SECRET_HEX to the connector too, so this
+    // bridge's outgoing iroh connections use the SAME endpoint id
+    // as its listener. Without this, every connector binds with a
+    // fresh ephemeral key and the remote sees us at a different
+    // iroh id from each direction — which the deterministic-addr
+    // hash maps to two different SocketAddrs, breaking DRIFT's
+    // session correlation across incoming/outgoing paths to the
+    // same peer (notably hits dual-init federation handshake).
+    let mut builder = Endpoint::builder(presets::Minimal);
+    if let Some(sk) = iroh_secret_from_env() {
+        builder = builder.secret_key(sk);
+    }
+    let endpoint = builder
         .bind()
         .await
         .map_err(|e| io::Error::other(format!("iroh client bind: {}", e)))?;

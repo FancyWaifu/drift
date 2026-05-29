@@ -1,0 +1,106 @@
+Warning: Permanently added '104.166.196.243' (ED25519) to the list of known hosts.
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
+ssh: Ignoring unknown configuration option 'StrictHostKeyChecking=no'
+ssh: Ignoring unknown configuration option 'UserKnownHostsFile=/dev/null'
+ssh: 
+Host '192.168.50.168' key accepted unconditionally.
+(ssh-ed25519 fingerprint SHA256:x714YQQwdVRRekLF90FKBTq8QBzWowtGf6WuZ1zR7ZI)
+
+[2m2026-05-29T20:00:52.813807Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m recv_from failed; evicting interface [3merror[0m[2m=[0mchannel closed [3miface_idx[0m[2m=[0m0
+
+┌─ drift bridge ─────────────────────────────────────────
+│ pubkey: c9ec3be425857fc0b78f30c00b7076abf00934b3e645dd7e8bd957d4c52ad53b
+│ listen:
+│   h2s://0.0.0.0:51900
+│ accept_any_peer: true (any peer with the pubkey can connect)
+│ federation peers:
+│   h2s://192.168.50.52:51900@a4210d1387ae2837fd5446925e4432d0c0c2eb9f6a095c83113f55b869b9257d (a4210d1387ae2837) — initial connect failed (io error: Connection refused (os error 111)); will retry in background
+└───────────────────────────────────────────────────────
+
+ready. share the pubkey above with anyone you want to bridge.
+ctrl-c to stop.
+[2m2026-05-29T20:00:53.089433Z[0m [33m WARN[0m [2mrustls::server::tls13[0m[2m:[0m early_data with stateless resumption is not allowed
+[2m2026-05-29T20:00:53.089581Z[0m [33m WARN[0m [2mrustls::server::tls13[0m[2m:[0m early_data with stateless resumption is not allowed
+[2m2026-05-29T20:00:53.164589Z[0m [34mDEBUG[0m [2mdrift::transport[0m[2m:[0m auto-registered new peer [44, 60, 131, 49, 131, 21, 69, 237] on iface 1
+[2m2026-05-29T20:00:53.164801Z[0m [34mDEBUG[0m [2mdrift::transport[0m[2m:[0m sent HELLO_ACK to 192.168.50.52:35848 via iface 1
+[2m2026-05-29T20:00:53.315770Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:53.316742Z[0m [32m INFO[0m [2mdrift::cli::bridge[0m[2m:[0m federation peer connected after retry [3mtarget[0m[2m=[0mh2s://192.168.50.52:51900
+[2m2026-05-29T20:00:53.319825Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:00:53.587413Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m learned routes from beacon [3mfrom[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mupdated[0m[2m=[0m1
+[2m2026-05-29T20:00:53.815443Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:54.315018Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:54.814987Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:55.315436Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:55.318777Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:00:55.815649Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:56.315559Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:56.815730Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:57.315094Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:57.318362Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:00:57.815292Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:57.817919Z[0m [34mDEBUG[0m [2mdrift::transport::rtt[0m[2m:[0m rtt sample [3mpeer[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mrtt_us[0m[2m=[0m2702
+[2m2026-05-29T20:00:58.315009Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:58.815292Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:59.315587Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:00:59.317908Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:00:59.814839Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:00.314997Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:00.815044Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:01.315267Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:01.318630Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:01.815106Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:02.315109Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:02.815173Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:02.815287Z[0m [34mDEBUG[0m [2mdrift::transport::rtt[0m[2m:[0m rtt sample [3mpeer[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mrtt_us[0m[2m=[0m184
+[2m2026-05-29T20:01:03.315470Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:03.318792Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:03.815009Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:04.315038Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:04.815361Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:05.315514Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:05.318801Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:05.815708Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:06.314831Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:06.815570Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:07.315624Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:07.318031Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:07.815246Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:07.815369Z[0m [34mDEBUG[0m [2mdrift::transport::rtt[0m[2m:[0m rtt sample [3mpeer[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mrtt_us[0m[2m=[0m209
+[2m2026-05-29T20:01:08.315538Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:08.814826Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:09.314929Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:09.318312Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:09.815468Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:10.315160Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:10.815112Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:11.315637Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:11.318019Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:11.815284Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:12.315224Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:12.815414Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m purged stale routes [3mpurged[0m[2m=[0m1
+[2m2026-05-29T20:01:12.815484Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:12.815572Z[0m [34mDEBUG[0m [2mdrift::transport::rtt[0m[2m:[0m rtt sample [3mpeer[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mrtt_us[0m[2m=[0m232
+[2m2026-05-29T20:01:13.087645Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m learned routes from beacon [3mfrom[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mupdated[0m[2m=[0m1
+[2m2026-05-29T20:01:13.315555Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:13.317898Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:13.815637Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:14.314829Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:14.814883Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:15.315067Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:15.321894Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:15.814801Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:16.314991Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:16.815055Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:17.315347Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:17.318618Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:17.815603Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:17.815719Z[0m [34mDEBUG[0m [2mdrift::transport::rtt[0m[2m:[0m rtt sample [3mpeer[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mrtt_us[0m[2m=[0m193
+[2m2026-05-29T20:01:18.088890Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m learned routes from beacon [3mfrom[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mupdated[0m[2m=[0m1
+[2m2026-05-29T20:01:18.315647Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:18.815090Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:19.315315Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:19.318602Z[0m [34mDEBUG[0m [2mdrift::transport::path[0m[2m:[0m sent PathResponse to 192.168.50.52:35848
+[2m2026-05-29T20:01:19.815717Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
+[2m2026-05-29T20:01:20.314831Z[0m [34mDEBUG[0m [2mdrift::transport::mesh[0m[2m:[0m sent BEACON [3mdst[0m[2m=[0m[44, 60, 131, 49, 131, 21, 69, 237] [3mn[0m[2m=[0m30
