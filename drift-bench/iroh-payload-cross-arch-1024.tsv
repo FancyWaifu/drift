@@ -1,0 +1,4 @@
+context	payload_bytes	wire	trial	goodput_mbps	pump_mbps	bytes_received	duration_s
+cross_arch	1024	iroh	1	77.0	78.30446876071883	97881092	10.171852
+cross_arch	1024	iroh	2	86.9	88.30725402683136	110400516	10.163519
+cross_arch	1024	iroh	3	85.1	86.52404040117537	108334084	10.185342

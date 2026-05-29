@@ -1,0 +1,4 @@
+context	payload_bytes	wire	trial	goodput_mbps	pump_mbps	bytes_received	duration_s
+loopback	1024	iroh	1	815.4	823.6548600005538	1029569540	10.101784
+loopback	1024	iroh	2	820.4	828.7661668462466	1035960324	10.102051
+loopback	1024	iroh	3	826.4	834.9110140698666	1043640324	10.102799

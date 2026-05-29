@@ -1,0 +1,16 @@
+Warning: Permanently added '192.168.50.52' (ED25519) to the list of known hosts.
+[2m2026-05-29T06:10:02.229850Z[0m [32m INFO[0m [2mdrift::wire_iroh[0m[2m:[0m iroh listener bound — connect with iroh://b5f1d842675751386c141218e4842e54a81ae285b022d5c410a8c24174deb007@<ip:port> [3mid[0m[2m=[0mb5f1d842675751386c141218e4842e54a81ae285b022d5c410a8c24174deb007 [3msockets[0m[2m=[0m[0.0.0.0:36131, [::]:49959]
+[2m2026-05-29T06:10:02.230075Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m recv_from failed; evicting interface [3merror[0m[2m=[0mchannel closed [3miface_idx[0m[2m=[0m0
+iroh listener bound — id=b5f1d842675751386c141218e4842e54a81ae285b022d5c410a8c24174deb007 sockets=[0.0.0.0:36131, [::]:49959]
+
+┌─ drift bridge ─────────────────────────────────────────
+│ pubkey: a4210d1387ae2837fd5446925e4432d0c0c2eb9f6a095c83113f55b869b9257d
+│ listen:
+│   iroh://0.0.0.0:36131
+│ accept_any_peer: true (any peer with the pubkey can connect)
+└───────────────────────────────────────────────────────
+
+ready. share the pubkey above with anyone you want to bridge.
+ctrl-c to stop.
+[2m2026-05-29T06:10:09.311803Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m127.0.0.1:60000 [3msuppressed[0m[2m=[0m0
+[2m2026-05-29T06:10:16.312949Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m127.0.0.1:60000 [3msuppressed[0m[2m=[0m1

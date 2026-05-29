@@ -1,0 +1,15 @@
+Warning: Permanently added '192.168.50.168' (ED25519) to the list of known hosts.
+[2m2026-05-29T06:10:08.286857Z[0m [33m WARN[0m [2mdrift::io[0m[2m:[0m SO_RCVBUF was clamped by the kernel. The bridge will silently drop UDP packets under burst load. Fix on the host: `echo 'net.core.rmem_max=134217728' >> /etc/sysctl.d/99-drift.conf && sysctl -p /etc/sysctl.d/99-drift.conf`. See docs/BRIDGE_OPTIMIZATION.md item 2 for the full sysctl tuning. [3mrequested[0m[2m=[0m4194304 [3mgranted[0m[2m=[0m425984
+
+┌─ drift bridge ─────────────────────────────────────────
+│ pubkey: c9ec3be425857fc0b78f30c00b7076abf00934b3e645dd7e8bd957d4c52ad53b
+│ listen:
+│   udp://0.0.0.0:51820
+│ accept_any_peer: true (any peer with the pubkey can connect)
+│ federation peers:
+[2m2026-05-29T06:10:08.308964Z[0m [33m WARN[0m [1mendpoint[0m[1m{[0m[3mid[0m[2m=[0m684bdf72dc[1m}[0m[2m:[0m[1mRemoteStateActor[0m[1m{[0m[3mremote[0m[2m=[0mb5f1d84267[1m}[0m[2m:[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://b5f1d842675751386c141218e4842e54a81ae285b022d5c410a8c24174deb007@192.168.50.52:36131@a4210d1387ae2837fd5446925e4432d0c0c2eb9f6a095c83113f55b869b9257d (a4210d1387ae2837)
+└───────────────────────────────────────────────────────
+
+ready. share the pubkey above with anyone you want to bridge.
+ctrl-c to stop.

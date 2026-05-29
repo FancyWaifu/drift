@@ -1,0 +1,4 @@
+context	payload_bytes	wire	trial	goodput_mbps	pump_mbps	bytes_received	duration_s
+lxc_lan	256	iroh	1	786.2	794.1697052350648	992484100	10.099075
+lxc_lan	256	iroh	2	788.8	796.8876338402991	996109572	10.102458
+lxc_lan	256	iroh	3	811.2	819.6786919448678	1024454660	10.102931

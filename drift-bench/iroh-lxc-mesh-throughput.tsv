@@ -1,0 +1,13 @@
+srv_host	cli_host	workload	p50_us	p95_us	p99_us	goodput_mbps
+drift-1	drift-2	throughput				1356.4
+drift-1	drift-3	throughput				1402.2
+drift-1	drift-4	throughput				1201.1
+drift-2	drift-1	throughput				1377.5
+drift-2	drift-3	throughput				1147.9
+drift-2	drift-4	throughput				1403.4
+drift-3	drift-1	throughput				1504.5
+drift-3	drift-2	throughput				1325.1
+drift-3	drift-4	throughput				1443.6
+drift-4	drift-1	throughput				1146.1
+drift-4	drift-2	throughput				1436.5
+drift-4	drift-3	throughput				1368.0

@@ -188,7 +188,14 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
                 .split_once("://")
                 .map(|(s, _)| s)
                 .unwrap_or(&url);
-            let preferred = matches!(scheme, "h2" | "h2s" | "webtransport");
+            // `iroh://` is QUIC over UDP with its own ALPN-
+            // multiplexed bidirectional streams — the same shape
+            // as `webtransport://` (which is already preferred),
+            // so it gets the same green light. The K5 pentagon
+            // race that motivated HTTP.FED.STRICT was about
+            // mutual-init UDP datagram timing, not QUIC streams,
+            // so iroh shares webtransport's immunity.
+            let preferred = matches!(scheme, "h2" | "h2s" | "webtransport" | "iroh");
             if !preferred && !args.allow_legacy_federation {
                 bail!(
                     "refusing to federate over `{}://` — drift bridge \
@@ -433,7 +440,12 @@ fn parse_peer_spec(spec: &str) -> Result<(SocketAddr, [u8; 32])> {
 /// open the outbound connection (UDP socket, TCP connect, TLS
 /// connect, WS upgrade, …).
 fn parse_federate_spec(spec: &str) -> Result<(String, [u8; 32])> {
-    let (url, pub_hex) = spec.split_once('@').ok_or_else(|| {
+    // rsplit so URLs that contain their own '@' (notably
+    // `iroh://<endpoint_id>@<host:port>`) get the bridge pubkey
+    // split off the END, leaving the URL intact. Plain wires
+    // (`udp://host:port`) don't have an internal '@' so this
+    // is identical to split_once for them.
+    let (url, pub_hex) = spec.rsplit_once('@').ok_or_else(|| {
         anyhow!(
             "--federate spec {:?} missing '@'; format is <url>@<pubkey-hex>",
             spec

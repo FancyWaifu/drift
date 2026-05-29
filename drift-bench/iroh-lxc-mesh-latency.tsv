@@ -1,0 +1,37 @@
+srv_host	cli_host	workload	p50_us	p95_us	p99_us	goodput_mbps
+drift-1	drift-2	handshake	1028	1231	1231	
+drift-1	drift-2	rtt	100	130	146	
+drift-1	drift-2	throughput				
+drift-1	drift-3	handshake	976	1273	1273	
+drift-1	drift-3	rtt	100	138	152	
+drift-1	drift-3	throughput				
+drift-1	drift-4	handshake	959	1869	1869	
+drift-1	drift-4	rtt	113	158	175	
+drift-1	drift-4	throughput				
+drift-2	drift-1	handshake	1029	1286	1286	
+drift-2	drift-1	rtt	99	140	148	
+drift-2	drift-1	throughput				
+drift-2	drift-3	handshake	1039	1278	1278	
+drift-2	drift-3	rtt	112	145	156	
+drift-2	drift-3	throughput				
+drift-2	drift-4	handshake	1043	1200	1200	
+drift-2	drift-4	rtt	93	131	153	
+drift-2	drift-4	throughput				
+drift-3	drift-1	handshake	1066	1199	1199	
+drift-3	drift-1	rtt	103	134	158	
+drift-3	drift-1	throughput				
+drift-3	drift-2	handshake	932	1123	1123	
+drift-3	drift-2	rtt	118	155	189	
+drift-3	drift-2	throughput				
+drift-3	drift-4	handshake	1047	1199	1199	
+drift-3	drift-4	rtt	102	135	142	
+drift-3	drift-4	throughput				
+drift-4	drift-1	handshake	1029	1199	1199	
+drift-4	drift-1	rtt	116	158	170	
+drift-4	drift-1	throughput				
+drift-4	drift-2	handshake	1009	1181	1181	
+drift-4	drift-2	rtt	101	141	148	
+drift-4	drift-2	throughput				
+drift-4	drift-3	handshake	992	1174	1174	
+drift-4	drift-3	rtt	98	134	148	
+drift-4	drift-3	throughput				

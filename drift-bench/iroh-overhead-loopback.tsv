@@ -1,0 +1,19 @@
+stack	workload	trial	p50_us	p95_us	p99_us	goodput_mbps	pump_mbps
+native_iroh	handshake	1	885	1154	1795		
+drift_over_iroh	handshake	1	791	994	999		
+native_iroh	rtt	1	76	129	204		
+drift_over_iroh	rtt	1	82	134	191		
+native_iroh	throughput	1				1731.0	1748.6996313905488
+drift_over_iroh	throughput	1				832.1	840.6024604553252
+native_iroh	handshake	2	1000	1329	1948		
+drift_over_iroh	handshake	2	735	991	992		
+native_iroh	rtt	2	75	138	299		
+drift_over_iroh	rtt	2	86	143	196		
+native_iroh	throughput	2				1699.6	1717.0915186804361
+drift_over_iroh	throughput	2				829.2	837.6402852171649
+native_iroh	handshake	3	930	1212	2333		
+drift_over_iroh	handshake	3	796	881	959		
+native_iroh	rtt	3	78	137	304		
+drift_over_iroh	rtt	3	85	130	177		
+native_iroh	throughput	3				1716.7	1734.3005263585262
+drift_over_iroh	throughput	3				827.6	836.05968401096
