@@ -41,7 +41,6 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -52,10 +51,33 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 const ALPN: &[u8] = b"drift/iroh/1";
 const MAX_FRAME: usize = 64 * 1024;
 
-fn synthesize_peer_addr() -> SocketAddr {
-    static COUNTER: AtomicU16 = AtomicU16::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    SocketAddr::from(([127, 0, 0, 1], 60000u16.wrapping_add(n)))
+/// SocketAddr for the iroh peer, derived deterministically
+/// from its `EndpointId`. The post-handshake `Connection` API
+/// doesn't expose the underlying socket addr (relay/direct/
+/// custom transport abstraction), so we synthesize a stable
+/// per-peer addr from the iroh endpoint id.
+///
+/// **Why this matters for DRIFT federation**: other multi-
+/// shot wires (h2, ws, webtransport) return the real connecting
+/// peer's IP. DRIFT correlates sessions by src_addr; an earlier
+/// iroh build that returned `127.0.0.1:60000` from a process-
+/// wide counter made the federation handshake AEAD-auth-fail
+/// because session lookup picked the wrong peer. Deterministic
+/// per-id synthesis avoids that: same peer → same addr →
+/// session table correlates correctly.
+///
+/// Uses the 192.0.2.0/24 documentation range (RFC 5737) so the
+/// synthesized addrs are outside loopback and outside any
+/// real subnet anyone is likely to use.
+fn peer_addr_for_connection(conn: &Connection) -> SocketAddr {
+    use std::hash::Hasher;
+    let id = conn.remote_id();
+    let mut h = siphasher::sip::SipHasher24::new();
+    h.write(id.as_bytes());
+    let hash = h.finish();
+    let octet = ((hash >> 16) & 0xff) as u8;
+    let port = (hash as u16).max(1024);
+    SocketAddr::from(([192, 0, 2, octet], port))
 }
 
 // ─── Per-stream PacketIO ──────────────────────────────────────────
@@ -159,10 +181,45 @@ pub struct IrohListenerIO {
     _accept_task: tokio::task::JoinHandle<()>,
 }
 
+/// Reads `DRIFT_IROH_SECRET_HEX` env var (64 hex chars = 32
+/// bytes). If set, returns a deterministic iroh `SecretKey` so
+/// the endpoint id stays stable across bridge restarts. If
+/// unset, returns None and iroh generates a fresh ephemeral
+/// key (fine for short-lived bench connections, broken for
+/// long-lived federation links that embed the id in operator
+/// config).
+fn iroh_secret_from_env() -> Option<iroh::SecretKey> {
+    let hex_str = std::env::var("DRIFT_IROH_SECRET_HEX").ok()?;
+    let bytes = hex::decode(hex_str.trim()).ok()?;
+    if bytes.len() != 32 {
+        tracing::warn!(
+            "DRIFT_IROH_SECRET_HEX must be exactly 64 hex chars (32 bytes); got {}",
+            bytes.len()
+        );
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Some(iroh::SecretKey::from_bytes(&arr))
+}
+
 impl IrohListenerIO {
-    pub async fn bind(_hint: SocketAddr) -> io::Result<Self> {
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .alpns(vec![ALPN.to_vec()])
+    pub async fn bind(hint: SocketAddr) -> io::Result<Self> {
+        let mut builder = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]);
+        if let Some(sk) = iroh_secret_from_env() {
+            builder = builder.secret_key(sk);
+        }
+        // Honor a fixed bind addr from the listener URL when
+        // the caller passed one (port != 0). Stable port +
+        // stable endpoint id together give federation
+        // configurations a reachable `iroh://<id>@<host:port>`
+        // tuple that survives restarts.
+        if hint.port() != 0 {
+            builder = builder
+                .bind_addr(hint)
+                .map_err(|e| io::Error::other(format!("iroh bind_addr {}: {}", hint, e)))?;
+        }
+        let endpoint = builder
             .bind()
             .await
             .map_err(|e| io::Error::other(format!("iroh endpoint bind: {}", e)))?;
@@ -180,11 +237,13 @@ impl IrohListenerIO {
         // single line.
         eprintln!("iroh listener bound — id={} sockets={:?}", id, bound);
         // For the peer table / Transport surface, use the first
-        // bound IPv4 socket if one exists, otherwise synthesize.
+        // bound IPv4 socket if one exists, otherwise the unspecified
+        // sockaddr — this `local_addr` is informational for the
+        // Listener trait and isn't routed against.
         let local_addr = bound
             .into_iter()
             .find(|s| matches!(s, SocketAddr::V4(_)))
-            .unwrap_or_else(synthesize_peer_addr);
+            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
 
         let (ready_tx, ready_rx) = tokio::sync::mpsc::channel::<Arc<dyn PacketIO>>(16);
         let endpoint_for_accept = endpoint.clone();
@@ -211,7 +270,7 @@ impl IrohListenerIO {
                             return;
                         }
                     };
-                    let peer = synthesize_peer_addr();
+                    let peer = peer_addr_for_connection(&conn);
                     let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(
                         send, recv, peer, endpoint_for_io, conn,
                     ));
@@ -277,7 +336,7 @@ async fn connect_iroh_client(
         .open_bi()
         .await
         .map_err(|e| io::Error::other(format!("iroh open_bi: {}", e)))?;
-    let peer = synthesize_peer_addr();
+    let peer = peer_addr_for_connection(&conn);
     let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(
         send,
         recv,
