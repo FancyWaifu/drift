@@ -1,0 +1,10 @@
+context	workload	trial	samples	p50_us	p95_us	p99_us	goodput_mbps	pump_mbps	bytes
+loopback	handshake	1	20	770	1053	1188			
+loopback	rtt	1	500	84	149	301			
+loopback	throughput	1					838.2	846.7512567529099	1058439172
+loopback	handshake	2	20	837	1014	1025			
+loopback	rtt	2	500	83	140	297			
+loopback	throughput	2					838.3	846.8802398262826	1058603012
+loopback	handshake	3	20	823	1005	1033			
+loopback	rtt	3	500	87	140	182			
+loopback	throughput	3					837.5	846.0332816079432	1057542148

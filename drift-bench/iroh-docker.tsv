@@ -1,0 +1,19 @@
+topology	srv_node	cli_node	workload	trial	p50_us	p95_us	p99_us	goodput_mbps
+docker	iroh-node-a	iroh-node-b	handshake	1	1337	21515	21515	
+docker	iroh-node-a	iroh-node-b	rtt	1				
+docker	iroh-node-a	iroh-node-b	throughput	1				
+docker	iroh-node-b	iroh-node-c	handshake	1	1397	23180	23180	
+docker	iroh-node-b	iroh-node-c	rtt	1				
+docker	iroh-node-b	iroh-node-c	throughput	1				
+docker	iroh-node-a	iroh-node-c	handshake	1	1394	22377	22377	
+docker	iroh-node-a	iroh-node-c	rtt	1				
+docker	iroh-node-a	iroh-node-c	throughput	1				
+docker	iroh-node-a	iroh-node-b	handshake	2	1231	22222	22222	
+docker	iroh-node-a	iroh-node-b	rtt	2				
+docker	iroh-node-a	iroh-node-b	throughput	2				
+docker	iroh-node-b	iroh-node-c	handshake	2	1444	22326	22326	
+docker	iroh-node-b	iroh-node-c	rtt	2				
+docker	iroh-node-b	iroh-node-c	throughput	2				
+docker	iroh-node-a	iroh-node-c	handshake	2	1493	21935	21935	
+docker	iroh-node-a	iroh-node-c	rtt	2				
+docker	iroh-node-a	iroh-node-c	throughput	2				

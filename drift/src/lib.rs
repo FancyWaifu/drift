@@ -34,6 +34,14 @@ pub mod wire_webtransport;
 #[cfg(feature = "onion")]
 pub mod wire_onion;
 
+// `iroh://` adapter — opt-in via `--features iroh`. Pulls in
+// n0-computer's QUIC overlay (~30 transitive crates). The joke
+// being DRIFT's wire-agnostic-on-top-of-Iroh's-single-wire
+// architecture; the practical use being NAT punching as another
+// wire in the inventory.
+#[cfg(feature = "iroh")]
+pub mod wire_iroh;
+
 // Convenience re-exports.
 pub use drift_core::{derive_peer_id, Direction, PeerId, SessionKey, KEY_LEN, PEER_ID_LEN};
 pub use drift_core::{DriftError, Result};

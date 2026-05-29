@@ -10,6 +10,13 @@ default = []
 # whole Tor protocol stack (~150 transitive crates), which is
 # why it's opt-in: build with `--features onion` to enable.
 onion = ["dep:arti-client", "dep:tor-rtcompat", "dep:tor-hsservice", "dep:tor-cell", "dep:tor-keymgr", "dep:tor-error", "dep:fs-mistrust", "dep:safelog"]
+# `iroh://` adapter — DRIFT over Iroh (n0-computer's pubkey-
+# addressed QUIC overlay). The joke is layering: putting a
+# wire-agnostic identity transport on top of a single-wire
+# identity transport. The serious answer: it gives drift
+# bridges another wire that handles NAT punching + relay
+# infrastructure out of the box.
+iroh = ["dep:iroh"]
 
 [dependencies]
 drift-core = { path = "../drift-core" }
@@ -111,6 +118,10 @@ fs-mistrust = { version = "0.10", optional = true }
 # redaction trait, so we depend on the trait directly to
 # format `<base32>.onion` strings.
 safelog = { version = "0.8", optional = true }
+# iroh — n0-computer's pubkey-addressed QUIC overlay. Optional
+# because it pulls in its own QUIC stack (~30 transitive crates).
+# Behind `--features iroh`.
+iroh = { version = "1.0.0-rc.1", optional = true, default-features = false, features = ["tls-ring"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -35,6 +35,12 @@ async fn resolve_url(url: &str) -> Result<String> {
         if host.parse::<std::net::SocketAddr>().is_ok() {
             return Ok(url.to_string());
         }
+        // iroh:// uses `<endpoint_id>@<sockaddr>` — the host
+        // portion isn't a hostname to DNS-resolve, it's a
+        // pubkey + direct addr pair. Pass through unchanged.
+        if scheme == "iroh" {
+            return Ok(url.to_string());
+        }
         let addr = crate::resolve_target(host).await?;
         Ok(format!("{}://{}", scheme, addr))
     } else {

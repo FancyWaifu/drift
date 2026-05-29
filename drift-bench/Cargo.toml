@@ -5,7 +5,7 @@ edition = "2021"
 description = "Real-network benchmark: DRIFT vs QUIC vs WireGuard vs Iroh"
 
 [dependencies]
-drift = { path = "../drift" }
+drift = { path = "../drift", features = ["iroh"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

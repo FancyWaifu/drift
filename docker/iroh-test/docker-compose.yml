@@ -1,0 +1,62 @@
+# Four-container DRIFT-over-Iroh testbed. Three "node" services
+# all running drift-bench as a server, plus an orchestrator
+# container that runs the client side and aggregates results.
+# All containers share a single bridge network so they can
+# reach each other by service name.
+
+services:
+  iroh-node-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: drift-bench-iroh:latest
+    container_name: iroh-node-a
+    networks:
+      driftnet:
+        ipv4_address: 172.30.0.10
+    command: ["-c", "tail -f /dev/null"]
+    # The "node" containers don't auto-start servers — the
+    # orchestrator spawns server processes via docker exec
+    # so the (workload, port) combo can vary per run.
+
+  iroh-node-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: drift-bench-iroh:latest
+    container_name: iroh-node-b
+    networks:
+      driftnet:
+        ipv4_address: 172.30.0.11
+    command: ["-c", "tail -f /dev/null"]
+
+  iroh-node-c:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: drift-bench-iroh:latest
+    container_name: iroh-node-c
+    networks:
+      driftnet:
+        ipv4_address: 172.30.0.12
+    command: ["-c", "tail -f /dev/null"]
+
+  iroh-orchestrator:
+    image: drift-bench-iroh:latest
+    container_name: iroh-orchestrator
+    networks:
+      driftnet:
+        ipv4_address: 172.30.0.20
+    command: ["-c", "tail -f /dev/null"]
+    depends_on:
+      - iroh-node-a
+      - iroh-node-b
+      - iroh-node-c
+
+networks:
+  driftnet:
+    name: drift-iroh-driftnet
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

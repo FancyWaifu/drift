@@ -1,0 +1,10 @@
+context	workload	trial	samples	p50_us	p95_us	p99_us	goodput_mbps	pump_mbps	bytes
+lxc_lan	handshake	1	20	1010	1124	1147			
+lxc_lan	rtt	1	500	101	132	146			
+lxc_lan	throughput	1					1413.6	1427.8517390049822	1784860676
+lxc_lan	handshake	2	20	999	1237	1406			
+lxc_lan	rtt	2	500	101	134	148			
+lxc_lan	throughput	2					1433.9	1448.696114018228	1810296836
+lxc_lan	handshake	3	20	1030	1231	1422			
+lxc_lan	rtt	3	500	104	132	155			
+lxc_lan	throughput	3					1432.0	1446.9927391965145	1808349188
