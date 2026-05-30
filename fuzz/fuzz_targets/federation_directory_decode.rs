@@ -22,18 +22,24 @@
 use drift::transport::{build_directory, parse_directory, MAX_DIRECTORY_ENTRIES};
 use libfuzzer_sys::fuzz_target;
 
+// Wire layout: 4-byte header + N entries; each entry is
+// 32-byte pubkey + presence ticket (TICKET_LEN = 8+24+64 = 96).
 const DIRECTORY_HEADER_LEN: usize = 4;
+const DIRECTORY_ENTRY_LEN: usize = 32 + 96;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(pubs) = parse_directory(data) else { return };
+    let Ok(entries) = parse_directory(data) else { return };
 
     // 1. Length envelope.
-    assert_eq!(data.len(), DIRECTORY_HEADER_LEN + 32 * pubs.len());
+    assert_eq!(
+        data.len(),
+        DIRECTORY_HEADER_LEN + DIRECTORY_ENTRY_LEN * entries.len()
+    );
 
     // 2. Each parsed pubkey matches its slot in the input.
-    for (i, p) in pubs.iter().enumerate() {
-        let off = DIRECTORY_HEADER_LEN + i * 32;
-        assert_eq!(&p[..], &data[off..off + 32]);
+    for (i, (pk, _ticket)) in entries.iter().enumerate() {
+        let off = DIRECTORY_HEADER_LEN + i * DIRECTORY_ENTRY_LEN;
+        assert_eq!(&pk[..], &data[off..off + 32]);
     }
 
     // 3. Build is the inverse of parse, but only when the input
@@ -42,8 +48,8 @@ fuzz_target!(|data: &[u8]| {
     //    with more than MAX_DIRECTORY_ENTRIES entries, since the
     //    cap is producer-side, not receiver-side. We respect that
     //    asymmetry here.
-    if pubs.len() <= MAX_DIRECTORY_ENTRIES {
-        let rebuilt = build_directory(&pubs);
+    if entries.len() <= MAX_DIRECTORY_ENTRIES {
+        let rebuilt = build_directory(&entries);
         assert_eq!(
             rebuilt, data,
             "build∘parse is not the identity on a valid wire"
