@@ -109,14 +109,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut result: Option<Vec<PeerEntry>> = None;
         while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(500), transport.recv()).await {
-                Ok(Some(pkt)) => {
-                    if let Some(DirMessage::Listing(entries)) = DirMessage::decode(&pkt.payload) {
-                        result = Some(entries);
-                        break;
-                    }
+            if let Ok(Some(pkt)) =
+                tokio::time::timeout(Duration::from_millis(500), transport.recv()).await
+            {
+                if let Some(DirMessage::Listing(entries)) = DirMessage::decode(&pkt.payload) {
+                    result = Some(entries);
+                    break;
                 }
-                _ => {}
             }
         }
         result
@@ -170,16 +169,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
     let mut received_greetings = 0;
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), transport.recv()).await {
-            Ok(Some(pkt)) => {
-                if let Ok(text) = std::str::from_utf8(&pkt.payload) {
-                    if text.starts_with("hello") {
-                        received_greetings += 1;
-                        println!("[{}] ← direct: {}", nickname, text);
-                    }
+        if let Ok(Some(pkt)) =
+            tokio::time::timeout(Duration::from_millis(500), transport.recv()).await
+        {
+            if let Ok(text) = std::str::from_utf8(&pkt.payload) {
+                if text.starts_with("hello") {
+                    received_greetings += 1;
+                    println!("[{}] ← direct: {}", nickname, text);
                 }
             }
-            _ => {}
         }
     }
 

@@ -123,8 +123,7 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             // The UDP socket stays bound the whole time.
             for iter in 0..cli.handshake_iters {
                 let server_sk = StaticSecret::from(SERVER_SEED);
-                let mut tunn =
-                    Tunn::new(server_sk, client_pk, None, None, iter as u32 + 1, None);
+                let mut tunn = Tunn::new(server_sk, client_pk, None, None, iter as u32 + 1, None);
                 loop {
                     let recv_timeout =
                         tokio::time::timeout(Duration::from_secs(10), sock.recv_from(&mut buf))
@@ -133,9 +132,7 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                         Ok(Ok(v)) => v,
                         _ => return Ok(None),
                     };
-                    if let Some(data) =
-                        handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
-                    {
+                    if let Some(data) = handle_inbound(&mut tunn, &sock, src, &buf[..n]).await? {
                         send_out(&mut tunn, &sock, src, &data).await?;
                         break;
                     }
@@ -147,15 +144,12 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let mut tunn = Tunn::new(server_sk, client_pk, None, None, 1, None);
             loop {
                 let recv =
-                    tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf))
-                        .await;
+                    tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf)).await;
                 let (n, src) = match recv {
                     Ok(Ok(v)) => v,
                     _ => break,
                 };
-                if let Some(data) =
-                    handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
-                {
+                if let Some(data) = handle_inbound(&mut tunn, &sock, src, &buf[..n]).await? {
                     send_out(&mut tunn, &sock, src, &data).await?;
                 }
             }
@@ -168,15 +162,12 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let mut last_recv: Option<Instant> = None;
             loop {
                 let recv =
-                    tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
-                        .await;
+                    tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await;
                 let (n, src) = match recv {
                     Ok(Ok(v)) => v,
                     _ => break,
                 };
-                if let Some(data) =
-                    handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
-                {
+                if let Some(data) = handle_inbound(&mut tunn, &sock, src, &buf[..n]).await? {
                     let now = Instant::now();
                     if first_recv.is_none() {
                         first_recv = Some(now);
@@ -211,21 +202,19 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
                 // server sees this as a brand-new peer
                 // regardless of keepalive state.
                 let client_sk = StaticSecret::from(CLIENT_SEED);
-                let mut tunn =
-                    Tunn::new(client_sk, server_pk, None, None, iter as u32, None);
+                let mut tunn = Tunn::new(client_sk, server_pk, None, None, iter as u32, None);
                 let sock = UdpSocket::bind("0.0.0.0:0").await?;
 
                 let start = Instant::now();
                 complete_handshake(&mut tunn, &sock, peer_addr, cli.payload_bytes).await?;
                 let mut buf = [0u8; BUF_LEN];
                 loop {
-                    let (n, src) = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        sock.recv_from(&mut buf),
-                    )
-                    .await??;
-                    if let Some(_) =
-                        handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
+                    let (n, src) =
+                        tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
+                            .await??;
+                    if handle_inbound(&mut tunn, &sock, src, &buf[..n])
+                        .await?
+                        .is_some()
                     {
                         break;
                     }
@@ -248,8 +237,7 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
             // subsequent pings have a quiet baseline.
             let mut buf = [0u8; BUF_LEN];
             let (n, src) =
-                tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
-                    .await??;
+                tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await??;
             let _ = handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?;
 
             let mut samples: Vec<u128> = Vec::with_capacity(cli.rtt_iters);
@@ -257,13 +245,12 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
                 let start = Instant::now();
                 send_out(&mut tunn, &sock, peer_addr, &payload).await?;
                 loop {
-                    let (n, src) = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        sock.recv_from(&mut buf),
-                    )
-                    .await??;
-                    if let Some(_) =
-                        handle_inbound(&mut tunn, &sock, src, &buf[..n]).await?
+                    let (n, src) =
+                        tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
+                            .await??;
+                    if handle_inbound(&mut tunn, &sock, src, &buf[..n])
+                        .await?
+                        .is_some()
                     {
                         break;
                     }
@@ -317,8 +304,7 @@ async fn complete_handshake(
     // Read handshake response, deliver to tunn, which may emit
     // a queued data packet next.
     let mut buf = [0u8; BUF_LEN];
-    let (n, src) =
-        tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await??;
+    let (n, src) = tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await??;
     let _ = handle_inbound(tunn, sock, src, &buf[..n]).await?;
 
     // Ensure the first real data frame makes it — boringtun

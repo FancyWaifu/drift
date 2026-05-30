@@ -60,7 +60,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
-      - run: cargo audit
+      # RUSTSEC-2023-0071 — Marvin Attack timing side-channel in `rsa`
+      # crate. Reaches us transitively via the arti-client / Tor crates
+      # (wire_onion.rs). No upstream fix is available yet (RustSec
+      # entry says "No fixed upgrade is available"). DRIFT doesn't
+      # expose RSA decryption to attacker-controlled timing
+      # measurements directly — the Tor stack uses it internally for
+      # onion-service crypto. Re-evaluate when arti or rsa publishes
+      # a patched version.
+      - run: cargo audit --ignore RUSTSEC-2023-0071
 
   docs:
     name: rustdoc

@@ -172,7 +172,7 @@ pub struct H2StreamPacketIO {
     /// this arena, then `BytesMut::split()` hands off the freshly
     /// written region as an immutable `Bytes`. The arena retains
     /// the unfilled remainder for the next packet — same
-    /// underlying refcounted Vec<u8> backs many frames. When the
+    /// underlying refcounted `Vec<u8>` backs many frames. When the
     /// arena's remaining capacity is too small for the next
     /// frame, a fresh `SEND_ARENA_CHUNK`-sized allocation
     /// replaces it.
@@ -278,13 +278,18 @@ impl PacketIO for H2StreamPacketIO {
 
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let mut rx = self.recv_rx.lock().await;
-        let bytes = rx.recv().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "h2 stream closed")
-        })?;
+        let bytes = rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "h2 stream closed"))?;
         if bytes.len() > buf.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("h2 packet larger than caller buffer: {} > {}", bytes.len(), buf.len()),
+                format!(
+                    "h2 packet larger than caller buffer: {} > {}",
+                    bytes.len(),
+                    buf.len()
+                ),
             ));
         }
         buf[..bytes.len()].copy_from_slice(&bytes);
@@ -302,10 +307,7 @@ impl PacketIO for H2StreamPacketIO {
 /// them on the 2-byte length prefix. Each whole drift packet
 /// gets pushed to `tx`. Returns when the stream ends or `tx`
 /// is dropped.
-async fn drain_h2_body_into_packets(
-    mut body: Incoming,
-    tx: mpsc::Sender<Bytes>,
-) {
+async fn drain_h2_body_into_packets(mut body: Incoming, tx: mpsc::Sender<Bytes>) {
     use http_body_util::BodyExt;
     let mut acc = BytesMut::with_capacity(8192);
     loop {
@@ -460,9 +462,9 @@ impl Listener for H2ListenerIO {
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
         let mut rx = self.ready_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "h2 listener closed")
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "h2 listener closed"))
     }
 }
 
@@ -476,9 +478,7 @@ async fn serve_one_h2_connection<S>(
     let io = TokioIo::new(stream);
     let svc = service_fn(move |req: Request<Incoming>| {
         let ready_tx = ready_tx.clone();
-        async move {
-            Ok::<_, Infallible>(handle_h2_request(req, peer, ready_tx).await)
-        }
+        async move { Ok::<_, Infallible>(handle_h2_request(req, peer, ready_tx).await) }
     });
     let conn = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
         .timer(TokioTimer::new())
@@ -535,13 +535,14 @@ async fn handle_h2_request(
     // time it would reach the next hop. The inner DRIFT transport
     // retransmits stale-dropped packets via sequence-number
     // replay. Same TTL-style staleness check used by IP routers.
-    let response_stream = ReceiverStream::new(out_rx).filter_map(|(ts, chunk): OutFrame| async move {
-        if ts.elapsed() > MAX_FORWARD_AGE {
-            None
-        } else {
-            Some(Ok::<_, io::Error>(Frame::data(chunk)))
-        }
-    });
+    let response_stream =
+        ReceiverStream::new(out_rx).filter_map(|(ts, chunk): OutFrame| async move {
+            if ts.elapsed() > MAX_FORWARD_AGE {
+                None
+            } else {
+                Some(Ok::<_, io::Error>(Frame::data(chunk)))
+            }
+        });
     let body = BodyExt::boxed(StreamBody::new(response_stream));
     Response::builder()
         .status(StatusCode::OK)
@@ -559,9 +560,7 @@ fn empty_body() -> RespBody {
 
 // ─── Connector ────────────────────────────────────────────────────
 
-async fn connect_h2_client(
-    addr: SocketAddr,
-) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+async fn connect_h2_client(addr: SocketAddr) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     let tcp = TcpStream::connect(addr).await?;
     let _ = tcp.set_nodelay(true);
     finish_h2_client_handshake(tcp, addr).await
@@ -572,9 +571,7 @@ async fn connect_h2_client(
 /// self-signed cert; client uses NoCertVerifier — DRIFT's own
 /// AEAD is the actual auth, the TLS layer is just hop-to-hop
 /// confidentiality + middlebox compat.
-async fn connect_h2s_client(
-    addr: SocketAddr,
-) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+async fn connect_h2s_client(addr: SocketAddr) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     install_default_crypto_provider();
     let tcp = TcpStream::connect(addr).await?;
     let _ = tcp.set_nodelay(true);
@@ -636,7 +633,9 @@ where
         .keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
         .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
         .keep_alive_while_idle(true)
-        .handshake::<_, StreamBody<Pin<Box<dyn futures_util::Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>>>(io)
+        .handshake::<_, StreamBody<
+            Pin<Box<dyn futures_util::Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>,
+        >>(io)
         .await
         .map_err(io::Error::other)?;
 

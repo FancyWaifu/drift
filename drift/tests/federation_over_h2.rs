@@ -61,5 +61,8 @@ async fn two_nodes_can_handshake_over_h2_stream() {
         .expect("recv timed out")
         .expect("recv returned None");
     assert_eq!(pkt.payload, b"hello-over-h2");
-    eprintln!("[test] bob got: {:?}", String::from_utf8_lossy(&pkt.payload));
+    eprintln!(
+        "[test] bob got: {:?}",
+        String::from_utf8_lossy(&pkt.payload)
+    );
 }

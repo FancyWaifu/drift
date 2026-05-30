@@ -11,7 +11,7 @@
 //!   - tls://   — TLS records up to 16 KB
 //!   - http://  — base64-SSE; ~70% inflation, ~2.2 KB → still tiny
 //!   - dns://   — EDNS0 UDP up to 1232 B default; PQ HELLO is 1300+ →
-//!                expected to fall back to TCP per-message
+//!     expected to fall back to TCP per-message
 //!
 //! Each subtest spawns a server on the given scheme, dials with
 //! a hybrid client, asserts the session establishes + DATA flows.
@@ -53,7 +53,11 @@ async fn pq_handshake_over(listen_url: &str, dial_template: &str) -> anyhow::Res
     let client = Arc::new(client);
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await?;
     let server_handle = client
         .add_peer(server_pub, server_addr, Direction::Initiator)

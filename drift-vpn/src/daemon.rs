@@ -17,18 +17,16 @@
 //! different status-server (named pipe), so the daemon is
 //! Unix-only at the file level.
 
-#![cfg(unix)]
-
 use crate::config::Config;
 use crate::metrics::DaemonMetrics;
 use crate::routing::{parse_endpoints, PeerRoute, RouteTable};
 use crate::status::{KnownPeer, StatusContext};
-use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use drift::identity::Identity;
 use drift::{Direction, Transport, TransportConfig};
 use drift_core::{derive_peer_id, PeerId};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
@@ -189,8 +187,6 @@ pub async fn run(
     //    so one daemon serves clients on whichever wire works
     //    for their network. The first URL becomes the primary
     //    interface; the rest are added via `add_listener`.
-    let mut tcfg = TransportConfig::default();
-    tcfg.accept_any_peer = true; // we ACL on the routing layer
     // Tie the DRIFT keepalive to the failover supervisor's
     // staleness threshold: we want at least two Ping rounds
     // inside a stale_secs window so that a healthy tunnel
@@ -201,7 +197,11 @@ pub async fn run(
         2_000_u64,
         (cfg.failover.stale_secs.saturating_mul(1000)) / 3,
     );
-    tcfg.rtt_probe_interval_ms = std::cmp::max(500, probe_ms);
+    let tcfg = TransportConfig {
+        accept_any_peer: true, // we ACL on the routing layer
+        rtt_probe_interval_ms: std::cmp::max(500, probe_ms),
+        ..TransportConfig::default()
+    };
     // Caller already validated that `listen` is non-empty.
     let listen_urls: &[String] = &cfg.interface.listen;
     let primary = &listen_urls[0];
@@ -327,12 +327,7 @@ pub async fn run(
         // every spec in via_bridge_list above, but guard
         // anyway) keep their original config order at the end.
         let mut bridge_list = peer_cfg.via_bridge_list();
-        bridge_list.sort_by_key(|spec| {
-            measured_rank
-                .get(spec)
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
+        bridge_list.sort_by_key(|spec| measured_rank.get(spec).copied().unwrap_or(usize::MAX));
         let chosen_for_supervisor: Option<String> = if !bridge_list.is_empty() {
             // v0.13 bridge-fallback path: peer is reachable through
             // a federation bridge. The bridge itself was registered
@@ -366,9 +361,7 @@ pub async fn run(
             let (bridge_handle, default_target_bridge_pub) = bridge_handles
                 .get(chosen_spec)
                 .copied()
-                .ok_or_else(|| {
-                    anyhow!("internal: bridge {} not pre-registered", chosen_spec)
-                })?;
+                .ok_or_else(|| anyhow!("internal: bridge {} not pre-registered", chosen_spec))?;
             let target_bridge_pub = match peer_cfg.target_bridge.as_deref() {
                 Some(hex_pub) => {
                     let raw = hex::decode(hex_pub)
@@ -388,9 +381,7 @@ pub async fn run(
             transport
                 .add_federated_peer(peer_pub, bridge_handle, target_bridge_pub)
                 .await
-                .with_context(|| {
-                    format!("add_federated_peer for peer #{}", i)
-                })?;
+                .with_context(|| format!("add_federated_peer for peer #{}", i))?;
             info!(
                 peer = %hex::encode(peer_pid),
                 via_bridge = %chosen_spec,
@@ -476,11 +467,7 @@ pub async fn run(
         known_peers.push(KnownPeer {
             peer_id: peer_pid,
             pubkey: peer_pub,
-            allowed_ips: peer_cfg
-                .allowed_ips
-                .iter()
-                .map(|n| n.to_string())
-                .collect(),
+            allowed_ips: peer_cfg.allowed_ips.iter().map(|n| n.to_string()).collect(),
             kind: peer_kind,
         });
 
@@ -495,13 +482,8 @@ pub async fn run(
             // endpoints isn't empty, but pattern-match for
             // safety.
             if let Some(chosen) = chosen_for_supervisor {
-                let initial_idx = endpoints
-                    .iter()
-                    .position(|e| e == &chosen)
-                    .unwrap_or(0);
-                supervisor_states.push(SupervisorState::new(
-                    peer_pid, endpoints, initial_idx,
-                ));
+                let initial_idx = endpoints.iter().position(|e| e == &chosen).unwrap_or(0);
+                supervisor_states.push(SupervisorState::new(peer_pid, endpoints, initial_idx));
             }
         }
     }
@@ -686,8 +668,7 @@ pub async fn run(
     const MAX_BATCH: usize = 32;
     const QUEUE_CAP: usize = 1024;
 
-    let (out_tx, mut out_rx) =
-        tokio::sync::mpsc::channel::<drift::transport::BatchItem>(QUEUE_CAP);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<drift::transport::BatchItem>(QUEUE_CAP);
 
     let routes_send = routes.clone();
     let metrics_send = metrics.clone();
@@ -741,8 +722,7 @@ pub async fn run(
                     continue;
                 }
             };
-            let (deadline_ms, coalesce_group) =
-                crate::routing::classify_for_qos(pkt);
+            let (deadline_ms, coalesce_group) = crate::routing::classify_for_qos(pkt);
             // Backpressure: if the sender is behind, the tun
             // reader blocks here, which propagates back through
             // the kernel queue. Same semantics as the previous
@@ -803,9 +783,7 @@ pub async fn run(
 
             match t_send.send_data_batch_qos(&batch).await {
                 Ok(sent) => {
-                    metrics_send2
-                        .send_data_ok
-                        .fetch_add(sent as u64, Relaxed);
+                    metrics_send2.send_data_ok.fetch_add(sent as u64, Relaxed);
                     if sent < n_attempted {
                         // Some packets were skipped (peer not
                         // established yet, oversized, etc.).
@@ -990,10 +968,7 @@ struct WatchdogPeer {
 /// Established peers are silent. Recovery (back to Established)
 /// clears the per-peer warn schedule and re-arms it from scratch
 /// if the peer drops again.
-async fn run_unestablished_watchdog(
-    transport: Arc<Transport>,
-    peers: Vec<WatchdogPeer>,
-) {
+async fn run_unestablished_watchdog(transport: Arc<Transport>, peers: Vec<WatchdogPeer>) {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
     use tracing::error;
@@ -1172,7 +1147,7 @@ fn find_conflicting_tun_linux(wanted_addr: std::net::IpAddr) -> Vec<String> {
 ///   1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever ...
 ///   332: tun0    inet 10.99.0.1/24 scope global tun0\       ...
 ///
-/// Field [1] is `iface:`, field [3] is `<addr>/<prefix>`.
+/// Field `[1]` is `iface:`, field `[3]` is `<addr>/<prefix>`.
 #[allow(dead_code)]
 fn parse_ip_addr_show_for_addr(text: &str, wanted_addr: std::net::IpAddr) -> Vec<String> {
     let wanted_str = wanted_addr.to_string();
@@ -1188,9 +1163,7 @@ fn parse_ip_addr_show_for_addr(text: &str, wanted_addr: std::net::IpAddr) -> Vec
         }
         let cidr = fields[3];
         if let Some(addr_part) = cidr.split('/').next() {
-            if addr_part == wanted_str
-                && !conflicts.iter().any(|s: &String| s == iface)
-            {
+            if addr_part == wanted_str && !conflicts.iter().any(|s: &String| s == iface) {
                 conflicts.push(iface.to_string());
             }
         }
@@ -1199,6 +1172,7 @@ fn parse_ip_addr_show_for_addr(text: &str, wanted_addr: std::net::IpAddr) -> Vec
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod conflict_detection_tests {
     use super::*;
     use std::net::IpAddr;
@@ -1333,7 +1307,10 @@ async fn disable_offloads_and_verify(iface: &str) {
     {
         Ok(o) if o.status.success() => o.stdout,
         _ => {
-            warn!(iface, "couldn't read back ethtool offload state — assuming disabled");
+            warn!(
+                iface,
+                "couldn't read back ethtool offload state — assuming disabled"
+            );
             return;
         }
     };
@@ -1380,9 +1357,9 @@ pub(crate) async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
     // Otherwise, lookup_host resolves hostname:port via the
     // OS resolver (Docker's embedded DNS, /etc/hosts, real DNS
     // — all the same call site).
-    let mut iter = tokio::net::lookup_host(addr).await.with_context(|| {
-        format!("resolving {:?} via lookup_host", addr)
-    })?;
+    let mut iter = tokio::net::lookup_host(addr)
+        .await
+        .with_context(|| format!("resolving {:?} via lookup_host", addr))?;
     iter.next()
         .ok_or_else(|| anyhow!("no addresses resolved for {:?}", addr))
 }
@@ -1462,7 +1439,8 @@ async fn try_endpoints(
                          scheduling background retries"
                     );
                 }
-                let placeholder = resolve_endpoint(&endpoints[0]).await
+                let placeholder = resolve_endpoint(&endpoints[0])
+                    .await
                     .unwrap_or_else(|_| "0.0.0.0:0".parse().expect("constant addr parses"));
                 transport.add_peer(peer_pub, placeholder, dir).await?;
                 if !is_unsupported {
@@ -1482,8 +1460,8 @@ async fn try_endpoints(
     // probe in lockstep and converge on the same race window.
     // Jitter in [0, 500ms] breaks the symmetry on the first
     // cycle so even pathological scheduling diverges fast.
-    let probe_timeout = PROBE_BASE
-        + Duration::from_millis(rand::thread_rng().gen_range(0..PROBE_JITTER_MAX_MS));
+    let probe_timeout =
+        PROBE_BASE + Duration::from_millis(rand::thread_rng().gen_range(0..PROBE_JITTER_MAX_MS));
 
     for (i, url) in endpoints.iter().enumerate() {
         let scheme = scheme_of(url);
@@ -1545,8 +1523,7 @@ async fn try_endpoints(
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let est = transport.peer_is_established(peer_pid).await;
-            let addr_ok = !strict_addr
-                || transport.peer_addr(peer_pid).await == Some(addr);
+            let addr_ok = !strict_addr || transport.peer_addr(peer_pid).await == Some(addr);
             if est && addr_ok {
                 completed = true;
                 break;
@@ -1884,4 +1861,3 @@ async fn supervise_all(
         }
     }
 }
-

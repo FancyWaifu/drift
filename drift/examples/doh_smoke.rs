@@ -14,8 +14,8 @@
 //! ```
 
 use drift::wire_dns::{
-    build_query_message, build_response_message, parse_qname_labels,
-    parse_response_txt_records, qname_for_fragment,
+    build_query_message, build_response_message, parse_qname_labels, parse_response_txt_records,
+    qname_for_fragment,
 };
 
 #[tokio::main]
@@ -75,7 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(r.status(), 200);
     let resp = r.bytes().await?;
     let records = parse_response_txt_records(&resp)?;
-    println!("  status: {} | TXT records returned to Alice: {}", 200, records.len());
+    println!(
+        "  status: {} | TXT records returned to Alice: {}",
+        200,
+        records.len()
+    );
     assert_eq!(records.len(), 0, "no pending fragments for Alice");
 
     println!();
@@ -99,7 +103,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = frag[3];
     let payload_back = &frag[4..];
     println!("  fragment id={:#06x} idx={} total={}", id, idx, total);
-    println!("  payload: {:?}", std::str::from_utf8(payload_back).unwrap_or("<non-utf8>"));
+    println!(
+        "  payload: {:?}",
+        std::str::from_utf8(payload_back).unwrap_or("<non-utf8>")
+    );
     assert_eq!(payload_back, payload, "payload round-trip mismatch");
     assert_eq!(id, 0xBEEF);
 

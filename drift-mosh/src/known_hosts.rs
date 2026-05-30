@@ -54,8 +54,8 @@ impl KnownHosts {
         let path = Self::path()?;
         let mut entries = HashMap::new();
         if path.exists() {
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             for (lineno, line) in text.lines().enumerate() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -69,20 +69,14 @@ impl KnownHosts {
                 let key_hex = match parts.next() {
                     Some(k) => k,
                     None => {
-                        eprintln!(
-                            "known_hosts:{}: missing pubkey, skipping",
-                            lineno + 1
-                        );
+                        eprintln!("known_hosts:{}: missing pubkey, skipping", lineno + 1);
                         continue;
                     }
                 };
                 let bytes = match hex::decode(key_hex) {
                     Ok(b) if b.len() == 32 => b,
                     _ => {
-                        eprintln!(
-                            "known_hosts:{}: invalid pubkey hex, skipping",
-                            lineno + 1
-                        );
+                        eprintln!("known_hosts:{}: invalid pubkey hex, skipping", lineno + 1);
                         continue;
                     }
                 };
@@ -114,26 +108,21 @@ impl KnownHosts {
     /// so a crash mid-write can't corrupt the file.
     fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let tmp = self.path.with_extension("tmp");
         {
-            let mut f = fs::File::create(&tmp)
-                .with_context(|| format!("creating {}", tmp.display()))?;
-            writeln!(
-                f,
-                "# drift-mosh known_hosts — TOFU-pinned server pubkeys."
-            )?;
+            let mut f =
+                fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+            writeln!(f, "# drift-mosh known_hosts — TOFU-pinned server pubkeys.")?;
             writeln!(f, "# One entry per line: <host>:<port> <pubkey-hex>")?;
             for (host, key) in &self.entries {
                 let hex_key: String = key.iter().map(|b| format!("{:02x}", b)).collect();
                 writeln!(f, "{} {}", host, hex_key)?;
             }
         }
-        fs::rename(&tmp, &self.path).with_context(|| {
-            format!("renaming {} → {}", tmp.display(), self.path.display())
-        })?;
+        fs::rename(&tmp, &self.path)
+            .with_context(|| format!("renaming {} → {}", tmp.display(), self.path.display()))?;
         Ok(())
     }
 }
@@ -150,8 +139,5 @@ pub fn prompt_yes_no(prompt: &str) -> Result<bool> {
         .lines()
         .next()
         .ok_or_else(|| anyhow!("stdin closed before answer"))??;
-    Ok(matches!(
-        line.trim().to_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }

@@ -10,8 +10,8 @@
 //! sysctl writes, no kernel module loads, no socket binds longer
 //! than a probe.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::{Path, PathBuf};
+use std::net::{SocketAddr, UdpSocket};
+use std::path::Path;
 
 use anyhow::Result;
 
@@ -296,10 +296,7 @@ async fn check_identity(cfg: &Config) -> CheckResult {
             match hex::decode(trimmed) {
                 Ok(bytes) if bytes.len() == 32 => CheckResult::pass(
                     "identity",
-                    format!(
-                        "{} is a well-formed 32-byte X25519 key",
-                        path.display()
-                    ),
+                    format!("{} is a well-formed 32-byte X25519 key", path.display()),
                 ),
                 Ok(bytes) => CheckResult::fail(
                     "identity",
@@ -656,10 +653,22 @@ fn render(results: &[CheckResult]) {
             }
         }
     }
-    let pass = results.iter().filter(|r| r.verdict == Verdict::Pass).count();
-    let warn = results.iter().filter(|r| r.verdict == Verdict::Warn).count();
-    let fail = results.iter().filter(|r| r.verdict == Verdict::Fail).count();
-    let info = results.iter().filter(|r| r.verdict == Verdict::Info).count();
+    let pass = results
+        .iter()
+        .filter(|r| r.verdict == Verdict::Pass)
+        .count();
+    let warn = results
+        .iter()
+        .filter(|r| r.verdict == Verdict::Warn)
+        .count();
+    let fail = results
+        .iter()
+        .filter(|r| r.verdict == Verdict::Fail)
+        .count();
+    let info = results
+        .iter()
+        .filter(|r| r.verdict == Verdict::Info)
+        .count();
     println!();
     println!(
         "{} pass · {} warn · {} fail · {} info",

@@ -16,9 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use drift_core::rotation::{
-    self, RotationAnnounce, ROTATION_ANNOUNCE_LEN, ROTATION_FRESHNESS_WINDOW_MS,
-};
+use drift_core::rotation::{self, ROTATION_ANNOUNCE_LEN, ROTATION_FRESHNESS_WINDOW_MS};
 use rand::RngCore;
 
 /// Inputs for `drift-vpn rotate`.
@@ -113,8 +111,7 @@ pub async fn rotate(opts: RotateOpts) -> Result<()> {
 
 pub async fn rotate_verify(opts: RotateVerifyOpts) -> Result<()> {
     let blob = load_announce_input(&opts.announce).await?;
-    let bytes = hex::decode(blob.trim())
-        .context("announce input is not valid hex")?;
+    let bytes = hex::decode(blob.trim()).context("announce input is not valid hex")?;
     if bytes.len() != ROTATION_ANNOUNCE_LEN {
         bail!(
             "announce wire form is {} bytes, got {}",
@@ -125,8 +122,7 @@ pub async fn rotate_verify(opts: RotateVerifyOpts) -> Result<()> {
     let announce = rotation::decode(&bytes).map_err(|e| anyhow!("decode failed: {}", e))?;
 
     let mut expected = [0u8; 32];
-    let raw = hex::decode(opts.expect_old_pub.trim())
-        .context("expect-old-pub is not valid hex")?;
+    let raw = hex::decode(opts.expect_old_pub.trim()).context("expect-old-pub is not valid hex")?;
     if raw.len() != 32 {
         bail!(
             "expect-old-pub must be 32 bytes of hex (64 chars), got {} bytes",
@@ -181,8 +177,8 @@ async fn load_secret_and_pub(path: &Path) -> Result<([u8; 32], [u8; 32])> {
         .await
         .with_context(|| format!("reading {}", path.display()))?;
     let trimmed = body.trim();
-    let raw = hex::decode(trimmed)
-        .with_context(|| format!("{} is not valid hex", path.display()))?;
+    let raw =
+        hex::decode(trimmed).with_context(|| format!("{} is not valid hex", path.display()))?;
     if raw.len() != 32 {
         bail!(
             "identity {} must be 32 bytes (64 hex chars), got {}",

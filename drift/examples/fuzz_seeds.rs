@@ -85,17 +85,37 @@ fn main() {
 
     // ─── federated_envelope_decode ────────────────────────────
     for (name, payload_len) in [("empty", 0), ("small", 16), ("typical", 512)] {
-        let payload: Vec<u8> = (0..payload_len).map(|i| (i as u8).wrapping_mul(7)).collect();
+        let payload: Vec<u8> = (0..payload_len)
+            .map(|i| (i as u8).wrapping_mul(7))
+            .collect();
         let wire = build_federated(&[0xAA; 32], &[0xBB; 32], &[0xCC; 32], &[0xDD; 32], &payload);
         write_seed("federated_envelope_decode", name, &wire);
     }
     let wire = build_federated(&[0u8; 32], &[0xBB; 32], &[0xCC; 32], &[0xDD; 32], b"hi");
-    write_seed("federated_envelope_decode", "unknown_bridge_sentinel", &wire);
+    write_seed(
+        "federated_envelope_decode",
+        "unknown_bridge_sentinel",
+        &wire,
+    );
 
     // ─── federation_directory_decode ──────────────────────────
-    for (name, n) in [("empty", 0), ("single", 1), ("five", 5), ("max_chunk", 40)] {
-        let pubs: Vec<[u8; 32]> = (0..n).map(|i| [i as u8; 32]).collect();
-        let wire = build_directory(&pubs);
+    // Cap at MAX_DIRECTORY_ENTRIES (10); build_directory debug-asserts above.
+    for (name, n) in [("empty", 0), ("single", 1), ("five", 5), ("max_chunk", 10)] {
+        // Dummy presence tickets — fuzz seeds don't need verifiable
+        // signatures, just well-formed on-the-wire shape.
+        let entries: Vec<([u8; 32], drift::transport::PresenceTicket)> = (0..n)
+            .map(|i| {
+                (
+                    [i as u8; 32],
+                    drift::transport::PresenceTicket {
+                        expiry_ms: 0,
+                        nonce: [0u8; 24],
+                        sig: [0u8; 64],
+                    },
+                )
+            })
+            .collect();
+        let wire = build_directory(&entries);
         write_seed("federation_directory_decode", name, &wire);
     }
 
@@ -131,7 +151,7 @@ fn main() {
     // ─── tcp_deframe ──────────────────────────────────────────
     for (name, body_len) in [("min", 0usize), ("small", 16), ("typical", 1200)] {
         let mut v = (body_len as u16).to_be_bytes().to_vec();
-        v.extend(std::iter::repeat(0xCDu8).take(body_len));
+        v.extend(std::iter::repeat_n(0xCDu8, body_len));
         write_seed("tcp_deframe", name, &v);
     }
     let mut v = (8u16).to_be_bytes().to_vec();
@@ -144,7 +164,10 @@ fn main() {
     for (name, bytes) in [
         ("empty_tag", &[0x00u8][..]),
         ("open_like", &[0x01u8, 0x00, 0x00, 0x00, 0x00][..]),
-        ("data_like", &[0x02u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]),
+        (
+            "data_like",
+            &[0x02u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..],
+        ),
         ("close_like", &[0x03u8, 0x00, 0x00, 0x00, 0x00][..]),
         ("ack_like", &[0x04u8, 0x00, 0x00, 0x00, 0x00, 0x00][..]),
     ] {

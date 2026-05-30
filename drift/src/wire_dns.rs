@@ -214,11 +214,7 @@ pub fn parse_qname_labels(msg: &[u8]) -> io::Result<Vec<String>> {
 /// base32-encoded, since TXT RDATA can carry arbitrary bytes
 /// once you accept the per-string 255-byte cap, and our
 /// fragments are ≤117 bytes including the 4-byte header).
-pub fn build_response_message(
-    txid: u16,
-    qname: &str,
-    fragments: &[Vec<u8>],
-) -> Vec<u8> {
+pub fn build_response_message(txid: u16, qname: &str, fragments: &[Vec<u8>]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64 + fragments.iter().map(|f| f.len() + 12).sum::<usize>());
     buf.extend_from_slice(&txid.to_be_bytes());
     // QR=1, AA=1, RD=1, RA=1, RCODE=0 — looks like a normal
@@ -581,11 +577,9 @@ impl PacketIO for DnsPacketIO {
         // it's one syscall for the whole drift packet. For a
         // 1200-byte drift packet at MAX_FRAG_PAYLOAD = 113, that's
         // 11 fragments → 1 syscall instead of 11.
-        let mut fragments: Vec<(Vec<u8>, std::net::SocketAddr)> =
-            Vec::with_capacity(total_frags);
+        let mut fragments: Vec<(Vec<u8>, std::net::SocketAddr)> = Vec::with_capacity(total_frags);
         for (idx, chunk) in buf.chunks(MAX_FRAG_PAYLOAD).enumerate() {
-            let qname =
-                qname_for_fragment(frag_id, idx as u8, total_frags as u8, chunk);
+            let qname = qname_for_fragment(frag_id, idx as u8, total_frags as u8, chunk);
             let txid: u16 = rand::random();
             let msg = build_query_message(txid, &qname);
             fragments.push((msg, dest));

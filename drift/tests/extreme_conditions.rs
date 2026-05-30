@@ -497,7 +497,7 @@ async fn scenario_5hop_chain_compounding_loss() {
             return;
         }
     };
-    let pkt = pkt; // shadow-bind for the rest of the test
+    // shadow-bind for the rest of the test (was: let pkt = pkt;)
     println!(
         "[5-hop] handshake + delivery in {:?} under ~{:.0}% loss",
         started.elapsed(),

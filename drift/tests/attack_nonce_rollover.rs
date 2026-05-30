@@ -47,25 +47,17 @@ async fn handshake_pair() -> (Arc<Transport>, Arc<Transport>, drift::PeerId) {
     let bob_id = Identity::from_secret_bytes([0xB0; 32]);
     let bob_pub = bob_id.public_bytes();
     let bob = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bob_id,
-            cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bob_id, cfg())
+            .await
+            .unwrap(),
     );
     let bob_addr = bob.local_addr().unwrap();
 
     let alice_id = Identity::from_secret_bytes([0xA0; 32]);
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, cfg())
+            .await
+            .unwrap(),
     );
     let bob_handle = alice
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
@@ -104,9 +96,7 @@ async fn auto_rekey_fires_before_nonce_wrap() {
     //   - notice next_tx_seq >= AUTO_REKEY_THRESHOLD
     //   - perform the rekey round-trip
     //   - then send the new packet under the fresh key (seq ~= 1)
-    let res = alice
-        .send_data(&bob_handle, b"post-rekey", 1000, 0)
-        .await;
+    let res = alice.send_data(&bob_handle, b"post-rekey", 1000, 0).await;
     assert!(
         res.is_ok(),
         "send_data after auto-rekey threshold should succeed (rekey + retry); \
@@ -126,7 +116,8 @@ async fn auto_rekey_fires_before_nonce_wrap() {
     assert!(
         m_after.auto_rekeys >= 1,
         "auto_rekeys should have fired; saw {} (was {})",
-        m_after.auto_rekeys, m_before.auto_rekeys
+        m_after.auto_rekeys,
+        m_before.auto_rekeys
     );
 
     // After rekey, Alice's tx seq for this peer must be far below
@@ -138,7 +129,8 @@ async fn auto_rekey_fires_before_nonce_wrap() {
     assert!(
         pm.next_tx_seq < AUTO_REKEY_THRESHOLD,
         "tx seq did not reset after rekey: {} (threshold {})",
-        pm.next_tx_seq, AUTO_REKEY_THRESHOLD
+        pm.next_tx_seq,
+        AUTO_REKEY_THRESHOLD
     );
 }
 
@@ -199,8 +191,10 @@ async fn send_refuses_at_ceiling_rather_than_wrapping() {
         "ALARM: Alice's next_tx_seq decreased from {} to {} without an \
          auto_rekey (auto_rekeys: {} -> {}). This indicates silent seq \
          wrap, which would reuse an AEAD nonce.",
-        pm_pre.next_tx_seq, pm_post.next_tx_seq,
-        m_pre.auto_rekeys, m_post.auto_rekeys,
+        pm_pre.next_tx_seq,
+        pm_post.next_tx_seq,
+        m_pre.auto_rekeys,
+        m_post.auto_rekeys,
     );
 
     // Sink any DATA Bob receives so we don't leak the channel.
@@ -211,6 +205,7 @@ async fn send_refuses_at_ceiling_rather_than_wrapping() {
         send_results.iter().filter(|r| r.is_ok()).count(),
         send_results.iter().filter(|r| r.is_err()).count(),
         rekeyed,
-        pm_pre.next_tx_seq, pm_post.next_tx_seq,
+        pm_pre.next_tx_seq,
+        pm_post.next_tx_seq,
     );
 }

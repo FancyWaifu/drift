@@ -84,8 +84,8 @@ fn forge_packet(dst_id: [u8; 8], body: &[u8], pkt_type: PacketType) -> Vec<u8> {
 
 /// Pull the `host:port` out of a `scheme://host:port` URL.
 fn parse_bound_addr(url: &str) -> SocketAddr {
-    url.splitn(2, "://")
-        .nth(1)
+    url.split_once("://")
+        .map(|x| x.1)
         .expect("bound URL has scheme")
         .parse()
         .expect("bound URL ends in valid socketaddr")
@@ -158,7 +158,8 @@ async fn udp_open_relay_attack_is_blocked() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "udp: bridge forwarded {} attack packets",
         after.forwarded - before.forwarded
     );
@@ -166,8 +167,7 @@ async fn udp_open_relay_attack_is_blocked() {
 
 #[tokio::test]
 async fn udp_open_relay_attack_succeeds_with_legacy_opt_in() {
-    let (bridge, bridge_addr, victim_id) =
-        build_topology("udp", legacy_open_config()).await;
+    let (bridge, bridge_addr, victim_id) = build_topology("udp", legacy_open_config()).await;
     let before = bridge.metrics();
     udp_attacker_fires(bridge_addr, victim_id, 5).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -207,7 +207,8 @@ async fn udp_federated_packet_type_is_also_blocked() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "fed: bridge forwarded {} packets",
         after.forwarded - before.forwarded
     );
@@ -245,7 +246,8 @@ async fn udp_random_dst_ids_dont_leak_peer_membership() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "enum: real dst should also drop — saw {} forwards",
         after.forwarded - before.forwarded
     );
@@ -283,7 +285,8 @@ async fn tcp_open_relay_attack_is_blocked() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "tcp: bridge forwarded {} attack packets",
         after.forwarded - before.forwarded
     );
@@ -391,7 +394,8 @@ async fn tls_open_relay_attack_is_blocked() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "tls: bridge forwarded {} attack packets",
         after.forwarded - before.forwarded
     );
@@ -485,7 +489,8 @@ async fn http_open_relay_attack_is_blocked() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "http: bridge forwarded {} attack packets",
         after.forwarded - before.forwarded
     );
@@ -505,7 +510,8 @@ async fn ws_open_relay_attack_is_blocked() {
         after.forward_unauth_drops - before.forward_unauth_drops
     );
     assert_eq!(
-        after.forwarded, before.forwarded,
+        after.forwarded,
+        before.forwarded,
         "ws: bridge forwarded {} attack packets",
         after.forwarded - before.forwarded
     );

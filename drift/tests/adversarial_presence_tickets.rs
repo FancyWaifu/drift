@@ -124,8 +124,8 @@ async fn announce_with_forged_ticket_is_rejected() {
     let (receiver, attacker_bridge, a_to_recv, attacker_pub) = setup().await;
 
     let victim_seed = [0x55u8; 32];
-    let victim_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(victim_seed))
-        .to_bytes();
+    let victim_pub =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(victim_seed)).to_bytes();
 
     // Attacker tries to mint a ticket by signing with their OWN
     // identity but claiming it's from the victim. The receiver
@@ -172,8 +172,8 @@ async fn ticket_signed_for_other_bridge_is_rejected() {
     let (receiver, attacker_bridge, a_to_recv, _attacker_pub) = setup().await;
 
     let victim_seed = [0x66u8; 32];
-    let victim_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(victim_seed))
-        .to_bytes();
+    let victim_pub =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(victim_seed)).to_bytes();
 
     // Victim legitimately signed a ticket for some OTHER bridge
     // (call it "honest_bridge"). The attacker somehow acquired
@@ -204,9 +204,7 @@ async fn ticket_signed_for_other_bridge_is_rejected() {
          a different bridge. Tickets must be bridge-specific via \
          the receiver's reconstruction of the signed message."
     );
-    assert!(
-        receiver.metrics().federation_invalid_tickets_dropped - baseline >= 1
-    );
+    assert!(receiver.metrics().federation_invalid_tickets_dropped - baseline >= 1);
 }
 
 /// An expired ticket — even one the victim legitimately signed
@@ -217,8 +215,8 @@ async fn expired_ticket_is_rejected() {
     let (receiver, attacker_bridge, a_to_recv, attacker_pub) = setup().await;
 
     let victim_seed = [0x99u8; 32];
-    let victim_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(victim_seed))
-        .to_bytes();
+    let victim_pub =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(victim_seed)).to_bytes();
 
     // Victim signed a ticket for the attacker's bridge ages ago.
     let stale_ticket = drift::transport::build_ticket(
@@ -245,9 +243,7 @@ async fn expired_ticket_is_rejected() {
          logged off remain announceable forever, breaking the \
          freshness property tickets are supposed to provide."
     );
-    assert!(
-        receiver.metrics().federation_invalid_tickets_dropped - baseline >= 1
-    );
+    assert!(receiver.metrics().federation_invalid_tickets_dropped - baseline >= 1);
 }
 
 /// Sanity counterpart: a legitimate ticket signed by the right
@@ -258,8 +254,8 @@ async fn legitimate_ticket_is_accepted() {
     let (receiver, attacker_bridge, a_to_recv, attacker_pub) = setup().await;
 
     let client_seed = [0xCCu8; 32];
-    let client_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(client_seed))
-        .to_bytes();
+    let client_pub =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(client_seed)).to_bytes();
     let expiry_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

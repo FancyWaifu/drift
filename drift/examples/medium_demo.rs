@@ -151,6 +151,7 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 async fn run_peer(medium: Medium) -> Result<(), Box<dyn std::error::Error>> {
     let (name, self_id, peer_ids, bridge_addr_for_routing): (
         &str,

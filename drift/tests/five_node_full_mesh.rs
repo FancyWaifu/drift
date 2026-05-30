@@ -30,6 +30,7 @@ use std::time::Duration;
 const N: usize = 5;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::needless_range_loop)]
 async fn five_node_all_pairs_round_trip() {
     // Build 5 transports with deterministic identities so
     // peer_ids are stable across runs.

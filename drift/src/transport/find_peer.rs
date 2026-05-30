@@ -135,8 +135,7 @@ pub fn verify_hop_attestation(
         return Err(DriftError::AuthFailed);
     }
     let msg = hop_attestation_signed_msg(bridge_pub, query_id, ticket.expiry_ms, &ticket.nonce);
-    drift_core::xeddsa::verify(bridge_pub, &msg, &ticket.sig)
-        .map_err(|_| DriftError::AuthFailed)
+    drift_core::xeddsa::verify(bridge_pub, &msg, &ticket.sig).map_err(|_| DriftError::AuthFailed)
 }
 
 // ─── Protocol constants ──────────────────────────────────────────
@@ -579,8 +578,8 @@ mod tests {
     #[test]
     fn hop_attestation_roundtrip() {
         let secret = [0x66u8; 32];
-        let pubkey = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret))
-            .to_bytes();
+        let pubkey =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret)).to_bytes();
         let nonce = [0xAA; 24];
         let nonce_extra = [0xBB; 64];
         let now_ms = 1_700_000_000_000u64;
@@ -594,8 +593,8 @@ mod tests {
     #[test]
     fn hop_attestation_rejects_wrong_query_id() {
         let secret = [0x66u8; 32];
-        let pubkey = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret))
-            .to_bytes();
+        let pubkey =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret)).to_bytes();
         let nonce_extra = [0xCC; 64];
         let now_ms = 1_700_000_000_000u64;
         let expiry = now_ms + 60_000;
@@ -609,8 +608,8 @@ mod tests {
     #[test]
     fn hop_attestation_rejects_expired() {
         let secret = [0x66u8; 32];
-        let pubkey = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret))
-            .to_bytes();
+        let pubkey =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret)).to_bytes();
         let nonce_extra = [0xDD; 64];
         let ticket = build_hop_attestation(&pubkey, 1, 1000, [0; 24], |msg| {
             drift_core::xeddsa::sign(&secret, msg, &nonce_extra)
@@ -622,14 +621,12 @@ mod tests {
     #[test]
     fn hop_attestation_rejects_wrong_signer() {
         let signer_secret = [0x66u8; 32];
-        let signer_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(
-            signer_secret,
-        ))
-        .to_bytes();
-        let imposter_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(
-            [0x99u8; 32],
-        ))
-        .to_bytes();
+        let signer_pub =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(signer_secret))
+                .to_bytes();
+        let imposter_pub =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([0x99u8; 32]))
+                .to_bytes();
         let nonce_extra = [0xEE; 64];
         let now_ms = 1_700_000_000_000u64;
         let expiry = now_ms + 60_000;
@@ -701,8 +698,14 @@ mod tests {
         let pubkey = [0x42; 32];
         let salt_a = [0x01; 16];
         let salt_b = [0x02; 16];
-        assert_eq!(hash_target_pub(&pubkey, &salt_a), hash_target_pub(&pubkey, &salt_a));
-        assert_ne!(hash_target_pub(&pubkey, &salt_a), hash_target_pub(&pubkey, &salt_b));
+        assert_eq!(
+            hash_target_pub(&pubkey, &salt_a),
+            hash_target_pub(&pubkey, &salt_a)
+        );
+        assert_ne!(
+            hash_target_pub(&pubkey, &salt_a),
+            hash_target_pub(&pubkey, &salt_b)
+        );
         // Different pubkeys with same salt → different hashes.
         assert_ne!(
             hash_target_pub(&pubkey, &salt_a),

@@ -16,7 +16,7 @@
 
 use anyhow::{Context, Result};
 use drift::identity::Identity;
-use drift::transport::{build_directory, build_ticket, encode_ticket, MAX_DIRECTORY_ENTRIES};
+use drift::transport::{build_ticket, encode_ticket};
 use drift::{Direction, Transport, TransportConfig};
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,8 +61,10 @@ async fn main() -> Result<()> {
     if !transport.peer_is_established(&bridge_pid).await {
         anyhow::bail!("session with bridge didn't establish");
     }
-    println!("✓ session as fed-peer (pub {}) established with bridge",
-             hex::encode(our_pub));
+    println!(
+        "✓ session as fed-peer (pub {}) established with bridge",
+        hex::encode(our_pub)
+    );
 
     // Build 3 different malicious directory announcements:
     //
@@ -96,15 +98,10 @@ async fn main() -> Result<()> {
     // build_ticket signs with `our_pub`'s secret claiming victim_pub is being attested
     // — but really the ticket's signature is verifiable against OUR pubkey, not victim's,
     // so when the bridge verifies sig against victim_pub it fails.
-    let forged_ticket = build_ticket(
-        &fed_secret,
-        &bp,
-        expiry_ms,
-        [0xCC; 24],
-        &[0xDD; 64],
-    );
+    let forged_ticket = build_ticket(&fed_secret, &bp, expiry_ms, [0xCC; 24], &[0xDD; 64]);
     let mut wire_b = Vec::with_capacity(4 + 128);
-    wire_b.push(2); wire_b.push(0);
+    wire_b.push(2);
+    wire_b.push(0);
     wire_b.extend_from_slice(&(1u16).to_be_bytes());
     wire_b.extend_from_slice(&victim_pub);
     wire_b.extend_from_slice(&encode_ticket(&forged_ticket));
@@ -115,7 +112,7 @@ async fn main() -> Result<()> {
     // client. We simulate by generating a fake victim, signing a ticket from
     // their key for a different bridge, then announcing it through our session.
     let fake_victim = Identity::generate();
-    let fake_victim_pub = fake_victim.public_bytes();
+    let _fake_victim_pub = fake_victim.public_bytes();
     let fake_victim_sec = fake_victim.xeddsa_sign(b"", &[0u8; 64]);
     let _ = fake_victim_sec; // unused — we use build_ticket directly
     let wrong_bridge = [0xEE; 32];
@@ -131,12 +128,17 @@ async fn main() -> Result<()> {
     );
     let real_pub_for_seed = drift_core::Identity::from_secret_bytes([0xBE; 32]).public_bytes();
     let mut wire_c = Vec::with_capacity(4 + 128);
-    wire_c.push(2); wire_c.push(0);
+    wire_c.push(2);
+    wire_c.push(0);
     wire_c.extend_from_slice(&(1u16).to_be_bytes());
     wire_c.extend_from_slice(&real_pub_for_seed);
     wire_c.extend_from_slice(&encode_ticket(&real_ticket_wrong_bridge));
 
-    for (label, wire) in [("A (no-ticket)", wire_a), ("B (forged)", wire_b), ("C (wrong-bridge)", wire_c)] {
+    for (label, wire) in [
+        ("A (no-ticket)", wire_a),
+        ("B (forged)", wire_b),
+        ("C (wrong-bridge)", wire_c),
+    ] {
         println!("\nShipping announcement {} ({} bytes)…", label, wire.len());
         transport
             .__debug_send_directory_announcement(&bridge_pid, &wire)

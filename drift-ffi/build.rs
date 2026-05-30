@@ -9,10 +9,8 @@ fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_path = PathBuf::from(&crate_dir).join("drift.h");
 
-    let config = cbindgen::Config::from_file(
-        PathBuf::from(&crate_dir).join("cbindgen.toml"),
-    )
-    .expect("failed to read cbindgen.toml");
+    let config = cbindgen::Config::from_file(PathBuf::from(&crate_dir).join("cbindgen.toml"))
+        .expect("failed to read cbindgen.toml");
 
     match cbindgen::Builder::new()
         .with_crate(&crate_dir)

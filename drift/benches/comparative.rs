@@ -148,20 +148,17 @@ fn make_quinn_endpoints() -> (quinn::Endpoint, quinn::Endpoint, SocketAddr) {
     let key_pair = KeyPair::generate().unwrap();
     let cert = params.self_signed(&key_pair).unwrap();
     let cert_der: rustls::pki_types::CertificateDer<'static> = cert.der().clone();
-    let key_der =
-        rustls::pki_types::PrivateKeyDer::Pkcs8(key_pair.serialize_der().into());
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(key_pair.serialize_der().into());
 
     // Install ring as the default CryptoProvider (rustls
     // requires exactly one). Idempotent — multiple installs
     // error silently but don't break.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let server_config =
-        ServerConfig::with_single_cert(vec![cert_der.clone()], key_der).unwrap();
+    let server_config = ServerConfig::with_single_cert(vec![cert_der.clone()], key_der).unwrap();
 
     // Server endpoint bound to a random loopback port.
-    let server =
-        quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let server = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
     let server_addr = server.local_addr().unwrap();
 
     // Client endpoint: trust the server's self-signed cert.
@@ -172,8 +169,7 @@ fn make_quinn_endpoints() -> (quinn::Endpoint, quinn::Endpoint, SocketAddr) {
         .with_no_client_auth();
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap();
     let client_config = quinn::ClientConfig::new(Arc::new(quic_client));
-    let mut client =
-        quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     client.set_default_client_config(client_config);
 
     (client, server, server_addr)
@@ -203,13 +199,12 @@ fn bench_quic(c: &mut Criterion) {
                 // reused for all iters in this benchmark run.
                 let connecting_client = client.connect(server_addr, "localhost").unwrap();
                 let connecting_server = server.accept().await.unwrap();
-                let (client_conn, server_conn) = tokio::join!(
-                    async { connecting_client.await.unwrap() },
-                    async { connecting_server.await.unwrap() },
-                );
+                let (client_conn, server_conn) =
+                    tokio::join!(async { connecting_client.await.unwrap() }, async {
+                        connecting_server.await.unwrap()
+                    },);
 
-                let (mut send, _recv_client_peer) =
-                    client_conn.open_bi().await.unwrap();
+                let (mut send, _recv_client_peer) = client_conn.open_bi().await.unwrap();
                 // Quinn's `open_bi` is local — no stream frame
                 // goes on the wire until we write. accept_bi on
                 // the server side blocks on that first frame, so
@@ -278,7 +273,10 @@ fn fake_ipv4(size: usize) -> Vec<u8> {
 /// both the handshake latency bench (measure this whole call)
 /// and the data-plane bench (call once for setup, then loop
 /// encap/decap).
-fn wg_handshake(alice_seed: [u8; 32], bob_seed: [u8; 32]) -> (boringtun::noise::Tunn, boringtun::noise::Tunn) {
+fn wg_handshake(
+    alice_seed: [u8; 32],
+    bob_seed: [u8; 32],
+) -> (boringtun::noise::Tunn, boringtun::noise::Tunn) {
     use boringtun::noise::{Tunn, TunnResult};
     use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -343,8 +341,7 @@ fn bench_wireguard(c: &mut Criterion) {
                         r => panic!("encap: {:?}", r),
                     };
                     match bob.decapsulate(None, &wire, &mut b_buf) {
-                        TunnResult::WriteToTunnelV4(_, _)
-                        | TunnResult::WriteToTunnelV6(_, _) => {}
+                        TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {}
                         r => panic!("decap: {:?}", r),
                     }
                 }
@@ -385,20 +382,15 @@ fn bench_drift_handshake(c: &mut Criterion) {
                 let a_addr = a_io.local_addr().unwrap();
                 let b_addr = b_io.local_addr().unwrap();
 
-                let bob =
-                    Transport::bind_with_io(b_io, bob_id, TransportConfig::default())
-                        .await
-                        .unwrap();
+                let bob = Transport::bind_with_io(b_io, bob_id, TransportConfig::default())
+                    .await
+                    .unwrap();
                 bob.add_peer(alice_pub, a_addr, Direction::Responder)
                     .await
                     .unwrap();
-                let alice = Transport::bind_with_io(
-                    a_io,
-                    alice_id,
-                    TransportConfig::default(),
-                )
-                .await
-                .unwrap();
+                let alice = Transport::bind_with_io(a_io, alice_id, TransportConfig::default())
+                    .await
+                    .unwrap();
                 let bob_peer = alice
                     .add_peer(bob_pub, b_addr, Direction::Initiator)
                     .await
@@ -418,8 +410,8 @@ fn bench_drift_handshake(c: &mut Criterion) {
 /// QUIC cold handshake: from `client.connect` to the
 /// connection being usable (both sides have completed TLS 1.3
 /// + QUIC transport params). Measured up to — but not
-/// including — the first bidi stream's data transfer, so the
-/// numbers isolate the handshake proper.
+///   including — the first bidi stream's data transfer, so the
+///   numbers isolate the handshake proper.
 fn bench_quic_handshake(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -439,10 +431,9 @@ fn bench_quic_handshake(c: &mut Criterion) {
                 let start = Instant::now();
                 let connecting_client = client.connect(server_addr, "localhost").unwrap();
                 let connecting_server = server.accept().await.unwrap();
-                let _ = tokio::join!(
-                    async { connecting_client.await.unwrap() },
-                    async { connecting_server.await.unwrap() },
-                );
+                let _ = tokio::join!(async { connecting_client.await.unwrap() }, async {
+                    connecting_server.await.unwrap()
+                },);
                 total += start.elapsed();
             }
             total
@@ -454,7 +445,7 @@ fn bench_quic_handshake(c: &mut Criterion) {
 /// WireGuard (Noise_IKpsk2) cold handshake, all in-memory.
 /// One HandshakeInit + one HandshakeResponse + one encapsulate
 /// + one decapsulate = session established + first data byte
-/// delivered. No sockets, so this is pure crypto + state work.
+///   delivered. No sockets, so this is pure crypto + state work.
 fn bench_wg_handshake(c: &mut Criterion) {
     use boringtun::noise::TunnResult;
 
@@ -480,8 +471,7 @@ fn bench_wg_handshake(c: &mut Criterion) {
                     r => panic!("encap first: {:?}", r),
                 };
                 match bob.decapsulate(None, &wire, &mut b_buf) {
-                    TunnResult::WriteToTunnelV4(_, _)
-                    | TunnResult::WriteToTunnelV6(_, _) => {}
+                    TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {}
                     r => panic!("decap first: {:?}", r),
                 }
 

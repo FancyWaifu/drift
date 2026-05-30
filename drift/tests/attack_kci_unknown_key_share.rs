@@ -54,13 +54,9 @@ async fn mallory_cannot_substitute_for_bob_at_handshake() {
     // secret.
     let mallory_id = Identity::from_secret_bytes([0xCC; 32]);
     let mallory = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            mallory_id,
-            open_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), mallory_id, open_cfg())
+            .await
+            .unwrap(),
     );
     let mallory_addr = mallory.local_addr().unwrap();
 
@@ -72,13 +68,9 @@ async fn mallory_cannot_substitute_for_bob_at_handshake() {
     // term won't match.
     let alice_id = Identity::from_secret_bytes([0xA0; 32]);
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            open_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, open_cfg())
+            .await
+            .unwrap(),
     );
     let bob_handle = alice
         .add_peer(bob_pub, mallory_addr, Direction::Initiator)
@@ -128,8 +120,10 @@ async fn mallory_cannot_substitute_for_bob_at_handshake() {
     // handshake retry. If neither does, something silent is
     // happening that we should know about.
     assert!(
-        alice_m.auth_failures + alice_m.handshake_retries
-            + mallory_m.auth_failures + mallory_m.handshake_retries
+        alice_m.auth_failures
+            + alice_m.handshake_retries
+            + mallory_m.auth_failures
+            + mallory_m.handshake_retries
             >= 1,
         "expected at least one auth_failure or handshake_retry across \
          alice + mallory, saw zero — handshake may be silently failing \
@@ -147,25 +141,17 @@ async fn mallory_cannot_substitute_when_alice_knows_bob_directly() {
     let bob_id = Identity::from_secret_bytes([0xB0; 32]);
     let bob_pub = bob_id.public_bytes();
     let bob = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bob_id,
-            open_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bob_id, open_cfg())
+            .await
+            .unwrap(),
     );
     let bob_addr = bob.local_addr().unwrap();
 
     let alice_id = Identity::from_secret_bytes([0xA0; 32]);
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            open_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, open_cfg())
+            .await
+            .unwrap(),
     );
     let bob_handle = alice
         .add_peer(bob_pub, bob_addr, Direction::Initiator)

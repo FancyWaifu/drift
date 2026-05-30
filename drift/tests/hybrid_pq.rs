@@ -59,7 +59,11 @@ async fn hybrid_pq_handshake_completes_and_carries_data() {
     );
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let server_handle = client
@@ -115,7 +119,11 @@ async fn pq_client_against_classical_server_fails_fast() {
     );
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let server_handle = client
@@ -180,7 +188,11 @@ async fn classical_client_against_pq_server_still_works() {
     );
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let server_handle = client

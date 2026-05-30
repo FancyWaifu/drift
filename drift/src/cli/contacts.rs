@@ -77,15 +77,12 @@ async fn list() -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<30}  {:<18}  {:<18}  {}",
-        "PETNAME", "PUBKEY (8B)", "ADDRESS", "ADVERTISED"
+        "{:<30}  {:<18}  {:<18}  ADVERTISED",
+        "PETNAME", "PUBKEY (8B)", "ADDRESS"
     );
     for entry in c.list() {
         let pub_short = entry.pubkey.chars().take(16).collect::<String>();
-        let advertised = entry
-            .advertised_name
-            .as_deref()
-            .unwrap_or("-");
+        let advertised = entry.advertised_name.as_deref().unwrap_or("-");
         println!(
             "{:<30}  {:<18}  {:<18}  {}",
             entry.assigned_name, pub_short, entry.address, advertised

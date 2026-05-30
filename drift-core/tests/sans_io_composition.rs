@@ -110,8 +110,7 @@ fn two_party_aead_round_trip_via_public_api() {
     // ── Bob → Alice (reply) ───────────────────────────────────
     let reply_seq = 2u32;
     let reply = b"hi alice, ack";
-    let mut reply_hdr =
-        Header::new(PacketType::Data, reply_seq, bob_peer_id, alice_peer_id);
+    let mut reply_hdr = Header::new(PacketType::Data, reply_seq, bob_peer_id, alice_peer_id);
     reply_hdr.payload_len = reply.len() as u16;
     let mut reply_hbuf = [0u8; HEADER_LEN];
     reply_hdr.encode(&mut reply_hbuf);
@@ -185,9 +184,7 @@ fn aead_rejects_tampered_ciphertext_via_public_api() {
     hdr.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
 
-    let mut sealed = tx
-        .seal(7, PacketType::Data as u8, &aad, payload)
-        .unwrap();
+    let mut sealed = tx.seal(7, PacketType::Data as u8, &aad, payload).unwrap();
     // Flip a byte in the ciphertext (not the tag).
     sealed[0] ^= 0x01;
     assert!(
@@ -239,8 +236,7 @@ fn pq_hybrid_session_key_round_trip() {
     // Client side: generate ML-KEM encap key.
     let (client_ek, client_dk) = pq::client_generate_keypair();
     // Server side: encapsulate against client's ek.
-    let (server_ct, server_ss) =
-        pq::server_encapsulate(&client_ek).expect("encapsulate");
+    let (server_ct, server_ss) = pq::server_encapsulate(&client_ek).expect("encapsulate");
     // Client decapsulates to recover the same SS.
     let client_ss = client_dk.decapsulate(&server_ct).expect("decapsulate");
     assert_eq!(server_ss, client_ss, "ML-KEM shared secret must match");
@@ -268,8 +264,8 @@ fn pq_hybrid_session_key_round_trip() {
 /// bytes back must get an equivalent Header out.
 #[test]
 fn header_encode_decode_round_trip() {
-    let original = Header::new(PacketType::Hello, 0x1234_5678, [0xAA; 8], [0xBB; 8])
-        .with_hop_ttl(4);
+    let original =
+        Header::new(PacketType::Hello, 0x1234_5678, [0xAA; 8], [0xBB; 8]).with_hop_ttl(4);
     let mut hbuf = [0u8; HEADER_LEN];
     original.encode(&mut hbuf);
 

@@ -66,7 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Transport::connect_url(&bob_url, bob, TransportConfig::default()).await?;
     let bob_t = Arc::new(bob_t);
 
-    println!("[{:>5}ms] both transports connected to Worker", t0.elapsed().as_millis());
+    println!(
+        "[{:>5}ms] both transports connected to Worker",
+        t0.elapsed().as_millis()
+    );
 
     // Both sides register the other as Initiator. DRIFT's
     // dual-init tiebreaker picks one side as the responder
@@ -137,12 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         for (i, line) in alice_lines.iter().enumerate() {
             tokio::time::sleep(Duration::from_millis(if i == 0 { 0 } else { 1500 })).await;
-            println!(
-                "[{:>5}ms]   alice ▶ {:?}",
-                t0.elapsed().as_millis(),
-                line
-            );
-            if let Err(e) = alice_send_t.send_data(&bob_handle, line.as_bytes(), 0, 0).await
+            println!("[{:>5}ms]   alice ▶ {:?}", t0.elapsed().as_millis(), line);
+            if let Err(e) = alice_send_t
+                .send_data(&bob_handle, line.as_bytes(), 0, 0)
+                .await
             {
                 eprintln!("alice send error: {}", e);
             }
@@ -157,12 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The dual-init tiebreaker handles either order safely.
         tokio::time::sleep(Duration::from_millis(800)).await;
         for line in bob_lines.iter() {
-            println!(
-                "[{:>5}ms]     bob ▶ {:?}",
-                t0.elapsed().as_millis(),
-                line
-            );
-            if let Err(e) = bob_send_t.send_data(&alice_handle, line.as_bytes(), 0, 0).await
+            println!("[{:>5}ms]     bob ▶ {:?}", t0.elapsed().as_millis(), line);
+            if let Err(e) = bob_send_t
+                .send_data(&alice_handle, line.as_bytes(), 0, 0)
+                .await
             {
                 eprintln!("bob send error: {}", e);
             }
@@ -194,8 +193,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if tokio::time::timeout(deadline, collect).await.is_err() {
         eprintln!();
         eprintln!("⏱️  timed out after {} s", deadline.as_secs());
-        eprintln!("   alice received {}/{}, bob received {}/{}",
-            got_alice.len(), want_alice, got_bob.len(), want_bob);
+        eprintln!(
+            "   alice received {}/{}, bob received {}/{}",
+            got_alice.len(),
+            want_alice,
+            got_bob.len(),
+            want_bob
+        );
         std::process::exit(2);
     }
 
@@ -220,8 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let alice_ok: bool = alice_strs.iter().zip(bob_says.iter()).all(|(a, b)| a == b);
     let bob_ok: bool = bob_strs.iter().zip(alice_says.iter()).all(|(a, b)| a == b);
-    println!("│ alice bytes match expected: {}", if alice_ok { "✅" } else { "❌" });
-    println!("│ bob   bytes match expected: {}", if bob_ok { "✅" } else { "❌" });
+    println!(
+        "│ alice bytes match expected: {}",
+        if alice_ok { "✅" } else { "❌" }
+    );
+    println!(
+        "│ bob   bytes match expected: {}",
+        if bob_ok { "✅" } else { "❌" }
+    );
 
     let am = alice_t.metrics();
     let bm = bob_t.metrics();
@@ -233,10 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "│ bob   metrics: handshakes={} sent={} recv={} auth_fail={}",
         bm.handshakes_completed, bm.packets_sent, bm.packets_received, bm.auth_failures
     );
-    println!(
-        "│ total wall-clock: {} ms",
-        t0.elapsed().as_millis()
-    );
+    println!("│ total wall-clock: {} ms", t0.elapsed().as_millis());
     println!("└─────────────────────────────────────────────────────────");
 
     if alice_ok && bob_ok && got_alice.len() == want_alice && got_bob.len() == want_bob {

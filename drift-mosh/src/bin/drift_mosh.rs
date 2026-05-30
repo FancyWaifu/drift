@@ -94,7 +94,12 @@ fn main() -> Result<()> {
             addr,
         }
     } else {
-        ssh_launch_and_parse_banner(&host_part, user_part.as_deref(), ssh_port, &remote_server_path)?
+        ssh_launch_and_parse_banner(
+            &host_part,
+            user_part.as_deref(),
+            ssh_port,
+            &remote_server_path,
+        )?
     };
 
     // TOFU verify / pin.
@@ -111,8 +116,7 @@ fn main() -> Result<()> {
                 host_key
             );
             eprintln!("Server pubkey fingerprint: {}", short);
-            let ok = prompt_yes_no("Pin this key and continue? [y/N]")
-                .context("reading answer")?;
+            let ok = prompt_yes_no("Pin this key and continue? [y/N]").context("reading answer")?;
             if !ok {
                 return Err(anyhow!("host not pinned, aborting"));
             }
@@ -355,7 +359,9 @@ fn short_hex(full: &str) -> String {
 /// signs; drift-mosh-server's path shouldn't contain anything
 /// weirder.
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_') {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_')
+    {
         s.to_string()
     } else {
         // POSIX-shell-safe: wrap in single quotes, and escape

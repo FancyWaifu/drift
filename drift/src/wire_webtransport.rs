@@ -133,8 +133,7 @@ async fn load_or_generate_identity(addr: SocketAddr) -> io::Result<Identity> {
         "::1".to_string(),
         addr.ip().to_string(),
     ];
-    Identity::self_signed(&san)
-        .map_err(|e| io::Error::other(format!("self-signed cert: {}", e)))
+    Identity::self_signed(&san).map_err(|e| io::Error::other(format!("self-signed cert: {}", e)))
 }
 
 // ─── Scheme registration ───────────────────────────────────────────
@@ -154,11 +153,7 @@ fn webtransport_listener_factory(
 
 fn webtransport_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<
-        dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send,
-    >,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let addr = crate::io::parse_ip_addr(&addr_str).await?;
         connect_webtransport(addr).await
@@ -173,9 +168,7 @@ fn webtransport_connector_factory(
 ///
 /// Returns a `WebTransportPacketIO` ready to plug into the drift
 /// transport, matching the listener side.
-async fn connect_webtransport(
-    addr: SocketAddr,
-) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+async fn connect_webtransport(addr: SocketAddr) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     use wtransport::{ClientConfig, Endpoint};
     let client_config = ClientConfig::builder()
         .with_bind_default()

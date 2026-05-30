@@ -34,16 +34,12 @@ impl ClientKey {
     pub fn load_or_create() -> Result<Identity> {
         let path = Self::path()?;
         if path.exists() {
-            let hex_str = fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let hex_str =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             let bytes = hex::decode(hex_str.trim())
                 .with_context(|| format!("{} is not valid hex", path.display()))?;
             if bytes.len() != 32 {
-                anyhow::bail!(
-                    "{} must be 32 bytes; got {}",
-                    path.display(),
-                    bytes.len()
-                );
+                anyhow::bail!("{} must be 32 bytes; got {}", path.display(), bytes.len());
             }
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
@@ -67,8 +63,7 @@ impl ClientKey {
 /// On Windows we just write normally — ACL enforcement there
 /// is a whole other story and out of scope for now.
 fn write_file_secure(path: &PathBuf, contents: &str) -> Result<()> {
-    fs::write(path, contents)
-        .with_context(|| format!("writing {}", path.display()))?;
+    fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

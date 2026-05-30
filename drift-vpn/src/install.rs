@@ -290,7 +290,11 @@ async fn install_macos(opts: InstallOpts) -> Result<()> {
     // `bootstrap` loads + (by default) immediately enables. Use it
     // even when --no-enable is set; pair with `disable` afterward
     // to honor the user's intent.
-    run_cmd("launchctl", &["bootstrap", "system", &plist_path.to_string_lossy()]).await?;
+    run_cmd(
+        "launchctl",
+        &["bootstrap", "system", &plist_path.to_string_lossy()],
+    )
+    .await?;
     println!("ran: launchctl bootstrap system {}", plist_path.display());
 
     if opts.no_enable {
@@ -544,7 +548,8 @@ mod tests {
         assert!(unit.contains("[Unit]"));
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("[Install]"));
-        assert!(unit.contains("ExecStart=/usr/local/bin/drift-vpn up --config /etc/drift-vpn/config.toml"));
+        assert!(unit
+            .contains("ExecStart=/usr/local/bin/drift-vpn up --config /etc/drift-vpn/config.toml"));
         assert!(unit.contains("CAP_NET_ADMIN"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=multi-user.target"));

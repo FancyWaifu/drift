@@ -33,6 +33,13 @@ fn seq_newer(a: u32, b: u32) -> bool {
 }
 
 /// The four handshake states a peer can be in.
+///
+/// `AwaitingAck` is large (~3 KB) because it carries the hybrid
+/// PQ ML-KEM-768 decapsulation key during the handshake window.
+/// Boxing it would add a heap allocation on every HELLO; we accept
+/// the size variance because peer count is bounded and the state
+/// is transient.
+#[allow(clippy::large_enum_variant)]
 pub enum HandshakeState {
     /// No handshake has started yet. Next send will trigger a HELLO.
     Pending,

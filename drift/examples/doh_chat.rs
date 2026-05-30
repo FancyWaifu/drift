@@ -74,7 +74,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()
         .map_err(|_| "pubkey must decode to 32 bytes")?;
 
-    let url = format!("doh://{}/v1/{}/{}/dns-query", strip_scheme(&worker_url), my_hex, peer_hex);
+    let url = format!(
+        "doh://{}/v1/{}/{}/dns-query",
+        strip_scheme(&worker_url),
+        my_hex,
+        peer_hex
+    );
     println!("[doh-chat] connecting via {}", url);
 
     let (transport, addr) =
@@ -126,7 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // — non-streamed, no coalescing deadline. For chat, the
         // first send_data also triggers the HELLO handshake
         // through the Worker.
-        if let Err(e) = transport.send_data(&peer_handle, line.as_bytes(), 0, 0).await {
+        if let Err(e) = transport
+            .send_data(&peer_handle, line.as_bytes(), 0, 0)
+            .await
+        {
             eprintln!("[doh-chat] send error: {}", e);
         }
         print!("▶ ");

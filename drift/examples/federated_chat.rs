@@ -83,8 +83,7 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -124,9 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Warmup byte to drive the bridge handshake. add_peer alone
     // never sends a HELLO; send_data does. Same trick the
     // `mesh-chat` example uses.
-    let _ = transport
-        .send_data(&bridge_handle, b".", 0, 0)
-        .await;
+    let _ = transport.send_data(&bridge_handle, b".", 0, 0).await;
 
     // Register the target client as a federated peer. After
     // this, plain `send_data(&target_handle, ...)` transparently
@@ -186,7 +183,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // to propagate (federation is direct lookup) but the bridge
     // ping-loop has to run at least once for the federation peer
     // session to be Established before we start sending.
-    println!("[evt] waiting {}s for federation session to settle...", args.settle_secs);
+    println!(
+        "[evt] waiting {}s for federation session to settle...",
+        args.settle_secs
+    );
     tokio::time::sleep(Duration::from_secs(args.settle_secs)).await;
 
     use rand::RngCore;
@@ -246,8 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn load_identity_either_format(
     path: &std::path::Path,
 ) -> Result<Identity, Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("reading {}: {}", path.display(), e))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
 
     // Format 1: DRFT-magic 36-byte binary.
     if bytes.len() == 36 && &bytes[..4] == b"DRFT" {

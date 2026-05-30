@@ -134,10 +134,9 @@ impl Contacts {
 
     pub fn load_from(path: PathBuf) -> Result<Self> {
         let file = if path.exists() {
-            let body = fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            toml::from_str(&body)
-                .with_context(|| format!("parsing {}", path.display()))?
+            let body =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            toml::from_str(&body).with_context(|| format!("parsing {}", path.display()))?
         } else {
             ContactsFile::default()
         };
@@ -149,8 +148,7 @@ impl Contacts {
     /// Atomic via write-to-temp + rename.
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let body = toml::to_string_pretty(&self.file).context("serializing contacts")?;
         let tmp = self.path.with_extension("toml.tmp");
@@ -203,12 +201,7 @@ impl Contacts {
         let addr_str = addr.to_string();
 
         // Existing pubkey: refresh metadata.
-        if let Some(idx) = self
-            .file
-            .contacts
-            .iter()
-            .position(|c| c.pubkey == pub_hex)
-        {
+        if let Some(idx) = self.file.contacts.iter().position(|c| c.pubkey == pub_hex) {
             // Peer renamed themselves? If the contact was
             // auto-named (user never customized the petname)
             // AND the new advertised name is available, rename
@@ -216,9 +209,7 @@ impl Contacts {
             // chosen a custom petname, never touch it — the
             // peer's new name only updates the
             // `advertised_name` display field.
-            let new_name_clean = advertised_name
-                .filter(|s| !s.is_empty())
-                .map(sanitize_name);
+            let new_name_clean = advertised_name.filter(|s| !s.is_empty()).map(sanitize_name);
             let auto_rename_to: Option<String> = match (
                 self.file.contacts[idx].auto_named,
                 new_name_clean.as_deref(),
@@ -292,12 +283,7 @@ impl Contacts {
     /// preserve the 1:1 invariant). Manually-added contacts
     /// are NOT auto-named — peer renames won't override the
     /// user's choice.
-    pub fn add_manual(
-        &mut self,
-        name: &str,
-        pubkey: [u8; 32],
-        addr: SocketAddr,
-    ) -> Result<()> {
+    pub fn add_manual(&mut self, name: &str, pubkey: [u8; 32], addr: SocketAddr) -> Result<()> {
         let pub_hex = hex_encode(&pubkey);
         let name_clean = sanitize_name(name);
         if self.has_name(&name_clean) {
@@ -394,8 +380,7 @@ pub mod self_name {
         if !p.exists() {
             return Ok(None);
         }
-        let s = fs::read_to_string(&p)
-            .with_context(|| format!("reading {}", p.display()))?;
+        let s = fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
         let trimmed = s.trim();
         if trimmed.is_empty() {
             Ok(None)
@@ -543,7 +528,8 @@ mod tests {
     #[test]
     fn rename_is_user_driven() {
         let (_d, mut c) = fresh();
-        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop")).unwrap();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop"))
+            .unwrap();
         c.rename("laptop", "alice-laptop").unwrap();
         assert!(c.resolve("laptop").is_none());
         assert!(c.resolve("alice-laptop").is_some());
@@ -552,8 +538,10 @@ mod tests {
     #[test]
     fn rename_to_taken_name_errors() {
         let (_d, mut c) = fresh();
-        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("alice")).unwrap();
-        c.record(pk(2), "2.2.2.2:9000".parse().unwrap(), Some("bob")).unwrap();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("alice"))
+            .unwrap();
+        c.record(pk(2), "2.2.2.2:9000".parse().unwrap(), Some("bob"))
+            .unwrap();
         let err = c.rename("alice", "bob").unwrap_err();
         assert!(err.to_string().contains("already taken"));
     }
@@ -561,7 +549,8 @@ mod tests {
     #[test]
     fn forget_removes_entry() {
         let (_d, mut c) = fresh();
-        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop")).unwrap();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop"))
+            .unwrap();
         c.forget("laptop").unwrap();
         assert!(c.resolve("laptop").is_none());
     }
@@ -572,8 +561,10 @@ mod tests {
         let path = dir.path().join("contacts.toml");
         {
             let mut c = Contacts::load_from(path.clone()).unwrap();
-            c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop")).unwrap();
-            c.record(pk(2), "2.2.2.2:9000".parse().unwrap(), Some("laptop")).unwrap();
+            c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop"))
+                .unwrap();
+            c.record(pk(2), "2.2.2.2:9000".parse().unwrap(), Some("laptop"))
+                .unwrap();
             c.save().unwrap();
         }
         let c2 = Contacts::load_from(path).unwrap();
@@ -584,7 +575,8 @@ mod tests {
     #[test]
     fn drift_suffix_strips_in_resolve() {
         let (_d, mut c) = fresh();
-        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop")).unwrap();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop"))
+            .unwrap();
         assert!(c.resolve("laptop.drift").is_some());
         assert!(c.resolve("laptop").is_some());
     }
@@ -592,7 +584,8 @@ mod tests {
     #[test]
     fn add_manual_rejects_taken_name() {
         let (_d, mut c) = fresh();
-        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop")).unwrap();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop"))
+            .unwrap();
         let err = c
             .add_manual("laptop", pk(2), "2.2.2.2:9000".parse().unwrap())
             .unwrap_err();
@@ -602,7 +595,8 @@ mod tests {
     #[test]
     fn add_manual_rejects_existing_pubkey() {
         let (_d, mut c) = fresh();
-        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop")).unwrap();
+        c.record(pk(1), "1.1.1.1:9000".parse().unwrap(), Some("laptop"))
+            .unwrap();
         let err = c
             .add_manual("alice-laptop", pk(1), "9.9.9.9:9000".parse().unwrap())
             .unwrap_err();
@@ -682,7 +676,8 @@ mod tests {
     #[test]
     fn manually_added_contact_is_not_auto_named() {
         let (_d, mut c) = fresh();
-        c.add_manual("bob", pk(1), "1.1.1.1:9000".parse().unwrap()).unwrap();
+        c.add_manual("bob", pk(1), "1.1.1.1:9000".parse().unwrap())
+            .unwrap();
         assert!(!c.resolve("bob").unwrap().auto_named);
         // Even if the peer advertises a different name, we
         // don't follow because the user explicitly chose "bob".

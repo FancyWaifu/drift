@@ -539,11 +539,7 @@ mod tests {
                 let mut vt = v.clone();
                 va.sort();
                 vt.sort();
-                assert_eq!(
-                    va, vt,
-                    "step {}: addr {} membership mismatch",
-                    step, a
-                );
+                assert_eq!(va, vt, "step {}: addr {} membership mismatch", step, a);
             }
         }
     }

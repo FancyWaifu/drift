@@ -182,12 +182,7 @@ async fn four_mediums_all_talk_through_bridge() {
 
     // Drain handshake-phase messages.
     for t in &transports {
-        loop {
-            match tokio::time::timeout(Duration::from_millis(200), t.recv()).await {
-                Ok(Some(_)) => {}
-                _ => break,
-            }
-        }
+        while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(200), t.recv()).await {}
     }
 
     // ===========================================================
@@ -207,13 +202,8 @@ async fn four_mediums_all_talk_through_bridge() {
     let mut data_got: HashMap<usize, Vec<String>> = HashMap::new();
     for (i, t) in transports.iter().enumerate() {
         let mut got = Vec::new();
-        loop {
-            match tokio::time::timeout(Duration::from_millis(500), t.recv()).await {
-                Ok(Some(p)) => {
-                    got.push(String::from_utf8_lossy(&p.payload).to_string());
-                }
-                _ => break,
-            }
+        while let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(500), t.recv()).await {
+            got.push(String::from_utf8_lossy(&p.payload).to_string());
         }
         data_got.insert(i, got);
     }
@@ -272,15 +262,10 @@ async fn four_mediums_all_talk_through_bridge() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let mut coalesce_got = Vec::new();
-    loop {
-        match tokio::time::timeout(Duration::from_millis(500), bob.recv()).await {
-            Ok(Some(p)) => {
-                let msg = String::from_utf8_lossy(&p.payload).to_string();
-                if msg.starts_with("coalesce-") {
-                    coalesce_got.push(msg);
-                }
-            }
-            _ => break,
+    while let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(500), bob.recv()).await {
+        let msg = String::from_utf8_lossy(&p.payload).to_string();
+        if msg.starts_with("coalesce-") {
+            coalesce_got.push(msg);
         }
     }
 

@@ -288,8 +288,7 @@ mod linux {
                 // Control message buffer for one UDP_SEGMENT
                 // cmsg carrying a u16 segment size.
                 let cmsg_space =
-                    unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) }
-                        as usize;
+                    unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) } as usize;
                 let mut cmsg_buf = vec![0u8; cmsg_space];
 
                 let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -310,8 +309,7 @@ mod linux {
                     }
                     (*cmsg_ptr).cmsg_level = libc::SOL_UDP;
                     (*cmsg_ptr).cmsg_type = libc::UDP_SEGMENT;
-                    (*cmsg_ptr).cmsg_len =
-                        libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as _;
+                    (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as u32) as _;
                     let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *mut u16;
                     *data_ptr = seg_size as u16;
                 }
@@ -334,7 +332,10 @@ mod linux {
                 // detection cost. Transient errors (EAGAIN handled
                 // by async_io, EINTR, ENOBUFS) shouldn't get here.
                 let kind = e.raw_os_error();
-                if matches!(kind, Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) | Some(libc::EINVAL)) {
+                if matches!(
+                    kind,
+                    Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) | Some(libc::EINVAL)
+                ) {
                     GSO_BROKEN.store(true, Ordering::Relaxed);
                     tracing::warn!(
                         error = %e,
@@ -400,8 +401,7 @@ mod linux {
                 }
 
                 let fd = socket.as_raw_fd();
-                let rc =
-                    unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as _, 0) };
+                let rc = unsafe { libc::sendmmsg(fd, msgs.as_mut_ptr(), msgs.len() as _, 0) };
                 if rc < 0 {
                     Err(io::Error::last_os_error())
                 } else {

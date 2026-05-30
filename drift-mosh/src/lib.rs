@@ -16,4 +16,4 @@ pub use client_key::ClientKey;
 pub use config::Config;
 pub use known_hosts::{HostKeyStatus, KnownHosts};
 pub use scrollback::Scrollback;
-pub use wire::{Ctrl, BannerLine, PTY_CHUNK_SIZE, SCROLLBACK_BYTES};
+pub use wire::{BannerLine, Ctrl, PTY_CHUNK_SIZE, SCROLLBACK_BYTES};

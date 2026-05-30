@@ -88,8 +88,7 @@ enum Mode {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -130,8 +129,7 @@ async fn listen(
     let my_pub = identity.public_bytes();
     let my_hex = hex::encode(my_pub);
 
-    let (transport, bound_url) =
-        Transport::bind_url(url, identity, default_config()).await?;
+    let (transport, bound_url) = Transport::bind_url(url, identity, default_config()).await?;
     let transport = Arc::new(transport);
     println!("[evt] role=listen pubkey={} bound={}", my_hex, bound_url);
 
@@ -169,7 +167,12 @@ async fn listen(
             Some(p) => {
                 got += 1;
                 let text = String::from_utf8_lossy(&p.payload);
-                println!("[evt] recv #{} bytes={} text={:?}", got, p.payload.len(), text);
+                println!(
+                    "[evt] recv #{} bytes={} text={:?}",
+                    got,
+                    p.payload.len(),
+                    text
+                );
             }
             None => {
                 println!("[evt] transport closed");
@@ -199,13 +202,15 @@ async fn send(
     let my_hex = hex::encode(my_pub);
     let peer_pub: [u8; 32] = parse_hex32(peer_pub_hex)?;
 
-    let (transport, addr) =
-        Transport::connect_url(url, identity, default_config()).await?;
+    let (transport, addr) = Transport::connect_url(url, identity, default_config()).await?;
     let transport = Arc::new(transport);
     let peer_handle = transport
         .add_peer(peer_pub, addr, Direction::Initiator)
         .await?;
-    println!("[evt] role=send my_pub={} peer={} url={}", my_hex, peer_pub_hex, url);
+    println!(
+        "[evt] role=send my_pub={} peer={} url={}",
+        my_hex, peer_pub_hex, url
+    );
 
     let payload: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
     let t0 = std::time::Instant::now();
@@ -249,13 +254,15 @@ async fn chat(
     let my_hex = hex::encode(my_pub);
     let peer_pub: [u8; 32] = parse_hex32(peer_pub_hex)?;
 
-    let (transport, addr) =
-        Transport::connect_url(url, identity, default_config()).await?;
+    let (transport, addr) = Transport::connect_url(url, identity, default_config()).await?;
     let transport = Arc::new(transport);
     let peer_handle = transport
         .add_peer(peer_pub, addr, Direction::Initiator)
         .await?;
-    println!("[evt] role=chat my_pub={} peer={} url={}", my_hex, peer_pub_hex, url);
+    println!(
+        "[evt] role=chat my_pub={} peer={} url={}",
+        my_hex, peer_pub_hex, url
+    );
 
     // Receiver task — print every incoming message.
     let recv_t = transport.clone();
@@ -265,7 +272,12 @@ async fn chat(
         while let Some(p) = recv_t.recv().await {
             got += 1;
             let text = String::from_utf8_lossy(&p.payload);
-            println!("[evt] recv #{} bytes={} text={:?}", got, p.payload.len(), text);
+            println!(
+                "[evt] recv #{} bytes={} text={:?}",
+                got,
+                p.payload.len(),
+                text
+            );
             let _ = got_tx.send(());
         }
     });
@@ -273,7 +285,9 @@ async fn chat(
     // Sender — fire `count` messages with a stagger.
     for i in 0..count {
         let msg = format!("{}#{}", send_text, i);
-        transport.send_data(&peer_handle, msg.as_bytes(), 0, 0).await?;
+        transport
+            .send_data(&peer_handle, msg.as_bytes(), 0, 0)
+            .await?;
         println!("[evt] sent #{} bytes={}", i + 1, msg.len());
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

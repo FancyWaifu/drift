@@ -111,8 +111,7 @@ const TAG_EOF: u8 = 2;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -153,7 +152,10 @@ async fn run_send(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
         .add_federated_peer(target_client_pub, bridge_handle, target_bridge_pub)
         .await?;
 
-    println!("[evt] role=send file={:?} settle={}s", args.r#in, args.settle_secs);
+    println!(
+        "[evt] role=send file={:?} settle={}s",
+        args.r#in, args.settle_secs
+    );
     tokio::time::sleep(Duration::from_secs(args.settle_secs)).await;
 
     // Stream the file in MAX_PAYLOAD - 5 chunks. Compute SHA-256
@@ -184,15 +186,12 @@ async fn run_send(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
         transport.send_data(&target_handle, &wire, 0, 0).await?;
         seq = seq.wrapping_add(1);
         sent_bytes += n as u64;
-        if seq % 100 == 0 {
-            println!(
-                "[evt] sent {} chunks / {} bytes",
-                seq, sent_bytes
-            );
+        if seq.is_multiple_of(100) {
+            println!("[evt] sent {} chunks / {} bytes", seq, sent_bytes);
         }
         // Light pacing — DRIFT will queue but we don't want to
         // blow past the bridge's recv buffer.
-        if seq % 8 == 0 {
+        if seq.is_multiple_of(8) {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
@@ -246,8 +245,11 @@ async fn run_recv(args: RecvArgs) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let _ = transport.send_data(&bridge_handle, b".", 0, 0).await;
 
-    println!("[evt] role=recv waiting for bytes from={} → {:?}",
-        &args.expect_from[..16], args.out);
+    println!(
+        "[evt] role=recv waiting for bytes from={} → {:?}",
+        &args.expect_from[..16],
+        args.out
+    );
 
     // Write each chunk straight to disk. Defer hash check until
     // EOF marker arrives.
@@ -272,7 +274,9 @@ async fn run_recv(args: RecvArgs) -> Result<(), Box<dyn std::error::Error>> {
         // Federation transparently re-keys peer_id to the
         // originating client's id. `federated_from` carries the
         // pubkey directly — use that for the sender check.
-        let Some(from) = pkt.federated_from else { continue };
+        let Some(from) = pkt.federated_from else {
+            continue;
+        };
         if from != expect_from {
             continue;
         }
@@ -290,11 +294,8 @@ async fn run_recv(args: RecvArgs) -> Result<(), Box<dyn std::error::Error>> {
                 out.write_all(bytes).await?;
                 got_bytes += bytes.len() as u64;
                 got_chunks += 1;
-                if got_chunks % 100 == 0 {
-                    println!(
-                        "[evt] recv {} chunks / {} bytes",
-                        got_chunks, got_bytes
-                    );
+                if got_chunks.is_multiple_of(100) {
+                    println!("[evt] recv {} chunks / {} bytes", got_chunks, got_bytes);
                 }
             }
             TAG_EOF => {
@@ -343,8 +344,7 @@ async fn run_recv(args: RecvArgs) -> Result<(), Box<dyn std::error::Error>> {
 // ─── helpers ──────────────────────────────────────────────────────
 
 fn load_identity(path: &std::path::Path) -> Result<Identity, Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("reading {}: {}", path.display(), e))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
     if bytes.len() == 36 && &bytes[..4] == b"DRFT" {
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&bytes[4..]);

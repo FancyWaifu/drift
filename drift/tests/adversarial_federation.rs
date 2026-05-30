@@ -78,19 +78,14 @@ async fn three_party() -> (
         accept_any_peer: true,
         ..Default::default()
     };
-    let bridge = Transport::bind_with_config(
-        "127.0.0.1:0".parse().unwrap(),
-        bridge_id,
-        bridge_cfg,
-    )
-    .await
-    .unwrap();
+    let bridge = Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_id, bridge_cfg)
+        .await
+        .unwrap();
     let bridge_addr = bridge.local_addr().unwrap();
 
-    let attacker =
-        Transport::bind("127.0.0.1:0".parse().unwrap(), attacker_id)
-            .await
-            .unwrap();
+    let attacker = Transport::bind("127.0.0.1:0".parse().unwrap(), attacker_id)
+        .await
+        .unwrap();
     let attacker_to_bridge = attacker
         .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
         .await
@@ -99,10 +94,9 @@ async fn three_party() -> (
     // send to drive HELLO.
     let _ = attacker.send_data(&attacker_to_bridge, b".", 0, 0).await;
 
-    let victim =
-        Transport::bind("127.0.0.1:0".parse().unwrap(), victim_id)
-            .await
-            .unwrap();
+    let victim = Transport::bind("127.0.0.1:0".parse().unwrap(), victim_id)
+        .await
+        .unwrap();
     let victim_to_bridge = victim
         .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
         .await
@@ -116,7 +110,13 @@ async fn three_party() -> (
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    (bridge, attacker, victim, attacker_to_bridge, victim_to_bridge)
+    (
+        bridge,
+        attacker,
+        victim,
+        attacker_to_bridge,
+        victim_to_bridge,
+    )
 }
 
 // ─── Test 1 ──────────────────────────────────────────────────────
@@ -138,8 +138,7 @@ async fn three_party() -> (
 
 #[tokio::test]
 async fn forged_source_client_pub_is_rejected_at_source_bridge() {
-    let (bridge, attacker, victim, attacker_to_bridge, _victim_to_bridge) =
-        three_party().await;
+    let (bridge, attacker, victim, attacker_to_bridge, _victim_to_bridge) = three_party().await;
     let bridge_pub = bridge.local_public();
     let victim_pub = victim.local_public();
 
@@ -213,8 +212,7 @@ async fn forged_source_client_pub_is_rejected_at_source_bridge() {
 
 #[tokio::test]
 async fn federation_table_cannot_be_poisoned_by_unrelated_client() {
-    let (bridge, _attacker, victim, attacker_to_bridge, _victim_to_bridge) =
-        three_party().await;
+    let (bridge, _attacker, victim, attacker_to_bridge, _victim_to_bridge) = three_party().await;
     let bridge_pub = bridge.local_public();
     let victim_pub = victim.local_public();
 
@@ -280,8 +278,7 @@ async fn federation_table_cannot_be_poisoned_by_unrelated_client() {
 
 #[tokio::test]
 async fn federation_directory_rejects_non_bridge_announcer() {
-    let (bridge, attacker, _victim, attacker_to_bridge, _victim_to_bridge) =
-        three_party().await;
+    let (bridge, attacker, _victim, attacker_to_bridge, _victim_to_bridge) = three_party().await;
 
     // Build a FederationDirectory payload claiming some random
     // pubkey is reachable through us.

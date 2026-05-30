@@ -129,7 +129,7 @@ async fn run_signaling(
         kind: "offer".into(),
         sdp: local.sdp,
     })?;
-    ws_tx.send(Message::Text(offer_json.into())).await?;
+    ws_tx.send(Message::Text(offer_json)).await?;
 
     // Wait for the answerer's text frame. Drop binary /
     // control frames; they're not part of the protocol but
@@ -234,11 +234,7 @@ fn webrtc_listener_factory(
 
 fn webrtc_connector_factory(
     _addr_str: String,
-) -> Pin<
-    Box<
-        dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send,
-    >,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,

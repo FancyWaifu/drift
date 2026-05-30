@@ -19,7 +19,7 @@ use std::time::Duration;
 
 const N: usize = 1000;
 const RECV_BUF: usize = 4 * 1024 * 1024; // 4 MiB
-const JITTER_MS: u64 = 334;              // WireGuard's value
+const JITTER_MS: u64 = 334; // WireGuard's value
 
 fn server_cfg() -> TransportConfig {
     TransportConfig {
@@ -78,7 +78,6 @@ async fn thousand_concurrent_hybrid_pq_handshakes_with_tuning() {
     // the same microsecond.
     let mut handles = Vec::with_capacity(N);
     for secret in client_secrets {
-        let server_pub = server_pub;
         handles.push(tokio::spawn(async move {
             let client = Transport::bind_with_config(
                 "127.0.0.1:0".parse().unwrap(),

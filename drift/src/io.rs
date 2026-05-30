@@ -50,10 +50,7 @@ pub trait PacketIO: Send + Sync + 'static {
     /// `send_to` — correct everywhere, faster on Linux UDP.
     /// Returns the number of packets handed to the kernel
     /// (may be less than `packets.len()` on partial sends).
-    async fn send_to_batch(
-        &self,
-        packets: &[(Vec<u8>, SocketAddr)],
-    ) -> io::Result<usize> {
+    async fn send_to_batch(&self, packets: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
         let mut sent = 0;
         for (bytes, dst) in packets {
             self.send_to(bytes, *dst).await?;
@@ -134,10 +131,7 @@ impl PacketIO for UdpPacketIO {
     /// on Linux. One syscall per batch instead of N per
     /// packet — typically 3-10× throughput improvement on
     /// high-pps workloads.
-    async fn send_to_batch(
-        &self,
-        packets: &[(Vec<u8>, SocketAddr)],
-    ) -> io::Result<usize> {
+    async fn send_to_batch(&self, packets: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
         if packets.is_empty() {
             return Ok(0);
         }
@@ -252,10 +246,7 @@ impl TcpPacketIO {
         Self::new_inner(stream, Some(guard))
     }
 
-    fn new_inner(
-        stream: tokio::net::TcpStream,
-        guard: Option<ConnGuard>,
-    ) -> io::Result<Self> {
+    fn new_inner(stream: tokio::net::TcpStream, guard: Option<ConnGuard>) -> io::Result<Self> {
         let peer_addr = stream.peer_addr()?;
         let local_addr = stream.local_addr()?;
         let _ = stream.set_nodelay(true);
@@ -499,10 +490,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'st
     /// + one terminal `flush`, the underlying TCP socket sees
     /// one logical write with all the WS frames concatenated —
     /// matching what the TCP and TLS adapter already do.
-    async fn send_to_batch(
-        &self,
-        packets: &[(Vec<u8>, SocketAddr)],
-    ) -> io::Result<usize> {
+    async fn send_to_batch(&self, packets: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
         use futures_util::SinkExt;
         if packets.is_empty() {
             return Ok(0);
@@ -663,9 +651,7 @@ impl PacketIO for WebTransportPacketIO {
         // exceeds it, wtransport returns an error. DRIFT's
         // typical packets are well under 1500 B so this is
         // rarely hit in practice.
-        self.conn
-            .send_datagram(buf.to_vec())
-            .map_err(io::Error::other)?;
+        self.conn.send_datagram(buf).map_err(io::Error::other)?;
         Ok(buf.len())
     }
 
@@ -829,7 +815,10 @@ impl InterfaceSet {
     #[cfg(unix)]
     pub fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         let ifaces = self.interfaces.read().unwrap();
-        ifaces.iter().find_map(|(_, io)| io.clone()).and_then(|io| io.as_raw_fd())
+        ifaces
+            .iter()
+            .find_map(|(_, io)| io.clone())
+            .and_then(|io| io.as_raw_fd())
     }
 
     /// Send via a specific interface, falling back to the
@@ -1121,11 +1110,7 @@ pub(crate) fn apply_udp_recv_buffer(sock: &UdpSocket, want_bytes: usize) {
                 granted = g,
                 "SO_RCVBUF slightly clamped by kernel (within 20% of request — usually fine)"
             ),
-            Some(g) => tracing::info!(
-                requested = want_bytes,
-                granted = g,
-                "SO_RCVBUF applied"
-            ),
+            Some(g) => tracing::info!(requested = want_bytes, granted = g, "SO_RCVBUF applied"),
             None => tracing::info!(
                 requested = want_bytes,
                 "SO_RCVBUF requested (granted size unreadable)"
@@ -1417,9 +1402,9 @@ impl Listener for WsListenerIO {
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
         let mut rx = self.ready_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "ws listener closed")
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "ws listener closed"))
     }
 }
 
@@ -1450,9 +1435,7 @@ pub(crate) fn generate_self_signed_cert() -> io::Result<(
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(|e| io::Error::other(format!("rcgen: {}", e)))?;
     let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        cert.key_pair.serialize_der(),
-    ));
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
     Ok((vec![cert_der], key_der))
 }
 
@@ -1507,12 +1490,8 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
 /// objects, so the same struct holds either server- or client-
 /// side TLS streams.
 pub struct TlsPacketIO {
-    reader: tokio::sync::Mutex<
-        Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
-    >,
-    writer: tokio::sync::Mutex<
-        Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>,
-    >,
+    reader: tokio::sync::Mutex<Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>>,
+    writer: tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
     /// SEC.PEN.HIGH-1: per-IP slot guard for server-accepted
@@ -1530,10 +1509,8 @@ impl TlsPacketIO {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
     {
         let (r, w) = tokio::io::split(stream);
-        let boxed_r: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static> =
-            Box::new(r);
-        let boxed_w: Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static> =
-            Box::new(w);
+        let boxed_r: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static> = Box::new(r);
+        let boxed_w: Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static> = Box::new(w);
         Self {
             reader: tokio::sync::Mutex::new(boxed_r),
             writer: tokio::sync::Mutex::new(boxed_w),
@@ -1681,16 +1658,11 @@ impl TlsListenerIO {
                     // peer that completes TCP but never sends a
                     // ClientHello (or sends it byte-by-byte) is
                     // dropped after WS_TLS_HANDSHAKE_TIMEOUT.
-                    match tokio::time::timeout(
-                        WS_TLS_HANDSHAKE_TIMEOUT,
-                        acceptor.accept(tcp),
-                    )
-                    .await
+                    match tokio::time::timeout(WS_TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await
                     {
                         Ok(Ok(tls)) => {
-                            let io: Arc<dyn PacketIO> = Arc::new(
-                                TlsPacketIO::new_with_guard(tls, peer, local, guard),
-                            );
+                            let io: Arc<dyn PacketIO> =
+                                Arc::new(TlsPacketIO::new_with_guard(tls, peer, local, guard));
                             let _ = tx.send(io).await;
                         }
                         Ok(Err(e)) => {
@@ -1727,9 +1699,9 @@ impl Listener for TlsListenerIO {
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
         let mut rx = self.ready_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "tls listener closed")
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "tls listener closed"))
     }
 }
 
@@ -1768,11 +1740,8 @@ pub type ListenerFactory =
 /// `Transport::add_peer`. Non-IP transports (Tor, BLE, …)
 /// synthesize a unique loopback `SocketAddr` for the peer-table
 /// key — the actual destination is held inside the `PacketIO`.
-pub type ConnectorFactory = fn(
-    String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
->;
+pub type ConnectorFactory =
+    fn(String) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>>;
 
 /// One adapter's registration in the URL dispatcher. Each
 /// adapter submits exactly one of these; the `scheme` field
@@ -1926,9 +1895,7 @@ fn udp_listener_factory(
 
 fn udp_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let addr = parse_ip_addr(&addr_str).await?;
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
@@ -1956,9 +1923,7 @@ fn tcp_listener_factory(
 
 fn tcp_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let addr = parse_ip_addr(&addr_str).await?;
         let stream = tokio::net::TcpStream::connect(addr).await?;
@@ -1986,9 +1951,7 @@ fn ws_listener_factory(
 
 fn ws_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let addr = parse_ip_addr(&addr_str).await?;
         // tokio-tungstenite's connect_async expects a full
@@ -1996,7 +1959,7 @@ fn ws_connector_factory(
         let url = format!("ws://{}/", addr);
         let (ws, _resp) = tokio_tungstenite::connect_async(&url)
             .await
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
         let io: Arc<dyn PacketIO> = Arc::new(WsPacketIO::new(ws, addr));
         Ok((io, addr))
     })
@@ -2021,9 +1984,7 @@ fn tls_listener_factory(
 
 fn tls_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let addr = parse_ip_addr(&addr_str).await?;
         install_default_crypto_provider();

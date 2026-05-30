@@ -282,6 +282,11 @@ pub const MAX_DIRECTORY_ENTRIES_V4: usize = 8;
 /// federation-pentagon sweep demonstrated 5-bridge chain/star
 /// topologies needed >2 hops. See FEDERATION_DISCOVERY.md §10
 /// Phase G.
+///
+/// Note: the runtime default lives in `TransportConfig::default()`;
+/// this constant is kept as documentation of the historical default
+/// referenced from tests and comments in `transport/mod.rs`.
+#[allow(dead_code)]
 pub const MAX_ANNOUNCE_HOPS: u8 = 4;
 
 /// Build a FederationDirectory v2 payload from a slice of
@@ -318,8 +323,7 @@ pub fn build_directory_v3(entries: &[([u8; 32], PresenceTicket, u8)]) -> Vec<u8>
         entries.len()
     );
     let count = entries.len() as u16;
-    let mut out =
-        Vec::with_capacity(DIRECTORY_HEADER_LEN + entries.len() * DIRECTORY_ENTRY_V3_LEN);
+    let mut out = Vec::with_capacity(DIRECTORY_HEADER_LEN + entries.len() * DIRECTORY_ENTRY_V3_LEN);
     out.push(DIRECTORY_VERSION_V3);
     out.push(0); // reserved
     out.extend_from_slice(&count.to_be_bytes());
@@ -338,9 +342,7 @@ pub fn build_directory_v3(entries: &[([u8; 32], PresenceTicket, u8)]) -> Vec<u8>
 ///
 /// Used as the unified parse path; new callers should prefer this
 /// over the legacy v2-only `parse_directory`.
-pub fn parse_directory_v3(
-    bytes: &[u8],
-) -> Result<Vec<([u8; 32], PresenceTicket, u8)>, DriftError> {
+pub fn parse_directory_v3(bytes: &[u8]) -> Result<Vec<([u8; 32], PresenceTicket, u8)>, DriftError> {
     if bytes.len() < DIRECTORY_HEADER_LEN {
         return Err(DriftError::DecodeError);
     }
@@ -417,7 +419,11 @@ pub fn build_directory_v4(
         bloom.is_some()
     );
     let bloom_bytes_len = bloom.map(|b| b.bits.len()).unwrap_or(0);
-    let bloom_metadata = if bloom.is_some() { 2 + 1 + BLOOM_SALT_LEN } else { 2 };
+    let bloom_metadata = if bloom.is_some() {
+        2 + 1 + BLOOM_SALT_LEN
+    } else {
+        2
+    };
     let count = entries.len() as u16;
     let mut out = Vec::with_capacity(
         DIRECTORY_HEADER_LEN
@@ -488,8 +494,7 @@ pub fn parse_directory_v4(
                 }
                 return Ok((entries, None));
             }
-            let expected =
-                entries_end + 2 + filter_bytes_len + 1 + BLOOM_SALT_LEN;
+            let expected = entries_end + 2 + filter_bytes_len + 1 + BLOOM_SALT_LEN;
             if bytes.len() != expected {
                 return Err(DriftError::DecodeError);
             }
@@ -498,7 +503,8 @@ pub fn parse_directory_v4(
             let k = bytes[bits_start + filter_bytes_len];
             let mut salt = [0u8; BLOOM_SALT_LEN];
             salt.copy_from_slice(
-                &bytes[bits_start + filter_bytes_len + 1..bits_start + filter_bytes_len + 1 + BLOOM_SALT_LEN],
+                &bytes[bits_start + filter_bytes_len + 1
+                    ..bits_start + filter_bytes_len + 1 + BLOOM_SALT_LEN],
             );
             // Sanity: m must be at most bits.len() * 8 and > 0.
             let m_bytes = filter_bytes_len;
@@ -727,10 +733,9 @@ mod tests {
     fn ticket_verify_rejects_wrong_client() {
         let bridge_pub = [0x55; 32];
         let (_real_client, ticket) = fake_entry(&[0x46; 32], &bridge_pub, 9_999_999_999_999);
-        let attacker_pub = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(
-            [0x47u8; 32],
-        ))
-        .to_bytes();
+        let attacker_pub =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([0x47u8; 32]))
+                .to_bytes();
         assert!(verify_ticket(&attacker_pub, &bridge_pub, &ticket, 0).is_err());
     }
 
@@ -742,7 +747,11 @@ mod tests {
         let (pa, ta) = fake_entry(&[0x20; 32], &bridge, 9_999_999_999_999);
         let (pb, tb) = fake_entry(&[0x21; 32], &bridge, 9_999_999_999_999);
         let (pc, tc) = fake_entry(&[0x22; 32], &bridge, 9_999_999_999_999);
-        let entries = vec![(pa, ta.clone(), 0u8), (pb, tb.clone(), 1u8), (pc, tc.clone(), 2u8)];
+        let entries = vec![
+            (pa, ta.clone(), 0u8),
+            (pb, tb.clone(), 1u8),
+            (pc, tc.clone(), 2u8),
+        ];
         let wire = build_directory_v3(&entries);
         let parsed = parse_directory_v3(&wire).unwrap();
         assert_eq!(parsed.len(), 3);

@@ -76,7 +76,7 @@ async fn run_hub() -> Result<(), Box<dyn std::error::Error>> {
     let mut total = 0u64;
     while let Some(pkt) = t.recv().await {
         total += 1;
-        if total % 10 == 0 {
+        if total.is_multiple_of(10) {
             println!(
                 "[hub] drained {} packets so far, latest {} bytes",
                 total,

@@ -55,8 +55,7 @@ impl Transport {
 pub fn split_peer(s: &str) -> Result<([u8; 32], String, Transport)> {
     if !s.contains('@') {
         // Petname path. If a contact matches, use it.
-        let book =
-            drift::contacts::Contacts::load_default().context("loading contacts file")?;
+        let book = drift::contacts::Contacts::load_default().context("loading contacts file")?;
         let contact = book.resolve(s).ok_or_else(|| {
             anyhow!(
                 "no contact named {:?} (and the value isn't a PUBHEX@addr literal). \

@@ -15,14 +15,18 @@
 //!
 //! Protocol on the helper's stdin:
 //!
+//! ```text
 //!     capabilities\n
 //!     connect git-upload-pack\n           (or git-receive-pack)
+//! ```
 //!
 //! And on its stdout:
 //!
+//! ```text
 //!     connect\n                           (the only capability we offer)
 //!     \n                                  (terminator)
 //!     \n                                  (signals "I'm now in tunnel mode")
+//! ```
 //!
 //! After the second blank line, raw pack-protocol bytes flow.
 
@@ -31,8 +35,7 @@ use drift::identity::Identity;
 use drift::streams::StreamManager;
 use drift::{Direction, Transport, TransportConfig};
 use drift_git::{
-    build_request, frame_data, frame_eod, parse_frame, parse_reply, DriftGitUrl, Frame,
-    GitService,
+    build_request, frame_data, frame_eod, parse_frame, parse_reply, DriftGitUrl, Frame, GitService,
 };
 use std::env;
 use std::sync::Arc;
@@ -137,13 +140,10 @@ async fn run_tunnel(
             .context("DRIFT_GIT_BRIDGE_URL set but DRIFT_GIT_BRIDGE_PUB missing")?;
         let bridge_pub = parse_pubkey_hex_str(&bridge_pub_hex)?;
         let bridge_pid = drift_core::derive_peer_id(&bridge_pub);
-        let (t, bridge_addr) = Transport::connect_url(
-            &bridge_url,
-            identity,
-            TransportConfig::default(),
-        )
-        .await
-        .with_context(|| format!("connecting to bridge {}", bridge_url))?;
+        let (t, bridge_addr) =
+            Transport::connect_url(&bridge_url, identity, TransportConfig::default())
+                .await
+                .with_context(|| format!("connecting to bridge {}", bridge_url))?;
         let t = Arc::new(t);
         // Register the bridge as our direct peer (wire-level
         // handshake). Mesh routing toward the server happens
@@ -167,13 +167,10 @@ async fn run_tunnel(
             .context("registering server as mesh peer")?;
         (t, server_pid)
     } else {
-        let (t, peer_addr) = Transport::connect_url(
-            &url.wire_url,
-            identity,
-            TransportConfig::default(),
-        )
-        .await
-        .with_context(|| format!("connecting to {}", url.wire_url))?;
+        let (t, peer_addr) =
+            Transport::connect_url(&url.wire_url, identity, TransportConfig::default())
+                .await
+                .with_context(|| format!("connecting to {}", url.wire_url))?;
         let t = Arc::new(t);
         let server_pid = t
             .add_peer(url.peer_pub, peer_addr, Direction::Initiator)
@@ -202,7 +199,7 @@ async fn run_tunnel(
             .await
             .ok_or_else(|| anyhow!("server closed stream before replying"))?;
         reply_buf.extend_from_slice(&chunk);
-        if let Some(_) = reply_buf.windows(2).position(|w| w == b"\n\n") {
+        if reply_buf.windows(2).any(|w| w == b"\n\n") {
             break parse_reply(&reply_buf)?;
         }
     };
@@ -287,8 +284,7 @@ async fn run_tunnel(
 }
 
 fn parse_pubkey_hex_str(s: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(s.trim())
-        .with_context(|| format!("invalid hex pubkey: {:?}", s))?;
+    let bytes = hex::decode(s.trim()).with_context(|| format!("invalid hex pubkey: {:?}", s))?;
     if bytes.len() != 32 {
         return Err(anyhow!(
             "pubkey must be 32 bytes (64 hex chars), got {}",
@@ -307,8 +303,7 @@ fn parse_pubkey_hex_str(s: &str) -> Result<[u8; 32]> {
 /// auto-provision on first use.
 fn load_or_make_helper_identity() -> Result<[u8; 32]> {
     if let Ok(s) = env::var("DRIFT_GIT_HELPER_KEY") {
-        let bytes = hex::decode(s.trim())
-            .context("DRIFT_GIT_HELPER_KEY isn't valid hex")?;
+        let bytes = hex::decode(s.trim()).context("DRIFT_GIT_HELPER_KEY isn't valid hex")?;
         if bytes.len() != 32 {
             return Err(anyhow!(
                 "DRIFT_GIT_HELPER_KEY must be 32 bytes (64 hex chars)"

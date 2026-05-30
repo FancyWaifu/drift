@@ -55,21 +55,16 @@ fn bench_cold_handshake(c: &mut Criterion) {
                 let a_addr = a_io.local_addr().unwrap();
                 let b_addr = b_io.local_addr().unwrap();
 
-                let bob =
-                    Transport::bind_with_io(b_io, bob_id, TransportConfig::default())
-                        .await
-                        .unwrap();
+                let bob = Transport::bind_with_io(b_io, bob_id, TransportConfig::default())
+                    .await
+                    .unwrap();
                 bob.add_peer(alice_pub, a_addr, Direction::Responder)
                     .await
                     .unwrap();
 
-                let alice = Transport::bind_with_io(
-                    a_io,
-                    alice_id,
-                    TransportConfig::default(),
-                )
-                .await
-                .unwrap();
+                let alice = Transport::bind_with_io(a_io, alice_id, TransportConfig::default())
+                    .await
+                    .unwrap();
                 let bob_peer = alice
                     .add_peer(bob_pub, b_addr, Direction::Initiator)
                     .await
@@ -110,9 +105,13 @@ fn bench_resumption(c: &mut Criterion) {
             let bob = Transport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), bob_id)
                 .await
                 .unwrap();
-            bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-                .await
-                .unwrap();
+            bob.add_peer(
+                alice_pub,
+                "0.0.0.0:0".parse().unwrap(),
+                Direction::Responder,
+            )
+            .await
+            .unwrap();
             let bob_addr = bob.local_addr().unwrap();
 
             // Seed cold handshake to mint a ticket.

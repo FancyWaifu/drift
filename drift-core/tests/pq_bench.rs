@@ -36,7 +36,10 @@ fn avg_us<F: FnMut()>(label: &str, mut f: F) -> f64 {
 #[test]
 fn ml_kem_per_op_latency() {
     eprintln!();
-    eprintln!("ML-KEM-768 per-op latency ({} iters, post-50 warmup):", ITERS);
+    eprintln!(
+        "ML-KEM-768 per-op latency ({} iters, post-50 warmup):",
+        ITERS
+    );
 
     // 1. Client keygen
     let keygen = avg_us("client_generate_keypair (keygen)", || {
@@ -86,14 +89,6 @@ fn ml_kem_per_op_latency() {
         "keygen too slow ({} µs): would dominate handshake budget",
         keygen
     );
-    assert!(
-        encap < 10_000.0,
-        "encap too slow ({} µs)",
-        encap
-    );
-    assert!(
-        decap < 10_000.0,
-        "decap too slow ({} µs)",
-        decap
-    );
+    assert!(encap < 10_000.0, "encap too slow ({} µs)", encap);
+    assert!(decap < 10_000.0, "decap too slow ({} µs)", decap);
 }

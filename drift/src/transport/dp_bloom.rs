@@ -167,7 +167,7 @@ impl DpBloomFilter {
     /// Compute the j-th hash position for `pubkey`.
     fn bit_index(&self, pubkey: &[u8; 32], j: u8) -> usize {
         let mut h = Sha256::new();
-        h.update(&self.salt);
+        h.update(self.salt);
         h.update(pubkey);
         h.update([j]);
         let out = h.finalize();
@@ -279,10 +279,7 @@ mod tests {
         // Every inserted pubkey STILL tests positive — the
         // load-bearing property.
         for pk in &pks {
-            assert!(
-                f.contains(pk),
-                "DP noise broke no-false-negative invariant"
-            );
+            assert!(f.contains(pk), "DP noise broke no-false-negative invariant");
         }
     }
 

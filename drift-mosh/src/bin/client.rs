@@ -23,7 +23,6 @@ use drift::streams::StreamManager;
 use drift::{Direction, Transport, TransportConfig};
 use drift_mosh::{ClientKey, Ctrl, PTY_CHUNK_SIZE};
 use futures_util::StreamExt;
-use rand::RngCore;
 use signal_hook::consts::signal::SIGWINCH;
 use signal_hook_tokio::Signals;
 use std::sync::Arc;
@@ -239,9 +238,7 @@ async fn run() -> Result<()> {
                 }
             }
         } else {
-            bail!(
-                "need either --server-addr, --bridge, or --server-pub (with a drift.toml entry)"
-            );
+            bail!("need either --server-addr, --bridge, or --server-pub (with a drift.toml entry)");
         }
     }
 
@@ -266,8 +263,9 @@ async fn run() -> Result<()> {
     // persistent default at $CONFIG_DIR/drift-mosh/client.key.
     let identity = match &cli.identity_file {
         Some(p) => load_identity_from_file(p)?,
-        None => ClientKey::load_or_create()
-            .context("loading or creating persistent client identity")?,
+        None => {
+            ClientKey::load_or_create().context("loading or creating persistent client identity")?
+        }
     };
 
     // `--bind` is an unused legacy flag retained for old scripts.
@@ -288,17 +286,13 @@ async fn run() -> Result<()> {
         let (bridge_url, bridge_pub_hex) = bridge_spec
             .split_once('@')
             .ok_or_else(|| anyhow!("--bridge expected <url>@<pubkey-hex>"))?;
-        let bridge_pub = decode_hex32(bridge_pub_hex)
-            .context("--bridge pubkey")?;
-        let target_bridge_pub = decode_hex32(target_bridge_hex)
-            .context("--target-bridge pubkey")?;
-        let (t, bridge_addr) = Transport::connect_url(
-            bridge_url,
-            identity,
-            TransportConfig::default(),
-        )
-        .await
-        .with_context(|| format!("connecting to bridge {}", bridge_url))?;
+        let bridge_pub = decode_hex32(bridge_pub_hex).context("--bridge pubkey")?;
+        let target_bridge_pub =
+            decode_hex32(target_bridge_hex).context("--target-bridge pubkey")?;
+        let (t, bridge_addr) =
+            Transport::connect_url(bridge_url, identity, TransportConfig::default())
+                .await
+                .with_context(|| format!("connecting to bridge {}", bridge_url))?;
         let t = Arc::new(t);
         let bridge_handle = t
             .add_peer(bridge_pub, bridge_addr, Direction::Initiator)
@@ -365,7 +359,9 @@ async fn run() -> Result<()> {
     let pty_stream = Arc::new(
         tokio::time::timeout(std::time::Duration::from_secs(10), mgr.open(server_peer))
             .await
-            .map_err(|_| anyhow!("server didn't respond within 10 s — is --server-addr reachable?"))?
+            .map_err(|_| {
+                anyhow!("server didn't respond within 10 s — is --server-addr reachable?")
+            })?
             .context("opening pty stream")?,
     );
     let ctrl_stream = Arc::new(
@@ -418,13 +414,12 @@ async fn run() -> Result<()> {
     // doesn't have one (it's reachable only via its bridge).
     if cli.bridge.is_none() {
         if let Ok(mut book) = drift::contacts::Contacts::load_default() {
-            let server_addr: std::net::SocketAddr =
-                server_addr_with_scheme
-                    .splitn(2, "://")
-                    .nth(1)
-                    .unwrap_or(&server_addr_with_scheme)
-                    .parse()
-                    .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+            let server_addr: std::net::SocketAddr = server_addr_with_scheme
+                .split_once("://")
+                .map(|x| x.1)
+                .unwrap_or(&server_addr_with_scheme)
+                .parse()
+                .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
             if book
                 .record(server_pub, server_addr, server_name.as_deref())
                 .is_ok()
@@ -437,7 +432,10 @@ async fn run() -> Result<()> {
     // Machine-parseable line on stdout so the launcher can
     // persist the session id. Written BEFORE raw mode so it
     // shows up on a proper line.
-    let sid_hex: String = got_session_id.iter().map(|b| format!("{:02x}", b)).collect();
+    let sid_hex: String = got_session_id
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     println!("DRIFT_MOSH_SESSION_ID={}", sid_hex);
     if reattach_ok {
         println!("DRIFT_MOSH_REATTACH=yes");
@@ -522,16 +520,10 @@ async fn run() -> Result<()> {
         // Drain pty output to stdout until quiet period elapses
         // or stream closes.
         use std::io::Write;
-        let quiet_window =
-            std::time::Duration::from_secs(cli.exec_timeout);
-        loop {
-            match tokio::time::timeout(quiet_window, pty_stream.recv()).await {
-                Ok(Some(chunk)) => {
-                    std::io::stdout().write_all(&chunk).ok();
-                    std::io::stdout().flush().ok();
-                }
-                Ok(None) | Err(_) => break,
-            }
+        let quiet_window = std::time::Duration::from_secs(cli.exec_timeout);
+        while let Ok(Some(chunk)) = tokio::time::timeout(quiet_window, pty_stream.recv()).await {
+            std::io::stdout().write_all(&chunk).ok();
+            std::io::stdout().flush().ok();
         }
 
         // Polite goodbye.
@@ -693,8 +685,7 @@ enum InventoryDial {
 /// resolves via its peer directory) when the host isn't in the
 /// inventory or has no explicit route.
 fn resolve_from_inventory(server_pub_hex: &str) -> Result<InventoryDial> {
-    let path = drift_config::io::default_path()
-        .context("resolving the default drift.toml path")?;
+    let path = drift_config::io::default_path().context("resolving the default drift.toml path")?;
     if !path.exists() {
         bail!(
             "no drift.toml at {}; either pass --server-addr explicitly \
@@ -702,8 +693,8 @@ fn resolve_from_inventory(server_pub_hex: &str) -> Result<InventoryDial> {
             path.display()
         );
     }
-    let doc = drift_config::io::read(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let doc =
+        drift_config::io::read(&path).with_context(|| format!("reading {}", path.display()))?;
     let needle = server_pub_hex.trim().to_lowercase();
 
     // Find the host with this pubkey (if any). Case-insensitive
@@ -768,8 +759,7 @@ fn resolve_from_inventory(server_pub_hex: &str) -> Result<InventoryDial> {
 ///   - `[hosts.<name>]` is missing
 ///   - the entry has no `endpoints` AND no `via_bridge`
 fn resolve_host_by_name(host_name: &str) -> Result<(String, InventoryDial)> {
-    let path = drift_config::io::default_path()
-        .context("resolving the default drift.toml path")?;
+    let path = drift_config::io::default_path().context("resolving the default drift.toml path")?;
     if !path.exists() {
         bail!(
             "no drift.toml at {}; either run `drift-config init` + \
@@ -781,8 +771,8 @@ fn resolve_host_by_name(host_name: &str) -> Result<(String, InventoryDial)> {
             host_name,
         );
     }
-    let doc = drift_config::io::read(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let doc =
+        drift_config::io::read(&path).with_context(|| format!("reading {}", path.display()))?;
     let host = doc.hosts.get(host_name).ok_or_else(|| {
         anyhow!(
             "no host named {:?} in {}. Add it with `drift-config peer add {} \
@@ -911,7 +901,10 @@ fn parse_server_pub(hex_str: &str) -> Result<[u8; 32]> {
 ///   2. Otherwise treat `--server-addr` as a literal address
 ///      (bare `host:port` or scheme-prefixed) and require
 ///      `--server-pub` for the pubkey.
-fn resolve_target(server_addr_arg: &str, server_pub_arg: Option<&str>) -> Result<([u8; 32], String)> {
+fn resolve_target(
+    server_addr_arg: &str,
+    server_pub_arg: Option<&str>,
+) -> Result<([u8; 32], String)> {
     if let Ok(book) = drift::contacts::Contacts::load_default() {
         if let Some(contact) = book.resolve(server_addr_arg) {
             let pub_bytes = drift::contacts::parse_pubkey_hex(&contact.pubkey)?;
@@ -949,7 +942,10 @@ fn resolve_target(server_addr_arg: &str, server_pub_arg: Option<&str>) -> Result
 fn decode_hex32(s: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(s).context("not valid hex")?;
     if bytes.len() != 32 {
-        return Err(anyhow!("expected 32 bytes (64 hex chars), got {}", bytes.len()));
+        return Err(anyhow!(
+            "expected 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -978,13 +974,12 @@ fn is_stdin_tty() -> bool {
 /// Naive substring search — `haystack.windows(n).position(...)`.
 /// Used to spot the sentinel in the prelude buffer. The buffer
 /// stays small (a few hundred bytes) so O(n*m) is fine.
+#[allow(dead_code)]
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn parse_session_id(opt: Option<&str>) -> Result<[u8; 16]> {
@@ -1009,10 +1004,9 @@ fn parse_session_id(opt: Option<&str>) -> Result<[u8; 16]> {
 }
 
 fn load_identity_from_file(path: &str) -> Result<Identity> {
-    let hex_str = std::fs::read_to_string(path)
-        .with_context(|| format!("reading identity from {}", path))?;
-    let bytes = hex::decode(hex_str.trim())
-        .context("identity file isn't valid hex")?;
+    let hex_str =
+        std::fs::read_to_string(path).with_context(|| format!("reading identity from {}", path))?;
+    let bytes = hex::decode(hex_str.trim()).context("identity file isn't valid hex")?;
     if bytes.len() != 32 {
         return Err(anyhow!("identity must be 32 bytes; got {}", bytes.len()));
     }

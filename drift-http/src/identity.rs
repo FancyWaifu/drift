@@ -40,11 +40,7 @@ pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
         let bytes = hex::decode(hex_str.trim())
             .with_context(|| format!("{} is not valid hex", path.display()))?;
         if bytes.len() != 32 {
-            anyhow::bail!(
-                "{} must be 32 bytes; got {}",
-                path.display(),
-                bytes.len()
-            );
+            anyhow::bail!("{} must be 32 bytes; got {}", path.display(), bytes.len());
         }
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&bytes);
@@ -53,8 +49,7 @@ pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let hex_key: String = seed.iter().map(|b| format!("{:02x}", b)).collect();
         write_file_secure(path, &hex_key)?;

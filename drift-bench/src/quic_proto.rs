@@ -104,14 +104,9 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             // DATAGRAM frame — no stream accept, no flow
             // control. Matches the ping-pong shape of the
             // DRIFT and WG RTT tests exactly.
-            loop {
-                match connection.read_datagram().await {
-                    Ok(bytes) => {
-                        if connection.send_datagram(bytes).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(bytes) = connection.read_datagram().await {
+                if connection.send_datagram(bytes).is_err() {
+                    break;
                 }
             }
         }
@@ -165,8 +160,8 @@ async fn build_client() -> Result<Endpoint> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let cert_bytes = cert_bytes
-        .ok_or_else(|| anyhow!("server cert {} never appeared", CERT_PATH))?;
+    let cert_bytes =
+        cert_bytes.ok_or_else(|| anyhow!("server cert {} never appeared", CERT_PATH))?;
 
     let cert = rustls::pki_types::CertificateDer::from(cert_bytes);
     let mut roots = rustls::RootCertStore::empty();
@@ -207,8 +202,7 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
                 let probe: bytes::Bytes = vec![0xA5u8; 32].into();
                 conn.send_datagram(probe)?;
                 let _ =
-                    tokio::time::timeout(Duration::from_secs(5), conn.read_datagram())
-                        .await??;
+                    tokio::time::timeout(Duration::from_secs(5), conn.read_datagram()).await??;
                 samples.push(start.elapsed().as_micros());
                 // Close the connection + drop endpoint so the
                 // next iter is genuinely cold.
@@ -233,8 +227,8 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
             for _ in 0..cli.rtt_iters {
                 let start = Instant::now();
                 conn.send_datagram(payload.clone())?;
-                let _ = tokio::time::timeout(Duration::from_secs(5), conn.read_datagram())
-                    .await??;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(5), conn.read_datagram()).await??;
                 samples.push(start.elapsed().as_micros());
             }
             crate::report::summarize_rtts(&mut samples, &mut report);

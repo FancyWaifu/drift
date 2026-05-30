@@ -20,8 +20,8 @@ pub fn default_path() -> Result<PathBuf> {
 
 pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
     if path.exists() {
-        let hex_str = fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let hex_str =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let bytes = hex::decode(hex_str.trim())
             .with_context(|| format!("{} is not valid hex", path.display()))?;
         if bytes.len() != 32 {
@@ -34,8 +34,7 @@ pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let hex_key: String = seed.iter().map(|b| format!("{:02x}", b)).collect();
         fs::write(path, &hex_key).with_context(|| format!("writing {}", path.display()))?;
@@ -48,4 +47,3 @@ pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
         Ok(Identity::from_secret_bytes(seed))
     }
 }
-

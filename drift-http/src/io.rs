@@ -80,7 +80,7 @@ impl StreamIo {
 }
 
 fn map_err(e: StreamError) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, format!("drift stream error: {:?}", e))
+    io::Error::other(format!("drift stream error: {:?}", e))
 }
 
 impl AsyncRead for StreamIo {

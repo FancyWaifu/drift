@@ -159,10 +159,7 @@ async fn build_session() -> (drift::Transport, drift::Transport, [u8; 8]) {
 
     // Warm up so the session is Established before we start the
     // measurement loop.
-    alice
-        .send_data(&bob_peer, &[0u8; 32], 0, 0)
-        .await
-        .unwrap();
+    alice.send_data(&bob_peer, &[0u8; 32], 0, 0).await.unwrap();
     let _ = tokio::time::timeout(std::time::Duration::from_millis(200), bob.recv()).await;
 
     (alice, bob, bob_peer)
@@ -320,17 +317,12 @@ fn bench_header_overhead_table(c: &mut Criterion) {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| {
                 eprintln!();
-                eprintln!(
-                    "== Per-packet wire overhead (header + AEAD tag) =="
-                );
-                eprintln!(
-                    "  payload |  long hdr  |  short hdr | saved%"
-                );
+                eprintln!("== Per-packet wire overhead (header + AEAD tag) ==");
+                eprintln!("  payload |  long hdr  |  short hdr | saved%");
                 for payload in [16, 64, 256, 1024] {
                     let long_total = payload + LONG_HEADER_OVERHEAD;
                     let short_total = payload + SHORT_HEADER_OVERHEAD;
-                    let saved =
-                        100.0 * (long_total - short_total) as f64 / long_total as f64;
+                    let saved = 100.0 * (long_total - short_total) as f64 / long_total as f64;
                     eprintln!(
                         "  {:>5} B | {:>4} B/pkt | {:>4} B/pkt | {:>5.1}%",
                         payload, long_total, short_total, saved

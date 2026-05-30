@@ -124,7 +124,11 @@ pub fn sign(secret_key: &[u8; 32], message: &[u8], nonce_extra: &[u8; 64]) -> [u
 /// on any failure (bad pubkey encoding, malformed signature,
 /// signature does not verify). Constant-time relative to the
 /// signature contents.
-pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; XEDDSA_SIG_LEN]) -> Result<()> {
+pub fn verify(
+    public_key: &[u8; 32],
+    message: &[u8],
+    signature: &[u8; XEDDSA_SIG_LEN],
+) -> Result<()> {
     // 1. Reconstruct the Edwards point from the Montgomery
     //    u-coordinate with sign=0 (matches the choice we made
     //    in `sign`).
@@ -164,7 +168,7 @@ pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; XEDDSA_SIG
 
     // 5. h = SHA-512(R || A || M) mod q
     let mut hasher = Sha512::new();
-    hasher.update(&r_bytes);
+    hasher.update(r_bytes);
     hasher.update(a_bytes);
     hasher.update(message);
     let h_hash = hasher.finalize();

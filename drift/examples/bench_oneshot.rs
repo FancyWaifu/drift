@@ -34,8 +34,7 @@ async fn main() {
         let t0 = Instant::now();
         let alice_id = Identity::from_secret_bytes([(i % 254 + 1) as u8; 32]);
         let alice_pub = alice_id.public_bytes();
-        let bob_id =
-            Identity::from_secret_bytes([((i + 1) % 254 + 1) as u8; 32]);
+        let bob_id = Identity::from_secret_bytes([((i + 1) % 254 + 1) as u8; 32]);
         let bob_pub = bob_id.public_bytes();
 
         let (a_io, b_io) = MemPacketIO::pair();
@@ -130,9 +129,7 @@ async fn verify_short_path() {
     println!("Wire bytes for 64 B payload:");
     println!("  short-header path (deadline=0):   {} bytes", short_bytes);
     println!("  long-header path  (deadline=200): {} bytes", long_bytes);
-    println!(
-        "  expected short = 64 + 7 + 16 = 87 ; long = 64 + 36 + 16 = 116"
-    );
+    println!("  expected short = 64 + 7 + 16 = 87 ; long = 64 + 36 + 16 = 116");
     println!();
 }
 

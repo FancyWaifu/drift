@@ -35,11 +35,7 @@ pub fn init(args: &InitArgs, config_path: &Path) -> Result<()> {
 
 // ─── keygen ───────────────────────────────────────────────────────
 
-pub fn keygen(
-    args: &KeygenArgs,
-    config_path: &Path,
-    identity_path: &Path,
-) -> Result<()> {
+pub fn keygen(args: &KeygenArgs, config_path: &Path, identity_path: &Path) -> Result<()> {
     if identity_path.exists() && !args.force {
         bail!(
             "identity already exists at {}; pass --force to regenerate (this will rotate your pubkey)",
@@ -251,8 +247,12 @@ pub fn validate(config_path: &Path) -> Result<()> {
     }
 
     if problems.is_empty() {
-        println!("ok: {} (network={}, {} hosts)",
-            config_path.display(), doc.network.name, doc.hosts.len());
+        println!(
+            "ok: {} (network={}, {} hosts)",
+            config_path.display(),
+            doc.network.name,
+            doc.hosts.len()
+        );
         Ok(())
     } else {
         for p in &problems {
@@ -316,10 +316,7 @@ pub fn resolve_config_path(opt: &Option<PathBuf>) -> Result<PathBuf> {
 }
 
 /// Resolve `--identity` (or default).
-pub fn resolve_identity_path(
-    opt: &Option<PathBuf>,
-    config_path: &Path,
-) -> Result<PathBuf> {
+pub fn resolve_identity_path(opt: &Option<PathBuf>, config_path: &Path) -> Result<PathBuf> {
     if let Some(p) = opt {
         return Ok(p.clone());
     }

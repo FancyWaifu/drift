@@ -160,7 +160,7 @@ async fn tampered_data_tag_rejected() {
     let _ = canonical_aad(&hbuf);
 
     let mut wire = hbuf.to_vec();
-    wire.extend_from_slice(&vec![0xFFu8; 10 + 16]); // fake ciphertext+tag
+    wire.extend_from_slice(&[0xFFu8; 10 + 16]); // fake ciphertext+tag
     raw_send(bob_addr, &wire).await;
 
     // Subsequent legitimate packet should still go through.

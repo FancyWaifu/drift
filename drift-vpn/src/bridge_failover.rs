@@ -191,8 +191,7 @@ async fn run_supervisor(transport: Arc<Transport>, mut state: BridgeSupervisor) 
             // range is higher-priority than the current active.
             let preferred = first_healthy_in_range(&transport, &state, 0, state.active_idx).await;
             if let Some(preferred_idx) = preferred {
-                if let Err(e) =
-                    swap_to(&transport, &mut state, preferred_idx, "re-elevation").await
+                if let Err(e) = swap_to(&transport, &mut state, preferred_idx, "re-elevation").await
                 {
                     warn!(
                         peer = %peer_pid_hex,
