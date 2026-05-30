@@ -31,8 +31,15 @@ case "${FED_WIRE:-h2s}" in
   h2s)          : "${FED_SCHEME:=h2s}";          : "${FED_PORT_BASE_OFFSET:=7}" ;;
   h2)           : "${FED_SCHEME:=h2}";           : "${FED_PORT_BASE_OFFSET:=6}" ;;
   webtransport) : "${FED_SCHEME:=webtransport}"; : "${FED_PORT_BASE_OFFSET:=8}" ;;
-  *) echo "FED_WIRE must be h2s|h2|webtransport" >&2; exit 2 ;;
+  iroh)         : "${FED_SCHEME:=iroh}";         : "${FED_PORT_BASE_OFFSET:=8}" ;;
+  *) echo "FED_WIRE must be h2s|h2|webtransport|iroh" >&2; exit 2 ;;
 esac
+
+# Iroh needs a deterministic SecretKey per bridge so that
+# `iroh://<endpoint_id>@<host:port>@<bridge_pub>` URLs survive
+# restarts AND so that the test orchestrator can compute / probe
+# them once and reuse. Seeds are SHA-256 of "drift-corp-<bridge>".
+IROH=0; [ "$FED_SCHEME" = "iroh" ] && IROH=1
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -160,6 +167,57 @@ done
 pub_for()  { eval "echo \$PUB_$(echo "$1" | tr 'a-z-' 'A-Z_')"; }
 spub_for() { eval "echo \$SPUB_$(echo "$1" | tr 'a-z-' 'A-Z_')"; }
 
+# ─── Iroh seeds + probe-discover endpoint ids ────────────────────
+# iroh URLs need <endpoint_id>; we compute it via a short-lived
+# probe boot of each bridge's iroh listener, then scrape the
+# "iroh listener bound — id=…" line and kill the probe.
+iroh_id_for() { eval "echo \$IROH_ID_$(echo "$1" | tr 'a-z-' 'A-Z_')"; }
+iroh_seed_for() { eval "echo \$IROH_SEED_$(echo "$1" | tr 'a-z-' 'A-Z_')"; }
+
+if [ "$IROH" = 1 ]; then
+  echo "[1b/6] Seeding iroh secret keys + probing endpoint ids…"
+  # Deterministic per-bridge seed: sha256("drift-corp-<bridge>")[:32 bytes]
+  for b in "${BRIDGES[@]}"; do
+    seed=$(printf "drift-corp-%s" "$b" | sha256sum | cut -d' ' -f1)
+    v=$(echo "$b" | tr 'a-z-' 'A-Z_')
+    declare -x "IROH_SEED_$v=$seed"
+  done
+
+  # Spawn each bridge with just an iroh listener, no federation.
+  for b in "${BRIDGES[@]}"; do
+    fport=$(fed_port "$b")
+    seed=$(iroh_seed_for "$b")
+    DRIFT_IROH_SECRET_HEX="$seed" \
+      "$DRIFT_BIN" --identity "$IDENT_DIR/$b.key" bridge \
+      --listen iroh://0.0.0.0:${fport} \
+      > "$LOG_DIR/probe-$b.log" 2>&1 &
+    echo $! > "$PID_DIR/probe-$b.pid"
+  done
+  sleep 4
+
+  # Scrape ids
+  for b in "${BRIDGES[@]}"; do
+    id=$(grep -oE 'id=[0-9a-f]{64}' "$LOG_DIR/probe-$b.log" | head -1 | cut -d= -f2)
+    if [ -z "$id" ]; then
+      echo "FAILED to scrape iroh id for $b — check $LOG_DIR/probe-$b.log" >&2
+      exit 1
+    fi
+    v=$(echo "$b" | tr 'a-z-' 'A-Z_')
+    declare -x "IROH_ID_$v=$id"
+  done
+
+  # Kill probe bridges
+  for b in "${BRIDGES[@]}"; do
+    if [ -f "$PID_DIR/probe-$b.pid" ]; then
+      kill "$(cat "$PID_DIR/probe-$b.pid")" 2>/dev/null || true
+      rm -f "$PID_DIR/probe-$b.pid"
+    fi
+  done
+  sleep 2
+  pkill -f "drift.*--listen iroh" 2>/dev/null || true
+  sleep 1
+fi
+
 # ─── Start bridges ───────────────────────────────────────────────
 echo "[2/6] Spawning 17 bridges as native processes…"
 for b in "${BRIDGES[@]}"; do
@@ -169,13 +227,29 @@ for b in "${BRIDGES[@]}"; do
   feds=""
   for p in $(peers_of "$b"); do
     pp=$(fed_port "$p")
-    feds="$feds --federate ${FED_SCHEME}://127.0.0.1:${pp}@$(pub_for "$p")"
+    if [ "$IROH" = 1 ]; then
+      pid=$(iroh_id_for "$p")
+      feds="$feds --federate iroh://${pid}@127.0.0.1:${pp}@$(pub_for "$p")"
+    else
+      feds="$feds --federate ${FED_SCHEME}://127.0.0.1:${pp}@$(pub_for "$p")"
+    fi
   done
-  "$DRIFT_BIN" --identity "$IDENT_DIR/$b.key" bridge \
-    --listen udp://127.0.0.1:${uport} \
-    --listen ${FED_SCHEME}://127.0.0.1:${fport} \
-    $feds \
-    > "$LOG_DIR/bridge-$b.log" 2>&1 &
+
+  if [ "$IROH" = 1 ]; then
+    seed=$(iroh_seed_for "$b")
+    DRIFT_IROH_SECRET_HEX="$seed" \
+      "$DRIFT_BIN" --identity "$IDENT_DIR/$b.key" bridge \
+      --listen udp://127.0.0.1:${uport} \
+      --listen iroh://0.0.0.0:${fport} \
+      $feds \
+      > "$LOG_DIR/bridge-$b.log" 2>&1 &
+  else
+    "$DRIFT_BIN" --identity "$IDENT_DIR/$b.key" bridge \
+      --listen udp://127.0.0.1:${uport} \
+      --listen ${FED_SCHEME}://127.0.0.1:${fport} \
+      $feds \
+      > "$LOG_DIR/bridge-$b.log" 2>&1 &
+  fi
   echo $! > "$PID_DIR/bridge-$b.pid"
 done
 

@@ -5606,9 +5606,14 @@ impl Inner {
                             if let Some(suppressed) =
                                 self.drop_warn_throttle.tick_or_count()
                             {
+                                let (pkt_diag, peer_diag, hs_diag) =
+                                    self.auth_fail_diag(data).await;
                                 warn!(
                                     error = %e,
                                     ?src,
+                                    pkt = %pkt_diag,
+                                    peer = %peer_diag,
+                                    state = %hs_diag,
                                     suppressed,
                                     "dropped invalid short-header packet"
                                 );
@@ -5656,9 +5661,14 @@ impl Inner {
                         if let Some(suppressed) =
                             self.drop_warn_throttle.tick_or_count()
                         {
+                            let (pkt_diag, peer_diag, hs_diag) =
+                                self.auth_fail_diag(data).await;
                             warn!(
                                 error = %e,
                                 ?src,
+                                pkt = %pkt_diag,
+                                peer = %peer_diag,
+                                state = %hs_diag,
                                 suppressed,
                                 "dropped invalid packet"
                             );
@@ -5777,6 +5787,54 @@ impl Inner {
             federated_from: None,
             federated_via_bridge: None,
         }))
+    }
+
+    /// Best-effort packet inspection for the rate-limited
+    /// "dropped invalid packet" warn sites. Returns
+    /// `(pkt_diag, peer_diag, hs_diag)` to add diagnostic
+    /// context. Throttled callers only — does a cid_map lookup
+    /// and one peer-shard lock.
+    async fn auth_fail_diag(&self, data: &[u8]) -> (String, String, String) {
+        if crate::short_header::is_short_header(data) {
+            if let Ok((cid, seq, _)) = crate::short_header::decode_short(data) {
+                let pid_opt = {
+                    let map = self.cid_map.lock().unwrap();
+                    map.get(&cid).copied()
+                };
+                if let Some(pid) = pid_opt {
+                    let peers = self.peers.lock_for(&pid).await;
+                    let hs = peers.get(&pid).map_or("missing", |p| match &p.handshake {
+                        HandshakeState::Pending => "pending",
+                        HandshakeState::AwaitingAck { .. } => "awaiting_ack",
+                        HandshakeState::AwaitingData { .. } => "awaiting_data",
+                        HandshakeState::Established { prev, .. } => {
+                            if prev.is_some() { "established+prev" } else { "established" }
+                        }
+                    });
+                    let cached_addr = peers.get(&pid).map(|p| p.addr.to_string()).unwrap_or_default();
+                    return (
+                        format!("short:cid=0x{:04x}:seq={}", cid, seq),
+                        format!("known:{}:cached={}", hex::encode(pid), cached_addr),
+                        hs.to_string(),
+                    );
+                }
+                return (
+                    format!("short:cid=0x{:04x}:seq={}", cid, seq),
+                    "unknown_cid".to_string(),
+                    "n/a".to_string(),
+                );
+            }
+        }
+        if data.len() >= HEADER_LEN {
+            if let Ok(h) = Header::decode(&data[..HEADER_LEN]) {
+                return (
+                    format!("long:{:?}:seq={}", h.packet_type, h.seq),
+                    format!("src={}:dst={}", hex::encode(h.src_id), hex::encode(h.dst_id)),
+                    "n/a".to_string(),
+                );
+            }
+        }
+        ("undecodable".to_string(), "?".to_string(), "?".to_string())
     }
 
     async fn process_incoming(
