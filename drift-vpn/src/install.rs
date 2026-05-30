@@ -528,7 +528,7 @@ mod tests {
         let y: i32 = parts[0].parse().unwrap();
         let m: u32 = parts[1].parse().unwrap();
         let d: u32 = parts[2].parse().unwrap();
-        assert!(y >= 2024 && y <= 2100, "year out of range: {}", y);
+        assert!((2024..=2100).contains(&y), "year out of range: {}", y);
         assert!((1..=12).contains(&m), "month: {}", m);
         assert!((1..=31).contains(&d), "day: {}", d);
     }

@@ -57,7 +57,11 @@ jobs:
             fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # --locked dragged in a stale `proc-macro-error v1.0.4` which
+        # references `rustc_layout_scalar_valid_range_start` — an
+        # internal attribute that recent stable rustc removed. Use
+        # registry-latest so the resolver picks current deps.
+        run: cargo install cargo-fuzz
 
       - name: Regenerate seed corpus
         run: cargo run --example fuzz_seeds -p drift
