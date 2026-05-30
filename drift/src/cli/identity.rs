@@ -78,7 +78,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Decode a hex string to bytes.
 pub fn from_hex(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         bail!("hex string must have even length");
     }
     (0..s.len())

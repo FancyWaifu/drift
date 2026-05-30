@@ -29,6 +29,7 @@ fn make_id(idx: u8) -> Identity {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::needless_range_loop)]
 async fn three_udp_and_three_tcp_all_pairs() {
     let fast_cfg = TransportConfig {
         accept_any_peer: true,
@@ -86,7 +87,7 @@ async fn three_udp_and_three_tcp_all_pairs() {
         // Attach bridge side to the bridge.
         let bridge_tcp_io: Arc<dyn drift::io::PacketIO> =
             Arc::new(TcpPacketIO::new(bridge_side).unwrap());
-        bridge.add_interface(&format!("tcp-{}", i), bridge_tcp_io);
+        bridge.add_interface(format!("tcp-{}", i), bridge_tcp_io);
 
         // Peer's transport runs over TCP.
         let peer_tcp_io: Arc<dyn drift::io::PacketIO> =

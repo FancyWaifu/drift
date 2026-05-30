@@ -98,7 +98,7 @@ pub struct Failover {
     /// thrashing on real WAN is easy to misconfigure.
     #[serde(default)]
     pub rtt_multiplier: f32,
-    /// Hard kill switch. Set to false in the [failover] section
+    /// Hard kill switch. Set to false in the `[failover]` section
     /// to disable the supervisor for all peers. Default true.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -116,10 +116,18 @@ impl Default for Failover {
     }
 }
 
-fn default_check_interval_ms() -> u64 { 2_000 }
-fn default_stale_secs() -> u64 { 10 }
-fn default_hold_secs() -> u64 { 30 }
-fn default_true() -> bool { true }
+fn default_check_interval_ms() -> u64 {
+    2_000
+}
+fn default_stale_secs() -> u64 {
+    10
+}
+fn default_hold_secs() -> u64 {
+    30
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Interface {
@@ -187,6 +195,7 @@ pub struct Peer {
     /// Periodic keepalive interval in seconds. Sends a tiny
     /// padding packet so NATs don't time out the path. Default
     /// off.
+    #[allow(dead_code)]
     pub keepalive: Option<u64>,
     /// Bridge URL + pubkey to reach this peer through, when
     /// `endpoint`/`endpoints` aren't set OR when both peers are
@@ -407,8 +416,7 @@ impl Config {
         }
 
         for (i, p) in self.peers.iter().enumerate() {
-            p.pubkey_bytes()
-                .with_context(|| format!("peer #{}", i))?;
+            p.pubkey_bytes().with_context(|| format!("peer #{}", i))?;
             if p.allowed_ips.is_empty() {
                 return Err(anyhow!(
                     "peer #{} ({}) has no allowed_ips — VPN can't route to it",
@@ -427,18 +435,16 @@ impl Config {
             // spec format here so the daemon-side code can
             // assume a parseable URL + pubkey.
             if let Some(spec) = &p.via_bridge {
-                parse_bridge_spec(spec).with_context(|| {
-                    format!("peer #{} via_bridge {:?}", i, spec)
-                })?;
+                parse_bridge_spec(spec)
+                    .with_context(|| format!("peer #{} via_bridge {:?}", i, spec))?;
             }
             // v0.1.2: validate each entry in `via_bridges` too.
             // Same parse_bridge_spec check; bad entries are
             // rejected before the daemon tries to use them.
             if let Some(list) = &p.via_bridges {
                 for (j, spec) in list.iter().enumerate() {
-                    parse_bridge_spec(spec).with_context(|| {
-                        format!("peer #{} via_bridges[{}] {:?}", i, j, spec)
-                    })?;
+                    parse_bridge_spec(spec)
+                        .with_context(|| format!("peer #{} via_bridges[{}] {:?}", i, j, spec))?;
                 }
             }
             // v0.16: validate via_bridges_auto shorthand. The
@@ -447,13 +453,12 @@ impl Config {
             // that can't propagate errors; we re-parse here at
             // load time so malformed specs are rejected loudly.
             if let Some(spec) = &p.via_bridges_auto {
-                parse_via_bridges_auto_spec(spec).with_context(|| {
-                    format!("peer #{} via_bridges_auto {:?}", i, spec)
-                })?;
+                parse_via_bridges_auto_spec(spec)
+                    .with_context(|| format!("peer #{} via_bridges_auto {:?}", i, spec))?;
             }
             if let Some(tb) = &p.target_bridge {
-                let raw = hex::decode(tb)
-                    .with_context(|| format!("peer #{} target_bridge hex", i))?;
+                let raw =
+                    hex::decode(tb).with_context(|| format!("peer #{} target_bridge hex", i))?;
                 if raw.len() != 32 {
                     return Err(anyhow!(
                         "peer #{} target_bridge must be 64 hex chars (32 bytes), got {}",
@@ -565,7 +570,9 @@ struct ParsedAutoSpec {
 
 /// Parse a `via_bridges_auto` spec:
 ///
+/// ```text
 ///     host@<bridge-pubkey-hex>[?scheme=port&scheme=port&…]
+/// ```
 ///
 /// The optional `?` query maps scheme names to ports or to the
 /// literal `off` / `none` to disable. See `DEFAULT_AUTO_SCHEMES`
@@ -712,8 +719,8 @@ pub fn parse_bridge_spec(spec: &str) -> Result<(String, [u8; 32])> {
             url
         ));
     }
-    let raw = hex::decode(hex_pub)
-        .with_context(|| format!("decoding bridge pubkey {:?}", hex_pub))?;
+    let raw =
+        hex::decode(hex_pub).with_context(|| format!("decoding bridge pubkey {:?}", hex_pub))?;
     if raw.len() != 32 {
         return Err(anyhow!(
             "bridge pubkey must be 32 bytes (64 hex chars), got {}",
@@ -730,11 +737,9 @@ mod tests {
     use super::*;
 
     // Valid 64-hex-char pubkey for test fixtures.
-    const PUB_HEX: &str =
-        "0101010101010101010101010101010101010101010101010101010101010101";
+    const PUB_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101";
     // Different pubkey for bridge fixtures.
-    const BRIDGE_PUB_HEX: &str =
-        "0202020202020202020202020202020202020202020202020202020202020202";
+    const BRIDGE_PUB_HEX: &str = "0202020202020202020202020202020202020202020202020202020202020202";
 
     /// Minimal valid TOML body. Callers can append `[[peer]]`
     /// blocks or override [interface] fields by string formatting.
@@ -902,9 +907,7 @@ endpoint    = "udp://198.51.100.7:51820"
         // via_bridge present + MTU above the federation-envelope
         // ceiling. Default MTU (1340) is already at the edge; set
         // a knowingly-too-large 1400 to trip the check.
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1400",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1400");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -932,9 +935,7 @@ via_bridge  = "udp://192.0.2.1:51820@{bridge}"
         // from MAX_PAYLOAD (1348) gives max_safe_mtu = 1202. The
         // default MTU (1340) is already too large when via_bridge
         // is used — operators have to set it explicitly.
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1048,7 +1049,10 @@ via_bridges = [
             bridge = BRIDGE_PUB_HEX,
         ));
         let cfg: Config = toml::from_str(&body).expect("toml parse");
-        let list = cfg.peers[0].via_bridges.as_deref().expect("via_bridges set");
+        let list = cfg.peers[0]
+            .via_bridges
+            .as_deref()
+            .expect("via_bridges set");
         assert_eq!(list.len(), 3);
         assert!(list[0].starts_with("udp://"));
         assert!(list[1].starts_with("h2s://"));
@@ -1089,9 +1093,7 @@ via_bridges = [
         // `mtu = 1200` keeps us under the via_bridge MTU cap so
         // this test focuses on the per-entry parse error, not
         // the (separately-tested) MTU validation.
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1152,7 +1154,8 @@ via_bridges = ["malformed-no-scheme"]
         ];
         for (scheme, port) in &want {
             assert!(
-                out.iter().any(|e| e.starts_with(scheme) && e.contains(port)),
+                out.iter()
+                    .any(|e| e.starts_with(scheme) && e.contains(port)),
                 "no {} entry with port {} in {:?}",
                 scheme,
                 port,
@@ -1163,9 +1166,7 @@ via_bridges = ["malformed-no-scheme"]
 
     #[test]
     fn via_bridges_auto_rejects_scheme_prefix() {
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1184,9 +1185,7 @@ via_bridges_auto = "udp://198.51.100.42@{bridge}"
 
     #[test]
     fn via_bridges_auto_rejects_explicit_port() {
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1205,9 +1204,7 @@ via_bridges_auto = "198.51.100.42:51820@{bridge}"
 
     #[test]
     fn via_bridges_auto_rejects_ipv6_literal() {
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1228,9 +1225,7 @@ via_bridges_auto = "2001:db8::1@{bridge}"
     fn via_bridges_auto_combines_with_explicit_bridges() {
         // Operator pins one explicit bridge as #1, lets the
         // auto-expansion fill the rest.
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1270,7 +1265,11 @@ via_bridges_auto = "198.51.100.42@{bridge}"
             .iter()
             .find(|e| e.starts_with("udp://"))
             .expect("udp candidate");
-        assert!(udp.contains(":51820@"), "udp port should be default: {}", udp);
+        assert!(
+            udp.contains(":51820@"),
+            "udp port should be default: {}",
+            udp
+        );
     }
 
     #[test]
@@ -1278,7 +1277,13 @@ via_bridges_auto = "198.51.100.42@{bridge}"
         for off_value in &["off", "OFF", "none", "None"] {
             let spec = format!("example.com@{}?dns={}", BRIDGE_PUB_HEX, off_value);
             let out = expand_via_bridges_auto(&spec);
-            assert_eq!(out.len(), 8, "expected DNS skipped via {:?}: {:?}", off_value, out);
+            assert_eq!(
+                out.len(),
+                8,
+                "expected DNS skipped via {:?}: {:?}",
+                off_value,
+                out
+            );
             assert!(
                 !out.iter().any(|e| e.starts_with("dns://")),
                 "dns leaked through {:?}: {:?}",
@@ -1314,16 +1319,18 @@ via_bridges_auto = "198.51.100.42@{bridge}"
         let out = expand_via_bridges_auto(&spec);
         // 9 defaults − 1 disabled (dns) + 1 added (bluetooth) = 9.
         assert_eq!(out.len(), 9, "got {:?}", out);
-        assert!(out.iter().any(|e| e.starts_with("h2s://") && e.contains(":8443@")));
+        assert!(out
+            .iter()
+            .any(|e| e.starts_with("h2s://") && e.contains(":8443@")));
         assert!(!out.iter().any(|e| e.starts_with("dns://")));
-        assert!(out.iter().any(|e| e.starts_with("bluetooth://") && e.contains(":1234@")));
+        assert!(out
+            .iter()
+            .any(|e| e.starts_with("bluetooth://") && e.contains(":1234@")));
     }
 
     #[test]
     fn auto_query_validates_bad_port() {
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]
@@ -1347,8 +1354,7 @@ via_bridges_auto = "example.com@{bridge}?dns=not-a-port"
     #[test]
     fn auto_query_validates_port_zero() {
         let spec = format!("example.com@{}?dns=0", BRIDGE_PUB_HEX);
-        let err = parse_via_bridges_auto_spec(&spec)
-            .expect_err("port=0 must fail");
+        let err = parse_via_bridges_auto_spec(&spec).expect_err("port=0 must fail");
         assert!(
             format!("{:#}", err).contains("ports start at 1"),
             "err: {:#}",
@@ -1359,32 +1365,21 @@ via_bridges_auto = "example.com@{bridge}?dns=not-a-port"
     #[test]
     fn auto_query_rejects_duplicate_scheme() {
         let spec = format!("example.com@{}?dns=5353&dns=5354", BRIDGE_PUB_HEX);
-        let err = parse_via_bridges_auto_spec(&spec)
-            .expect_err("duplicate key must fail");
-        assert!(
-            format!("{:#}", err).contains("duplicate"),
-            "err: {:#}",
-            err
-        );
+        let err = parse_via_bridges_auto_spec(&spec).expect_err("duplicate key must fail");
+        assert!(format!("{:#}", err).contains("duplicate"), "err: {:#}", err);
     }
 
     #[test]
     fn auto_query_rejects_empty_query() {
         let spec = format!("example.com@{}?", BRIDGE_PUB_HEX);
-        let err = parse_via_bridges_auto_spec(&spec)
-            .expect_err("empty query must fail");
-        assert!(
-            format!("{:#}", err).contains("empty"),
-            "err: {:#}",
-            err
-        );
+        let err = parse_via_bridges_auto_spec(&spec).expect_err("empty query must fail");
+        assert!(format!("{:#}", err).contains("empty"), "err: {:#}", err);
     }
 
     #[test]
     fn auto_query_rejects_missing_equals() {
         let spec = format!("example.com@{}?just-a-key", BRIDGE_PUB_HEX);
-        let err = parse_via_bridges_auto_spec(&spec)
-            .expect_err("missing `=` must fail");
+        let err = parse_via_bridges_auto_spec(&spec).expect_err("missing `=` must fail");
         assert!(
             format!("{:#}", err).contains("scheme=port"),
             "err: {:#}",
@@ -1395,8 +1390,7 @@ via_bridges_auto = "example.com@{bridge}?dns=not-a-port"
     #[test]
     fn auto_query_rejects_empty_value() {
         let spec = format!("example.com@{}?dns=", BRIDGE_PUB_HEX);
-        let err = parse_via_bridges_auto_spec(&spec)
-            .expect_err("empty value must fail");
+        let err = parse_via_bridges_auto_spec(&spec).expect_err("empty value must fail");
         assert!(
             format!("{:#}", err).contains("empty value"),
             "err: {:#}",
@@ -1426,9 +1420,7 @@ via_bridges_auto = "example.com@{bridge}?dns=not-a-port"
     fn validate_accepts_via_bridges_with_mixed_schemes() {
         // The exact use case from the session: hostile-network
         // fallback chain.
-        let mut body = minimal_interface(
-            "listen = \"udp://0.0.0.0:51820\"\nmtu = 1200",
-        );
+        let mut body = minimal_interface("listen = \"udp://0.0.0.0:51820\"\nmtu = 1200");
         body.push_str(&format!(
             r#"
 [[peer]]

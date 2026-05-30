@@ -117,7 +117,7 @@ fn scheme_default_rank(spec: &str) -> u8 {
 /// Each task runs `connect_federate` (or the UDP equivalent)
 /// AND the establishment poll inside the same wall-clock
 /// window, so the measurement captures the real cost: connect
-/// + crypto + handshake round-trips. The previous design
+/// plus crypto and handshake round-trips. The previous design
 /// registered bridges sequentially before probing — and on a
 /// LAN where handshakes complete in 5-10 ms each, all 9 had
 /// reached Established before the probe loop even ran. The
@@ -242,7 +242,10 @@ pub async fn register_and_probe(
     results.extend(failed);
 
     let total_elapsed = started.elapsed();
-    let succeeded = results.iter().filter(|m| m.handshake_time.is_some()).count();
+    let succeeded = results
+        .iter()
+        .filter(|m| m.handshake_time.is_some())
+        .count();
     info!(
         candidates = total,
         succeeded,
@@ -273,12 +276,9 @@ pub async fn register_and_probe(
 /// `add_peer` (+ HELLO kick) for UDP, `connect_federate` for
 /// stream-based schemes. Returns the bridge's `PeerId` and the
 /// raw pubkey for the caller to track.
-async fn register_one(
-    transport: &Transport,
-    spec: &str,
-) -> anyhow::Result<(PeerId, [u8; 32])> {
-    let (url, bridge_pub) = crate::config::parse_bridge_spec(spec)
-        .context("parsing bridge spec")?;
+async fn register_one(transport: &Transport, spec: &str) -> anyhow::Result<(PeerId, [u8; 32])> {
+    let (url, bridge_pub) =
+        crate::config::parse_bridge_spec(spec).context("parsing bridge spec")?;
     let scheme = url.split("://").next().unwrap_or("");
     let bridge_pid = if scheme == "udp" {
         let addr = crate::daemon::resolve_endpoint(&url)

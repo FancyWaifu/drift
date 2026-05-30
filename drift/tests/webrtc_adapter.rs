@@ -69,9 +69,7 @@ async fn offerer_dc(
 
 /// Answerer-side: wait for the inbound `on_data_channel` event,
 /// then wait for that channel's `on_open`.
-fn answerer_dc(
-    pc: Arc<RTCPeerConnection>,
-) -> tokio::sync::oneshot::Receiver<Arc<RTCDataChannel>> {
+fn answerer_dc(pc: Arc<RTCPeerConnection>) -> tokio::sync::oneshot::Receiver<Arc<RTCDataChannel>> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
@@ -122,8 +120,7 @@ async fn handshake_and_data_over_webrtc() {
     wait_for_ice_complete(pc_a.clone()).await;
     let a_local = pc_a.local_description().await.unwrap();
 
-    pc_b
-        .set_remote_description(RTCSessionDescription::offer(a_local.sdp).unwrap())
+    pc_b.set_remote_description(RTCSessionDescription::offer(a_local.sdp).unwrap())
         .await
         .unwrap();
     let answer = pc_b.create_answer(None).await.unwrap();
@@ -131,8 +128,7 @@ async fn handshake_and_data_over_webrtc() {
     wait_for_ice_complete(pc_b.clone()).await;
     let b_local = pc_b.local_description().await.unwrap();
 
-    pc_a
-        .set_remote_description(RTCSessionDescription::answer(b_local.sdp).unwrap())
+    pc_a.set_remote_description(RTCSessionDescription::answer(b_local.sdp).unwrap())
         .await
         .unwrap();
 
@@ -170,7 +166,9 @@ async fn handshake_and_data_over_webrtc() {
             .unwrap(),
     );
     let bob = Arc::new(
-        Transport::bind_with_io(io_b, bob_id, cfg.clone()).await.unwrap(),
+        Transport::bind_with_io(io_b, bob_id, cfg.clone())
+            .await
+            .unwrap(),
     );
 
     // Pre-register peers (placeholder addrs, since WebRTC
@@ -184,7 +182,10 @@ async fn handshake_and_data_over_webrtc() {
         .unwrap();
 
     // ── 6. Send DATA, expect it on the other side ─────────────
-    alice.send_data(&bob_peer, b"hello-over-webrtc", 0, 0).await.unwrap();
+    alice
+        .send_data(&bob_peer, b"hello-over-webrtc", 0, 0)
+        .await
+        .unwrap();
     let pkt = tokio::time::timeout(Duration::from_secs(10), bob.recv())
         .await
         .expect("HELLO/HELLO_ACK/DATA over WebRTC timed out")

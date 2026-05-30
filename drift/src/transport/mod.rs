@@ -38,8 +38,8 @@ pub use federated::{
     build as build_federated, build_directory, build_directory_v3, build_directory_v4,
     build_ticket, decode_ticket, encode_ticket, parse as parse_federated, parse_directory,
     parse_directory_v3, parse_directory_v4, ticket_signed_msg, verify_ticket, FederatedEnvelope,
-    PresenceTicket, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES,
-    MAX_DIRECTORY_ENTRIES_V4, TICKET_LEN, UNKNOWN_BRIDGE_PUB,
+    PresenceTicket, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_ENTRIES_V4, TICKET_LEN,
+    UNKNOWN_BRIDGE_PUB,
 };
 pub use find_peer::{
     build_find_peer, build_find_peer_hashed, build_peer_gone, build_peer_here, hash_target_pub,
@@ -332,7 +332,7 @@ pub struct TransportConfig {
     /// non-zero, the initial handshake send is delayed by a
     /// uniformly random `0..handshake_jitter_ms` ms. Retries
     /// after the initial send use `handshake_retry_base_ms`
-    /// + exponential backoff and are NOT additionally
+    /// plus exponential backoff and are NOT additionally
     /// jittered (the backoff already disperses them).
     ///
     /// Purpose: when many clients reconnect after a server
@@ -351,11 +351,12 @@ pub struct TransportConfig {
 /// Discovery-layer posture for a `Transport`. Default is `Open`
 /// (Phase A behavior). Privacy-conscious deployments can pick a
 /// stricter mode without disabling federation altogether.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FindPeerMode {
     /// Full Phase A/B participation: originate `FindPeer` for
     /// unknown targets, answer queries for our local clients,
     /// forward queries we can't answer to other federation peers.
+    #[default]
     Open,
     /// Answer local hits, but do NOT forward queries from other
     /// bridges. Useful for "leaf" bridges that participate in
@@ -372,12 +373,6 @@ pub enum FindPeerMode {
     /// queries are dropped without reply. Clients must use
     /// explicit `via_bridge` entries.
     Disabled,
-}
-
-impl Default for FindPeerMode {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 impl TransportConfig {
@@ -834,8 +829,7 @@ pub(crate) struct Inner {
     /// keys. Optional and `Arc<StdMutex<Option<_>>>` so
     /// `Inner` doesn't pay any cost when no observer is
     /// installed.
-    pub(crate) session_reset_tx:
-        Arc<StdMutex<Option<mpsc::UnboundedSender<PeerId>>>>,
+    pub(crate) session_reset_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<PeerId>>>>,
     /// Federation table — bridge-pubkey → PeerId mapping. Used by
     /// the `PacketType::Federated` handler to look up the next-hop
     /// bridge by pubkey (the only routing-relevant info in the
@@ -849,8 +843,7 @@ pub(crate) struct Inner {
     /// shape is "every peer-bridge is explicitly configured,"
     /// modeled on Matrix's `.well-known/matrix/server` discovery
     /// pattern rather than DRIFT's beacon-driven mesh.
-    pub(crate) federation_table:
-        Arc<StdMutex<StdHashMap<[u8; 32], PeerId>>>,
+    pub(crate) federation_table: Arc<StdMutex<StdHashMap<[u8; 32], PeerId>>>,
 
     /// Directory of remote clients known to be reachable via one
     /// of our federation peers. Populated by
@@ -869,9 +862,7 @@ pub(crate) struct Inner {
     /// Security: only federation peers (entries in
     /// `federation_table`) can write to this table — see
     /// `handle_federation_directory`.
-    pub(crate) peer_directory: Arc<
-        StdMutex<StdHashMap<[u8; 32], (PeerId, std::time::Instant)>>,
-    >,
+    pub(crate) peer_directory: Arc<StdMutex<StdHashMap<[u8; 32], (PeerId, std::time::Instant)>>>,
 
     /// Phase C side-table: hop count per directory entry. Kept
     /// separate from `peer_directory` so existing reader sites
@@ -908,8 +899,7 @@ pub(crate) struct Inner {
     /// or v4 announcer with `filter_bytes_len = 0`) is queried
     /// unconditionally — bloom is purely a NARROWING optimization
     /// for protocols that support it; absence is back-compat.
-    pub(crate) peer_bloom_filters:
-        Arc<StdMutex<StdHashMap<PeerId, dp_bloom::DpBloomFilter>>>,
+    pub(crate) peer_bloom_filters: Arc<StdMutex<StdHashMap<PeerId, dp_bloom::DpBloomFilter>>>,
 
     /// Phase F.8: per-federation-peer soft-fault counter. A
     /// fault is recorded when a `pending_find` times out and
@@ -938,11 +928,9 @@ pub(crate) struct Inner {
     /// (no eviction logic — the absence of the client from
     /// `established_client_pubkeys` excludes them from the
     /// announcement anyway).
-    pub(crate) presence_tickets:
-        Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
+    pub(crate) presence_tickets: Arc<StdMutex<StdHashMap<[u8; 32], federated::PresenceTicket>>>,
 
     // ─── Federation peer discovery (FEDERATION_DISCOVERY.md §6) ──
-
     /// In-flight `FindPeer` queries we originated and are waiting
     /// on. Keyed by target client pubkey. When a matching `PeerHere`
     /// arrives, the `waiters` are released (the queued Federated
@@ -954,8 +942,7 @@ pub(crate) struct Inner {
     /// (Phase B) reuses the same coalescing — each subsequent query
     /// for the same target appends to `waiters` without firing a
     /// duplicate FindPeer.
-    pub(crate) pending_finds:
-        Arc<StdMutex<StdHashMap<[u8; 32], PendingFind>>>,
+    pub(crate) pending_finds: Arc<StdMutex<StdHashMap<[u8; 32], PendingFind>>>,
 
     /// `FindPeer` query IDs we've already processed, kept for
     /// `QUERY_DEDUP_TTL_MS` so repeats (loops, retransmits, broken
@@ -1245,7 +1232,9 @@ impl Transport {
         }
 
         let beacon_bg = inner.clone();
-        tasks.push(tokio::spawn(async move { beacon_bg.run_beacon_loop().await }));
+        tasks.push(tokio::spawn(
+            async move { beacon_bg.run_beacon_loop().await },
+        ));
 
         let retry_bg = inner.clone();
         tasks.push(tokio::spawn(async move {
@@ -1257,7 +1246,9 @@ impl Transport {
         // disabled saves one timer per transport.
         if rtt_probe_interval_ms > 0 {
             let rtt_bg = inner.clone();
-            tasks.push(tokio::spawn(async move { rtt_bg.run_rtt_probe_loop().await }));
+            tasks.push(tokio::spawn(
+                async move { rtt_bg.run_rtt_probe_loop().await },
+            ));
         }
 
         // Route sweep loop: purges stale mesh routes whose
@@ -1266,14 +1257,18 @@ impl Transport {
         // correctness requirement for the RTT-weighted
         // router, not an optimization.
         let sweep_bg = inner.clone();
-        tasks.push(tokio::spawn(async move { sweep_bg.run_route_sweep_loop().await }));
+        tasks.push(tokio::spawn(async move {
+            sweep_bg.run_route_sweep_loop().await
+        }));
 
         // Background sweep for federation-discovery state.
         // Bounded memory growth for `pending_finds`,
         // `recent_queries`, `neg_cache`, `forwarded_queries` —
         // see `run_find_peer_gc_loop`.
         let gc_bg = inner.clone();
-        tasks.push(tokio::spawn(async move { gc_bg.run_find_peer_gc_loop().await }));
+        tasks.push(tokio::spawn(
+            async move { gc_bg.run_find_peer_gc_loop().await },
+        ));
 
         // Phase F: cover-traffic decoy queries. Only spawned
         // when the operator opts in via
@@ -1384,13 +1379,13 @@ impl Transport {
         let mut listener: Box<dyn crate::io::Listener> = if scheme == "udp"
             && config.udp_recv_buffer_bytes.is_some()
         {
-            let addr = crate::io::parse_ip_addr(addr_str).await.map_err(DriftError::Io)?;
-            let udp = crate::io::UdpListenerIO::bind_with_recv_buffer(
-                addr,
-                config.udp_recv_buffer_bytes,
-            )
-            .await
-            .map_err(DriftError::Io)?;
+            let addr = crate::io::parse_ip_addr(addr_str)
+                .await
+                .map_err(DriftError::Io)?;
+            let udp =
+                crate::io::UdpListenerIO::bind_with_recv_buffer(addr, config.udp_recv_buffer_bytes)
+                    .await
+                    .map_err(DriftError::Io)?;
             Box::new(udp) as Box<dyn crate::io::Listener>
         } else {
             crate::io::make_listener(url)
@@ -1416,9 +1411,7 @@ impl Transport {
             // interfaces live in Transport.tasks already.
             let tx = transport.recv_tx.clone();
             let inner = transport.inner.clone();
-            let tasks_weak = std::sync::Arc::downgrade(
-                &(transport.tasks.handles_arc()),
-            );
+            let tasks_weak = std::sync::Arc::downgrade(&(transport.tasks.handles_arc()));
             transport.tasks.push(tokio::spawn(async move {
                 let mut listener = listener;
                 loop {
@@ -1427,9 +1420,10 @@ impl Transport {
                             let idx = inner.ifaces.add("multi-accept", io);
                             let bg = inner.clone();
                             let tx_clone = tx.clone();
-                            let recv_handle = tokio::spawn(async move {
-                                bg.run_recv_loop_for(tx_clone, idx).await
-                            });
+                            let recv_handle =
+                                tokio::spawn(
+                                    async move { bg.run_recv_loop_for(tx_clone, idx).await },
+                                );
                             // Track the recv-loop handle so it
                             // gets aborted when the Transport
                             // drops. Weak so we don't keep the
@@ -1520,9 +1514,10 @@ impl Transport {
                             let idx = inner.ifaces.add(label.clone(), io);
                             let bg = inner.clone();
                             let tx_clone = tx.clone();
-                            let recv_handle = tokio::spawn(async move {
-                                bg.run_recv_loop_for(tx_clone, idx).await
-                            });
+                            let recv_handle =
+                                tokio::spawn(
+                                    async move { bg.run_recv_loop_for(tx_clone, idx).await },
+                                );
                             if let Some(handles) = tasks_weak.upgrade() {
                                 if let Ok(mut v) = handles.lock() {
                                     v.push(recv_handle);
@@ -1646,18 +1641,14 @@ impl Transport {
             amplification_blocked: m.amplification_blocked.load(Ordering::Relaxed),
             batched_sends: m.batched_sends.load(Ordering::Relaxed),
             unknown_peer_drops: m.unknown_peer_drops.load(Ordering::Relaxed),
-            federation_spoof_drops: m
-                .federation_spoof_drops
-                .load(Ordering::Relaxed),
+            federation_spoof_drops: m.federation_spoof_drops.load(Ordering::Relaxed),
             federation_invalid_tickets_dropped: m
                 .federation_invalid_tickets_dropped
                 .load(Ordering::Relaxed),
             hybrid_pq_handshakes_completed: m
                 .hybrid_pq_handshakes_completed
                 .load(Ordering::Relaxed),
-            hybrid_pq_handshakes_refused: m
-                .hybrid_pq_handshakes_refused
-                .load(Ordering::Relaxed),
+            hybrid_pq_handshakes_refused: m.hybrid_pq_handshakes_refused.load(Ordering::Relaxed),
         }
     }
 
@@ -1878,9 +1869,7 @@ impl Transport {
         // 0.0.0.0:0 is a non-routable placeholder that the
         // mesh router will replace via `learned_route` lookups
         // every send_data call.
-        let placeholder: SocketAddr = "0.0.0.0:0"
-            .parse()
-            .expect("constant addr parses");
+        let placeholder: SocketAddr = "0.0.0.0:0".parse().expect("constant addr parses");
         let inserted_at: Option<SocketAddr> = {
             let mut peers = self.inner.peers.lock_for(&id).await;
             match peers.get(&id) {
@@ -1931,11 +1920,7 @@ impl Transport {
     /// already have been added as a regular peer via `add_peer`
     /// (this method just maps its 32-byte pubkey to its PeerId
     /// for the federation envelope lookup).
-    pub fn register_federation_peer(
-        &self,
-        bridge_pub: [u8; 32],
-        bridge_peer_id: PeerId,
-    ) {
+    pub fn register_federation_peer(&self, bridge_pub: [u8; 32], bridge_peer_id: PeerId) {
         let mut t = self.inner.federation_table.lock().unwrap();
         t.insert(bridge_pub, bridge_peer_id);
     }
@@ -1967,12 +1952,11 @@ impl Transport {
         let (io, addr) = crate::io::make_connector(url)
             .await
             .map_err(DriftError::Io)?;
-        let scheme = url
-            .find("://")
-            .map(|i| &url[..i])
-            .unwrap_or("udp");
+        let scheme = url.find("://").map(|i| &url[..i]).unwrap_or("udp");
         let iface_idx = self.add_interface(format!("{}-federate-out", scheme), io);
-        let peer_id = self.add_peer(target_pubkey, addr, Direction::Initiator).await?;
+        let peer_id = self
+            .add_peer(target_pubkey, addr, Direction::Initiator)
+            .await?;
         // Pin the peer's outbound interface to the newly-attached
         // connector, since interface 0 (the primary) may be a TCP
         // listener placeholder or a different scheme's socket.
@@ -2041,12 +2025,8 @@ impl Transport {
                     // short-circuits to the federated path BEFORE
                     // any handshake-state check, so the placeholder
                     // session state is never read.
-                    let mut peer = Peer::new(
-                        id,
-                        placeholder,
-                        target_client_pub,
-                        Direction::Initiator,
-                    );
+                    let mut peer =
+                        Peer::new(id, placeholder, target_client_pub, Direction::Initiator);
                     peer.federated_via = Some(via_bridge);
                     peer.federated_target_bridge_pub = Some(target_bridge_pub);
                     peers.insert(peer);
@@ -2082,8 +2062,7 @@ impl Transport {
         // Federated envelopes carry a 98-byte header on top of
         // the user payload (32+32+32+2). Subtract that from
         // MAX_PAYLOAD to get the real per-call ceiling.
-        let max_user_payload =
-            MAX_PAYLOAD.saturating_sub(federated::FED_HEADER_LEN);
+        let max_user_payload = MAX_PAYLOAD.saturating_sub(federated::FED_HEADER_LEN);
         if payload.len() > max_user_payload {
             return Err(DriftError::PayloadTooLarge {
                 got: max_user_payload,
@@ -2154,10 +2133,7 @@ impl Transport {
     /// have been queued; failures to individual peers are logged
     /// and otherwise ignored (one fed peer being unreachable
     /// shouldn't prevent the others from receiving the update).
-    pub async fn announce_directory(
-        &self,
-        entries: &[([u8; 32], federated::PresenceTicket)],
-    ) {
+    pub async fn announce_directory(&self, entries: &[([u8; 32], federated::PresenceTicket)]) {
         let peers: Vec<PeerId> = self
             .inner
             .federation_table
@@ -2329,9 +2305,7 @@ impl Transport {
     /// practice every DRIFT client that talks to a bridge calls
     /// `register_presence_to` for its bridge during startup,
     /// so the omission is a non-event in the legitimate case.
-    pub async fn established_client_entries(
-        &self,
-    ) -> Vec<([u8; 32], federated::PresenceTicket)> {
+    pub async fn established_client_entries(&self) -> Vec<([u8; 32], federated::PresenceTicket)> {
         let fed_pubs: std::collections::HashSet<[u8; 32]> = self
             .inner
             .federation_table
@@ -2372,11 +2346,7 @@ impl Transport {
     ///
     /// Callers should re-invoke this periodically (typically at
     /// lifetime_ms / 2) to refresh the bridge's stored copy.
-    pub async fn register_presence_to(
-        &self,
-        bridge: &PeerId,
-        lifetime_ms: u64,
-    ) -> Result<()> {
+    pub async fn register_presence_to(&self, bridge: &PeerId, lifetime_ms: u64) -> Result<()> {
         let bridge_pub = {
             let peers = self.inner.peers.lock_for(bridge).await;
             peers
@@ -2503,11 +2473,7 @@ impl Transport {
         payload: &[u8],
     ) -> Result<()> {
         self.inner
-            .send_typed(
-                via_bridge_peer,
-                PacketType::FederationDirectory,
-                payload,
-            )
+            .send_typed(via_bridge_peer, PacketType::FederationDirectory, payload)
             .await
     }
 
@@ -2556,7 +2522,12 @@ impl Transport {
         let peers = self.inner.peers.lock_for(peer).await;
         peers
             .get(peer)
-            .map(|p| matches!(p.handshake, drift_core::session::HandshakeState::Established { .. }))
+            .map(|p| {
+                matches!(
+                    p.handshake,
+                    drift_core::session::HandshakeState::Established { .. }
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -2998,8 +2969,7 @@ impl Inner {
         {
             let mut peers = self.peers.lock_for(dst).await;
             let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
-            was_awaiting_data =
-                matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+            was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
 
             let preserved_addr = peer.addr;
             let preserved_pub = peer.peer_static_pub;
@@ -3008,12 +2978,8 @@ impl Inner {
             let preserved_auto = peer.auto_registered;
             let preserved_via_mesh = peer.via_mesh;
 
-            let mut fresh = drift_core::session::Peer::new(
-                *dst,
-                preserved_addr,
-                preserved_pub,
-                preserved_dir,
-            );
+            let mut fresh =
+                drift_core::session::Peer::new(*dst, preserved_addr, preserved_pub, preserved_dir);
             fresh.interface_id = preserved_iface;
             fresh.auto_registered = preserved_auto;
             fresh.via_mesh = preserved_via_mesh;
@@ -3090,8 +3056,7 @@ impl Inner {
         };
         if let Some((via_bridge, target_bridge_pub, target_client_pub)) = federated_route {
             // Same payload-size ceiling as send_federated.
-            let max_user_payload =
-                MAX_PAYLOAD.saturating_sub(federated::FED_HEADER_LEN);
+            let max_user_payload = MAX_PAYLOAD.saturating_sub(federated::FED_HEADER_LEN);
             if payload.len() > max_user_payload {
                 return Err(DriftError::PayloadTooLarge {
                     got: max_user_payload,
@@ -3364,8 +3329,7 @@ impl Inner {
         // saturation. Common case (drift-vpn point-to-point) has
         // exactly one peer in by_peer — the HashMap is sized
         // accordingly and the per-batch allocation is tiny.
-        let mut by_peer: StdHashMap<PeerId, Vec<&BatchItem>> =
-            StdHashMap::with_capacity(4);
+        let mut by_peer: StdHashMap<PeerId, Vec<&BatchItem>> = StdHashMap::with_capacity(4);
         for it in &direct_items {
             if it.payload.len() > MAX_PAYLOAD {
                 continue;
@@ -3382,11 +3346,7 @@ impl Inner {
             if !matches!(peer.handshake, HandshakeState::Established { .. }) {
                 continue;
             }
-            let mesh_next_hop = if peer.via_mesh {
-                Some(peer.addr)
-            } else {
-                None
-            };
+            let mesh_next_hop = if peer.via_mesh { Some(peer.addr) } else { None };
             for it in items {
                 if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
                     self.local_peer_id,
@@ -3446,7 +3406,6 @@ impl Inner {
         peers.get(peer_id).map(|p| p.interface_id).unwrap_or(0)
     }
 
-
     /// received. `local_is_initiator` is true on the side
     /// that sent HELLO (the Initiator).
     async fn install_cids(
@@ -3473,7 +3432,10 @@ impl Inner {
         };
 
         self.cid_map.lock().unwrap().insert(my_rx_cid, peer_id);
-        self.peer_out_cid.lock().unwrap().insert(peer_id, peer_rx_cid);
+        self.peer_out_cid
+            .lock()
+            .unwrap()
+            .insert(peer_id, peer_rx_cid);
     }
 
     /// Send a `PacketType::Federated` packet to a peer. The peer
@@ -3545,13 +3507,8 @@ impl Inner {
         // Decrypt with the Federated type tag in AAD.
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -3600,9 +3557,7 @@ impl Inner {
                 // as the source client AND name us as the source
                 // bridge (we're the only bridge they're connected
                 // to from our point of view).
-                if env.source_client_pub != sender_pub
-                    || env.source_bridge_pub != our_pub
-                {
+                if env.source_client_pub != sender_pub || env.source_bridge_pub != our_pub {
                     self.metrics
                         .federation_spoof_drops
                         .fetch_add(1, Ordering::Relaxed);
@@ -3675,13 +3630,11 @@ impl Inner {
                         // properly requires XEdDSA presence
                         // tickets (deferred).
                         existing.federated_via = Some(peer_id);
-                        existing.federated_target_bridge_pub =
-                            Some(env.source_bridge_pub);
+                        existing.federated_target_bridge_pub = Some(env.source_bridge_pub);
                         None
                     }
                     None => {
-                        let placeholder: SocketAddr =
-                            "0.0.0.0:0".parse().expect("constant parses");
+                        let placeholder: SocketAddr = "0.0.0.0:0".parse().expect("constant parses");
                         let mut p = Peer::new(
                             source_peer_id,
                             placeholder,
@@ -3689,8 +3642,7 @@ impl Inner {
                             Direction::Responder,
                         );
                         p.federated_via = Some(peer_id);
-                        p.federated_target_bridge_pub =
-                            Some(env.source_bridge_pub);
+                        p.federated_target_bridge_pub = Some(env.source_bridge_pub);
                         p.auto_registered = true;
                         peers.insert(p);
                         Some(placeholder)
@@ -3781,8 +3733,7 @@ impl Inner {
         // Negating (a or b or c) gives us "target IS a known
         // federation peer we can directly route to" — the fast
         // path.
-        let fed_table_has_target = env.target_bridge_pub
-            != federated::UNKNOWN_BRIDGE_PUB
+        let fed_table_has_target = env.target_bridge_pub != federated::UNKNOWN_BRIDGE_PUB
             && env.target_bridge_pub != our_pub
             && self
                 .federation_table
@@ -3817,42 +3768,40 @@ impl Inner {
             if local_hit {
                 (Some(local_pid), our_pub)
             } else {
-
-            // Directory lookup. Evict the entry if it's older
-            // than DIRECTORY_TTL — let the announcement layer
-            // refresh it. Bridges announce every ~7 s, so 20 s
-            // gives ~3 announce intervals of slack before we
-            // call a silent bridge dead.
-            const DIRECTORY_TTL: std::time::Duration =
-                std::time::Duration::from_secs(20);
-            let mut dir = self.peer_directory.lock().unwrap();
-            let now = std::time::Instant::now();
-            let entry = dir.get(&env.target_client_pub).copied();
-            if let Some((pid, t)) = entry {
-                if now.duration_since(t) > DIRECTORY_TTL {
-                    dir.remove(&env.target_client_pub);
-                    (None, env.target_bridge_pub)
-                } else {
-                    // Look up the announcer's pubkey so we can
-                    // rewrite the envelope's target_bridge_pub.
-                    let pubs = self.federation_table.lock().unwrap();
-                    let announcer_pub = pubs
-                        .iter()
-                        .find_map(|(p, id)| if *id == pid { Some(*p) } else { None });
-                    drop(pubs);
-                    match announcer_pub {
-                        Some(pub_) => (Some(pid), pub_),
-                        // Announcer left the fed table since the
-                        // entry was recorded — stale; drop.
-                        None => {
-                            dir.remove(&env.target_client_pub);
-                            (None, env.target_bridge_pub)
+                // Directory lookup. Evict the entry if it's older
+                // than DIRECTORY_TTL — let the announcement layer
+                // refresh it. Bridges announce every ~7 s, so 20 s
+                // gives ~3 announce intervals of slack before we
+                // call a silent bridge dead.
+                const DIRECTORY_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+                let mut dir = self.peer_directory.lock().unwrap();
+                let now = std::time::Instant::now();
+                let entry = dir.get(&env.target_client_pub).copied();
+                if let Some((pid, t)) = entry {
+                    if now.duration_since(t) > DIRECTORY_TTL {
+                        dir.remove(&env.target_client_pub);
+                        (None, env.target_bridge_pub)
+                    } else {
+                        // Look up the announcer's pubkey so we can
+                        // rewrite the envelope's target_bridge_pub.
+                        let pubs = self.federation_table.lock().unwrap();
+                        let announcer_pub =
+                            pubs.iter()
+                                .find_map(|(p, id)| if *id == pid { Some(*p) } else { None });
+                        drop(pubs);
+                        match announcer_pub {
+                            Some(pub_) => (Some(pid), pub_),
+                            // Announcer left the fed table since the
+                            // entry was recorded — stale; drop.
+                            None => {
+                                dir.remove(&env.target_client_pub);
+                                (None, env.target_bridge_pub)
+                            }
                         }
                     }
+                } else {
+                    (None, env.target_bridge_pub)
                 }
-            } else {
-                (None, env.target_bridge_pub)
-            }
             } // close `if local_hit { … } else { …` opened above
         } else {
             let nh = self
@@ -3902,9 +3851,7 @@ impl Inner {
                     );
                     return Ok(None);
                 }
-                FindPeerMode::Open
-                | FindPeerMode::NoForward
-                | FindPeerMode::OriginateHashed => {
+                FindPeerMode::Open | FindPeerMode::NoForward | FindPeerMode::OriginateHashed => {
                     // Originate normally below. NoForward affects
                     // receive-side behavior, not the originator
                     // side. OriginateHashed flips the wire format
@@ -3958,14 +3905,14 @@ impl Inner {
                 &env.source_client_pub,
                 env.payload,
             );
-            let deadline = now_inst
-                + std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS);
+            let deadline =
+                now_inst + std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS);
             let (should_emit_find, query_id) = {
                 let mut pending = self.pending_finds.lock().unwrap();
                 if let Some(entry) = pending.get_mut(&env.target_client_pub) {
-                    if entry.started_at + std::time::Duration::from_millis(
-                        find_peer::MAX_FIND_DEADLINE_MS,
-                    ) > now_inst
+                    if entry.started_at
+                        + std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS)
+                        > now_inst
                     {
                         // In-flight; coalesce.
                         entry.waiters.push(waiter_bytes);
@@ -3973,10 +3920,7 @@ impl Inner {
                     } else {
                         // Stale entry — replace and re-fire.
                         let mut qid_bytes = [0u8; 8];
-                        rand::RngCore::fill_bytes(
-                            &mut rand::thread_rng(),
-                            &mut qid_bytes,
-                        );
+                        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut qid_bytes);
                         let qid = u64::from_be_bytes(qid_bytes);
                         *entry = PendingFind {
                             query_id: qid,
@@ -3988,10 +3932,7 @@ impl Inner {
                     }
                 } else {
                     let mut qid_bytes = [0u8; 8];
-                    rand::RngCore::fill_bytes(
-                        &mut rand::thread_rng(),
-                        &mut qid_bytes,
-                    );
+                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut qid_bytes);
                     let qid = u64::from_be_bytes(qid_bytes);
                     pending.insert(
                         env.target_client_pub,
@@ -4059,9 +4000,7 @@ impl Inner {
                         fed_peers_bloom
                             .iter()
                             .copied()
-                            .filter(|pid| {
-                                faults.get(pid).copied().unwrap_or(0) < threshold
-                            })
+                            .filter(|pid| faults.get(pid).copied().unwrap_or(0) < threshold)
                             .collect()
                     }
                 };
@@ -4092,10 +4031,7 @@ impl Inner {
                     // the target picks up promptly.
                     self.neg_cache.lock().unwrap().insert(
                         env.target_client_pub,
-                        now_inst
-                            + std::time::Duration::from_millis(
-                                find_peer::NEG_CACHE_TTL_MS,
-                            ),
+                        now_inst + std::time::Duration::from_millis(find_peer::NEG_CACHE_TTL_MS),
                     );
                     // Drop any queued waiters for this target —
                     // they'd just sit until their own deadline.
@@ -4136,8 +4072,7 @@ impl Inner {
                 ) {
                     let mut salt = [0u8; find_peer::FIND_PEER_HASHED_SALT_LEN];
                     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
-                    let target_hash =
-                        find_peer::hash_target_pub(&env.target_client_pub, &salt);
+                    let target_hash = find_peer::hash_target_pub(&env.target_client_pub, &salt);
                     let q = find_peer::FindPeerHashed {
                         salt,
                         target_hash,
@@ -4159,12 +4094,14 @@ impl Inner {
                         originator_bridge: our_pub,
                         originator_query_at_ms: now_ms,
                     };
-                    (find_peer::build_find_peer(&q), PacketType::FindPeer, "plain")
+                    (
+                        find_peer::build_find_peer(&q),
+                        PacketType::FindPeer,
+                        "plain",
+                    )
                 };
                 for peer in &fed_peers {
-                    if let Err(e) =
-                        self.send_typed(peer, pkt_type, &payload).await
-                    {
+                    if let Err(e) = self.send_typed(peer, pkt_type, &payload).await {
                         debug!(
                             error = %e,
                             ?peer,
@@ -4213,17 +4150,17 @@ impl Inner {
         // Decrypt with the FederationDirectory type tag in AAD.
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
-            rx.open(header.seq, PacketType::FederationDirectory as u8, &aad, body)?
+            rx.open(
+                header.seq,
+                PacketType::FederationDirectory as u8,
+                &aad,
+                body,
+            )?
         };
 
         // Only trusted bridges may announce. A client that
@@ -4322,18 +4259,18 @@ impl Inner {
             // For direct claims, verify the standard presence
             // ticket binding (client_pub signed for sender_pub).
             // Transitive claims skip this check — see comment above.
-            if hops == 0 {
-                if federated::verify_ticket(&client_pub, &sender_pub, &ticket, now_ms).is_err() {
-                    self.metrics
-                        .federation_invalid_tickets_dropped
-                        .fetch_add(1, Ordering::Relaxed);
-                    debug!(
-                        announcer = ?sender_pub,
-                        claimed_client = ?client_pub,
-                        "directory: dropped direct entry with invalid presence ticket"
-                    );
-                    continue;
-                }
+            if hops == 0
+                && federated::verify_ticket(&client_pub, &sender_pub, &ticket, now_ms).is_err()
+            {
+                self.metrics
+                    .federation_invalid_tickets_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    announcer = ?sender_pub,
+                    claimed_client = ?client_pub,
+                    "directory: dropped direct entry with invalid presence ticket"
+                );
+                continue;
             }
             new_set.insert(client_pub);
             accepted.push((client_pub, ticket, hops));
@@ -4438,13 +4375,8 @@ impl Inner {
         // Decrypt with the PresenceTicket type tag in AAD.
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4504,13 +4436,8 @@ impl Inner {
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4554,8 +4481,8 @@ impl Inner {
                 }
                 recent.remove(&query.query_id);
             }
-            let ttl_inst = now_inst
-                + std::time::Duration::from_millis(find_peer::QUERY_DEDUP_TTL_MS);
+            let ttl_inst =
+                now_inst + std::time::Duration::from_millis(find_peer::QUERY_DEDUP_TTL_MS);
             recent.insert(query.query_id, ttl_inst);
         }
 
@@ -4589,7 +4516,8 @@ impl Inner {
         // a leftover ticket from a now-disconnected client must not
         // produce a positive answer.
         let has_session = if target_is_local {
-            self.session_established_with_pubkey(&query.target_client_pub).await
+            self.session_established_with_pubkey(&query.target_client_pub)
+                .await
         } else {
             false
         };
@@ -4607,10 +4535,7 @@ impl Inner {
             let wire = find_peer::build_peer_here(&reply);
             // Reply goes back to the bridge that sent us the
             // query (which for Phase A is the originator).
-            if let Err(e) = self
-                .send_typed(&peer_id, PacketType::PeerHere, &wire)
-                .await
-            {
+            if let Err(e) = self.send_typed(&peer_id, PacketType::PeerHere, &wire).await {
                 debug!(error = %e, "FindPeer: failed to send PeerHere reply");
             } else {
                 debug!(
@@ -4673,9 +4598,7 @@ impl Inner {
                 .unwrap()
                 .insert(query.query_id, peer_id);
             for fed in &fed_peers {
-                if let Err(e) =
-                    self.send_typed(fed, PacketType::FindPeer, &payload).await
-                {
+                if let Err(e) = self.send_typed(fed, PacketType::FindPeer, &payload).await {
                     debug!(
                         error = %e,
                         ?fed,
@@ -4727,13 +4650,8 @@ impl Inner {
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4772,8 +4690,7 @@ impl Inner {
             }
             recent.insert(
                 query.query_id,
-                now_inst
-                    + std::time::Duration::from_millis(find_peer::QUERY_DEDUP_TTL_MS),
+                now_inst + std::time::Duration::from_millis(find_peer::QUERY_DEDUP_TTL_MS),
             );
         }
         if query
@@ -4817,10 +4734,7 @@ impl Inner {
                     }],
                 };
                 let wire = find_peer::build_peer_here(&reply);
-                if let Err(e) = self
-                    .send_typed(&peer_id, PacketType::PeerHere, &wire)
-                    .await
-                {
+                if let Err(e) = self.send_typed(&peer_id, PacketType::PeerHere, &wire).await {
                     debug!(error = %e, "FindPeerHashed: failed to send PeerHere reply");
                 } else {
                     debug!(
@@ -4864,8 +4778,9 @@ impl Inner {
                 .unwrap()
                 .insert(query.query_id, peer_id);
             for fed in &fed_peers {
-                if let Err(e) =
-                    self.send_typed(fed, PacketType::FindPeerHashed, &payload).await
+                if let Err(e) = self
+                    .send_typed(fed, PacketType::FindPeerHashed, &payload)
+                    .await
                 {
                     debug!(error = %e, ?fed, "FindPeerHashed: forward leg failed");
                 }
@@ -4890,13 +4805,8 @@ impl Inner {
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -5137,13 +5047,8 @@ impl Inner {
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers
-                .get_mut(&peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer
-                .handshake
-                .session()
-                .ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -5162,7 +5067,10 @@ impl Inner {
             .unwrap()
             .contains_key(&sender_pub);
         if !sender_is_bridge {
-            debug!(?sender_pub, "PeerGone: sender not in federation_table; dropping");
+            debug!(
+                ?sender_pub,
+                "PeerGone: sender not in federation_table; dropping"
+            );
             return Err(DriftError::AuthFailed);
         }
         let gone = find_peer::parse_peer_gone(&payload_bytes)?;
@@ -5225,7 +5133,6 @@ impl Inner {
             ticker.tick().await;
             let now = std::time::Instant::now();
             let pf_dead = std::time::Duration::from_millis(find_peer::MAX_FIND_DEADLINE_MS);
-            let mut pf_purged = 0usize;
             // Phase F.8: when reaping expired pending_finds,
             // fault each claimant bridge (the bridge advertised
             // it could answer the query but didn't deliver).
@@ -5233,7 +5140,7 @@ impl Inner {
             // drop the pending_finds lock — avoids holding two
             // mutexes at once.
             let mut fault_blame: Vec<PeerId> = Vec::new();
-            {
+            let pf_purged = {
                 let mut pf = self.pending_finds.lock().unwrap();
                 let before = pf.len();
                 pf.retain(|_, p| {
@@ -5243,14 +5150,14 @@ impl Inner {
                     }
                     alive
                 });
-                pf_purged = before.saturating_sub(pf.len());
-            }
+                before.saturating_sub(pf.len())
+            };
             if !fault_blame.is_empty() {
                 let mut faults = self.bridge_faults.lock().unwrap();
                 for pid in fault_blame {
                     let counter = faults.entry(pid).or_insert(0);
                     *counter += 1;
-                    if *counter == 5 || *counter == 25 || *counter % 100 == 0 {
+                    if *counter == 5 || *counter == 25 || (*counter).is_multiple_of(100) {
                         // Log at meaningful inflection points
                         // rather than every fault. Demotion is
                         // applied at fanout time
@@ -5278,12 +5185,8 @@ impl Inner {
             // a couple of minutes of good behavior.
             let decay_secs = self.config.bridge_fault_decay_secs;
             if decay_secs > 0 {
-                let cycles_since_start = now
-                    .saturating_duration_since(gc_started_at)
-                    .as_secs();
-                if cycles_since_start > 0
-                    && cycles_since_start % decay_secs == 0
-                {
+                let cycles_since_start = now.saturating_duration_since(gc_started_at).as_secs();
+                if cycles_since_start > 0 && cycles_since_start.is_multiple_of(decay_secs) {
                     let mut faults = self.bridge_faults.lock().unwrap();
                     faults.retain(|_, counter| {
                         *counter >>= 1;
@@ -5292,35 +5195,37 @@ impl Inner {
                 }
             }
             // recent_queries values are `Instant` deadlines.
-            let mut rq_purged = 0usize;
-            {
+            let rq_purged = {
                 let mut rq = self.recent_queries.lock().unwrap();
                 let before = rq.len();
                 rq.retain(|_, expires| *expires > now);
-                rq_purged = before.saturating_sub(rq.len());
-            }
+                before.saturating_sub(rq.len())
+            };
             // neg_cache values are `Instant` deadlines.
-            let mut nc_purged = 0usize;
-            {
+            let nc_purged = {
                 let mut nc = self.neg_cache.lock().unwrap();
                 let before = nc.len();
                 nc.retain(|_, expires| *expires > now);
-                nc_purged = before.saturating_sub(nc.len());
-            }
+                before.saturating_sub(nc.len())
+            };
             // forwarded_queries doesn't carry its own deadline —
             // use recent_queries (same query_id key) as the
             // source of truth. A forwarded query whose query_id
             // has been GC'd from recent_queries is past its
             // dedup window AND past its forward deadline.
-            let mut fq_purged = 0usize;
-            {
-                let recent: std::collections::HashSet<u64> =
-                    self.recent_queries.lock().unwrap().keys().copied().collect();
+            let fq_purged = {
+                let recent: std::collections::HashSet<u64> = self
+                    .recent_queries
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .copied()
+                    .collect();
                 let mut fq = self.forwarded_queries.lock().unwrap();
                 let before = fq.len();
                 fq.retain(|qid, _| recent.contains(qid));
-                fq_purged = before.saturating_sub(fq.len());
-            }
+                before.saturating_sub(fq.len())
+            };
             if pf_purged + rq_purged + nc_purged + fq_purged > 0 {
                 debug!(
                     pf = pf_purged,
@@ -5496,8 +5401,7 @@ impl Inner {
                     use rand::Rng;
                     let delay = rand::thread_rng().gen_range(0..jitter_ms);
                     if delay > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(delay))
-                            .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                     }
                 }
                 self.ifaces.send_for(iface, &bytes, addr).await?;
@@ -5525,8 +5429,7 @@ impl Inner {
         // pre-5.0 Linux UDP still get one packet per call —
         // the extra slack is cheap.
         let mut buf = vec![0u8; 64 * 1024];
-        let mut segs: Vec<(usize, usize, std::net::SocketAddr)> =
-            Vec::with_capacity(32);
+        let mut segs: Vec<(usize, usize, std::net::SocketAddr)> = Vec::with_capacity(32);
         loop {
             segs.clear();
             if let Err(e) = iface.recv_from_batch(&mut buf, &mut segs).await {
@@ -5558,9 +5461,7 @@ impl Inner {
                     .bytes_received
                     .fetch_add(n as u64, Ordering::Relaxed);
                 if ecn_ce {
-                    self.metrics
-                        .ecn_ce_received
-                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics.ecn_ce_received.fetch_add(1, Ordering::Relaxed);
                 }
                 let received_at = Instant::now();
                 let data = &buf[off..off + n];
@@ -5599,13 +5500,9 @@ impl Inner {
                         Ok(None) => {}
                         Err(e) => {
                             if matches!(e, DriftError::AuthFailed) {
-                                self.metrics
-                                    .auth_failures
-                                    .fetch_add(1, Ordering::Relaxed);
+                                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
-                            if let Some(suppressed) =
-                                self.drop_warn_throttle.tick_or_count()
-                            {
+                            if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
                                 let (pkt_diag, peer_diag, hs_diag) =
                                     self.auth_fail_diag(data).await;
                                 warn!(
@@ -5637,14 +5534,10 @@ impl Inner {
                     Err(e) => {
                         match &e {
                             DriftError::Replay(_) => {
-                                self.metrics
-                                    .replays_caught
-                                    .fetch_add(1, Ordering::Relaxed);
+                                self.metrics.replays_caught.fetch_add(1, Ordering::Relaxed);
                             }
                             DriftError::AuthFailed => {
-                                self.metrics
-                                    .auth_failures
-                                    .fetch_add(1, Ordering::Relaxed);
+                                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
                             DriftError::DeadlineExpired => {
                                 self.metrics
@@ -5658,11 +5551,8 @@ impl Inner {
                             }
                             _ => {}
                         }
-                        if let Some(suppressed) =
-                            self.drop_warn_throttle.tick_or_count()
-                        {
-                            let (pkt_diag, peer_diag, hs_diag) =
-                                self.auth_fail_diag(data).await;
+                        if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
+                            let (pkt_diag, peer_diag, hs_diag) = self.auth_fail_diag(data).await;
                             warn!(
                                 error = %e,
                                 ?src,
@@ -5808,10 +5698,17 @@ impl Inner {
                         HandshakeState::AwaitingAck { .. } => "awaiting_ack",
                         HandshakeState::AwaitingData { .. } => "awaiting_data",
                         HandshakeState::Established { prev, .. } => {
-                            if prev.is_some() { "established+prev" } else { "established" }
+                            if prev.is_some() {
+                                "established+prev"
+                            } else {
+                                "established"
+                            }
                         }
                     });
-                    let cached_addr = peers.get(&pid).map(|p| p.addr.to_string()).unwrap_or_default();
+                    let cached_addr = peers
+                        .get(&pid)
+                        .map(|p| p.addr.to_string())
+                        .unwrap_or_default();
                     return (
                         format!("short:cid=0x{:04x}:seq={}", cid, seq),
                         format!("known:{}:cached={}", hex::encode(pid), cached_addr),
@@ -5829,7 +5726,11 @@ impl Inner {
             if let Ok(h) = Header::decode(&data[..HEADER_LEN]) {
                 return (
                     format!("long:{:?}:seq={}", h.packet_type, h.seq),
-                    format!("src={}:dst={}", hex::encode(h.src_id), hex::encode(h.dst_id)),
+                    format!(
+                        "src={}:dst={}",
+                        hex::encode(h.src_id),
+                        hex::encode(h.dst_id)
+                    ),
                     "n/a".to_string(),
                 );
             }
@@ -5949,7 +5850,8 @@ impl Inner {
                     .await
             }
             PacketType::FederationDirectory => {
-                self.handle_federation_directory(&header, data, body).await?;
+                self.handle_federation_directory(&header, data, body)
+                    .await?;
                 Ok(None)
             }
             PacketType::PresenceTicket => {
@@ -5993,9 +5895,7 @@ impl Inner {
                 routes
                     .entries()
                     .into_iter()
-                    .filter_map(|(id, _metric, _cost)| {
-                        routes.lookup(&id).map(|addr| (id, addr))
-                    })
+                    .filter_map(|(id, _metric, _cost)| routes.lookup(&id).map(|addr| (id, addr)))
                     .collect()
             };
             let to_retransmit: Vec<(Vec<u8>, SocketAddr, usize)> = {
@@ -6034,8 +5934,7 @@ impl Inner {
                         pq,
                     } = &mut peer.handshake
                     {
-                        let wait =
-                            handshake_backoff_ms(effective_base_ms, *attempts);
+                        let wait = handshake_backoff_ms(effective_base_ms, *attempts);
                         if last_sent.elapsed() < std::time::Duration::from_millis(wait) {
                             continue;
                         }
@@ -6157,8 +6056,7 @@ impl Inner {
         // the originator's harvest-now-decrypt-later guarantee.
         // The ek lives at the very tail of the body, after any
         // cookie that may also be present.
-        let pq_requested =
-            (header.flags & drift_core::header::FLAG_PQ_HYBRID) != 0;
+        let pq_requested = (header.flags & drift_core::header::FLAG_PQ_HYBRID) != 0;
         if pq_requested && !self.config.hybrid_pq {
             let cpid = derive_peer_id(&client_static_pub);
             tracing::warn!(
@@ -6199,9 +6097,9 @@ impl Inner {
         // presence — the cookie lives between the base and the
         // PQ ek (see SPEC.md §6.7).
         let cookie_required = self.cookie_required_sync();
-        let body_minus_pq = body
-            .len()
-            .saturating_sub(if pq_requested { HELLO_PQ_TAIL_LEN } else { 0 });
+        let body_minus_pq =
+            body.len()
+                .saturating_sub(if pq_requested { HELLO_PQ_TAIL_LEN } else { 0 });
         let has_cookie_tail = body_minus_pq >= HELLO_WITH_COOKIE_LEN;
         if cookie_required {
             if !has_cookie_tail {
@@ -6385,8 +6283,7 @@ impl Inner {
                 // the new session's first OPEN can land.
                 // Pending / AwaitingAck never reached the
                 // stream layer at all.
-                session_was_reset =
-                    matches!(peer.handshake, HandshakeState::Established { .. });
+                session_was_reset = matches!(peer.handshake, HandshakeState::Established { .. });
                 let old_addr = peer.addr;
                 let result = regenerate_session(
                     &self.identity,
@@ -6414,9 +6311,7 @@ impl Inner {
             self.peers.note_inserted(client_peer_id, addr).await;
         }
         if let Some(old) = migrated_from {
-            self.peers
-                .note_addr_changed(client_peer_id, old, src)
-                .await;
+            self.peers.note_addr_changed(client_peer_id, old, src).await;
         }
 
         // Notify the session-reset listener (if installed) AFTER
@@ -6604,12 +6499,8 @@ impl Inner {
             // length, decap failure) returns None → reject
             // the whole handshake. The dk drops after this
             // block, zeroing itself.
-            let session_key_bytes = if let (Some(dk), Some(ct)) =
-                (pq_dk_opt, pq_ct)
-            {
-                let mlkem_ss = dk
-                    .decapsulate(ct)
-                    .ok_or(DriftError::AuthFailed)?;
+            let session_key_bytes = if let (Some(dk), Some(ct)) = (pq_dk_opt, pq_ct) {
+                let mlkem_ss = dk.decapsulate(ct).ok_or(DriftError::AuthFailed)?;
                 let key = drift_core::pq::derive_hybrid_key(
                     &static_dh,
                     &ephemeral_dh,
@@ -6619,12 +6510,7 @@ impl Inner {
                 );
                 drift_core::Zeroizing::new(key)
             } else {
-                derive_session_key(
-                    &static_dh,
-                    &ephemeral_dh,
-                    &client_nonce,
-                    &server_nonce,
-                )
+                derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce)
             };
 
             let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
@@ -6639,10 +6525,7 @@ impl Inner {
             // we got a different mlkem_ss → different session
             // key → AEAD open() below fails.
             let mut aad = Vec::with_capacity(
-                HEADER_LEN
-                    + STATIC_KEY_LEN
-                    + NONCE_LEN
-                    + pq_ct.map(|c| c.len()).unwrap_or(0),
+                HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN + pq_ct.map(|c| c.len()).unwrap_or(0),
             );
             aad.extend_from_slice(&canon);
             aad.extend_from_slice(&server_ephemeral_pub);
@@ -7124,8 +7007,7 @@ impl Inner {
             // addr_index maintenance below.
             let peer_addr = peer.addr;
 
-            let was_awaiting_data =
-                matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+            let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
             let removed_addr = if peer.auto_registered {
                 debug!(peer_id = ?peer_id, "peer closed; removing auto-registered entry");
                 peers.remove(&peer_id);
@@ -7194,10 +7076,7 @@ impl Inner {
             .copied()
             .collect();
         for peer in &fed_peers {
-            if let Err(e) = self
-                .send_typed(peer, PacketType::PeerGone, &payload)
-                .await
-            {
+            if let Err(e) = self.send_typed(peer, PacketType::PeerGone, &payload).await {
                 debug!(error = %e, ?peer, "PeerGone: failed to emit");
             }
         }
@@ -7383,8 +7262,8 @@ fn regenerate_session(
     // failure) with AuthFailed — same disposition as a bad
     // X25519 contribution.
     let (session_key_bytes, server_mlkem_ct) = if let Some(ek) = pq_client_ek {
-        let (ct, mlkem_ss) = drift_core::pq::server_encapsulate(ek)
-            .ok_or(DriftError::AuthFailed)?;
+        let (ct, mlkem_ss) =
+            drift_core::pq::server_encapsulate(ek).ok_or(DriftError::AuthFailed)?;
         let key = drift_core::pq::derive_hybrid_key(
             &static_dh,
             &ephemeral_dh,
@@ -7436,8 +7315,8 @@ fn regenerate_session(
     if server_mlkem_ct.is_some() {
         ack_header.flags |= drift_core::header::FLAG_PQ_HYBRID;
     }
-    let ack_payload_len = HELLO_ACK_PAYLOAD_LEN
-        + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0);
+    let ack_payload_len =
+        HELLO_ACK_PAYLOAD_LEN + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0);
     ack_header.payload_len = ack_payload_len as u16;
     let mut hbuf = [0u8; HEADER_LEN];
     ack_header.encode(&mut hbuf);
@@ -7493,6 +7372,7 @@ fn regenerate_session(
 /// public key. Used both for the initial handshake and for
 /// retransmissions (where the same nonce + ephemeral key are reused so
 /// the server can recognize the duplicate and replay the cached ACK).
+#[allow(clippy::too_many_arguments)]
 fn build_hello_wire(
     local_peer_id: PeerId,
     dst_id: PeerId,

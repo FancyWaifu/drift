@@ -300,7 +300,7 @@ async fn send_poll(
     // An "empty poll" QNAME has no payload labels — the Worker
     // distinguishes it by the absence of base32 labels before the
     // suffix.
-    let qname = format!("poll.drift.local");
+    let qname = "poll.drift.local".to_string();
     let txid: u16 = rand::random();
     let body = build_query_message(txid, &qname);
     let resp_bytes = post_dns(client, url, body).await?;
@@ -309,11 +309,7 @@ async fn send_poll(
 }
 
 /// Single HTTP POST with the DoH content type.
-async fn post_dns(
-    client: &reqwest::Client,
-    url: &str,
-    body: Vec<u8>,
-) -> io::Result<Vec<u8>> {
+async fn post_dns(client: &reqwest::Client, url: &str, body: Vec<u8>) -> io::Result<Vec<u8>> {
     let resp = client
         .post(url)
         .header("Content-Type", "application/dns-message")
@@ -331,7 +327,10 @@ async fn post_dns(
         return Err(io::Error::other(format!(
             "doh POST returned {}: {}",
             status,
-            String::from_utf8_lossy(&bytes).chars().take(120).collect::<String>(),
+            String::from_utf8_lossy(&bytes)
+                .chars()
+                .take(120)
+                .collect::<String>(),
         )));
     }
     Ok(bytes.to_vec())
@@ -366,9 +365,7 @@ async fn ingest_response(
         let idx = rdata[2];
         let total = rdata[3];
         let payload = rdata[4..].to_vec();
-        let entry = reassembly
-            .entry(id)
-            .or_insert_with(|| FragBuf::new(total));
+        let entry = reassembly.entry(id).or_insert_with(|| FragBuf::new(total));
         if let Some(packet) = entry.insert(idx, payload) {
             reassembly.remove(&id);
             // Backpressure: if the consumer hasn't drained the

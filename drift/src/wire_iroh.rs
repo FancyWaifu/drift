@@ -42,7 +42,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, OnceCell};
 
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
@@ -83,9 +82,9 @@ async fn shared_endpoint(bind_hint: Option<SocketAddr>) -> io::Result<Endpoint> 
             }
             if let Some(hint) = bind_hint {
                 if hint.port() != 0 {
-                    builder = builder.bind_addr(hint).map_err(|e| {
-                        io::Error::other(format!("iroh bind_addr {}: {}", hint, e))
-                    })?;
+                    builder = builder
+                        .bind_addr(hint)
+                        .map_err(|e| io::Error::other(format!("iroh bind_addr {}: {}", hint, e)))?;
                 }
             }
             builder
@@ -312,9 +311,8 @@ impl IrohListenerIO {
                         }
                     };
                     let peer = peer_addr_for_connection(&conn);
-                    let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(
-                        send, recv, peer, endpoint_for_io, conn,
-                    ));
+                    let io: Arc<dyn PacketIO> =
+                        Arc::new(IrohPacketIO::new(send, recv, peer, endpoint_for_io, conn));
                     let _ = ready_tx.send(io).await;
                 });
             }
@@ -338,17 +336,15 @@ impl Listener for IrohListenerIO {
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
         let mut rx = self.ready_rx.lock().await;
-        rx.recv().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "iroh listener closed")
-        })
+        rx.recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "iroh listener closed"))
     }
 }
 
 // ─── Connector ───────────────────────────────────────────────────
 
-async fn connect_iroh_client(
-    spec: &str,
-) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+async fn connect_iroh_client(spec: &str) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     // Parse `<endpoint_id_hex>@<host:port>` — the URL dispatcher
     // strips the `iroh://` prefix and hands us the rest.
     let (id_hex, addr_str) = spec.split_once('@').ok_or_else(|| {
@@ -357,9 +353,9 @@ async fn connect_iroh_client(
             "iroh:// connector needs <endpoint_id_hex>@<host:port>",
         )
     })?;
-    let id: EndpointId = id_hex.parse().map_err(|e| {
-        io::Error::other(format!("iroh endpoint id parse: {}", e))
-    })?;
+    let id: EndpointId = id_hex
+        .parse()
+        .map_err(|e| io::Error::other(format!("iroh endpoint id parse: {}", e)))?;
     let direct: SocketAddr = addr_str
         .parse()
         .map_err(|e| io::Error::other(format!("iroh direct addr parse: {}", e)))?;
@@ -385,13 +381,7 @@ async fn connect_iroh_client(
         .await
         .map_err(|e| io::Error::other(format!("iroh open_bi: {}", e)))?;
     let peer = peer_addr_for_connection(&conn);
-    let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(
-        send,
-        recv,
-        peer,
-        endpoint,
-        conn,
-    ));
+    let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(send, recv, peer, endpoint, conn));
     Ok((io, peer))
 }
 

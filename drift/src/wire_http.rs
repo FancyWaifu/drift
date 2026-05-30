@@ -149,12 +149,19 @@ impl PacketIO for HttpPacketIO {
     async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let mut rx = self.inbound_rx.lock().await;
         let bytes = rx.recv().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "HTTP client closed POST channel")
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP client closed POST channel",
+            )
         })?;
         if bytes.len() > buf.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("HTTP packet too large: {} > buffer {}", bytes.len(), buf.len()),
+                format!(
+                    "HTTP packet too large: {} > buffer {}",
+                    bytes.len(),
+                    buf.len()
+                ),
             ));
         }
         buf[..bytes.len()].copy_from_slice(&bytes);
@@ -274,11 +281,7 @@ async fn accept_loop(
             let svc = service_fn(move |req: Request<Incoming>| {
                 let registry = registry.clone();
                 let nct = nct.clone();
-                async move {
-                    Ok::<_, Infallible>(
-                        handle_request(req, peer, local, registry, nct).await,
-                    )
-                }
+                async move { Ok::<_, Infallible>(handle_request(req, peer, local, registry, nct).await) }
             });
             // SEC.PEN.HIGH-1: header_read_timeout bounds the
             // time hyper waits for the request line + headers.
@@ -338,7 +341,6 @@ fn stock_response(status: StatusCode) -> Response<RespBody> {
         .unwrap()
 }
 
-
 // ─── Server-sent events stream (downstream) ──────────────────────
 
 async fn handle_sse(
@@ -397,7 +399,7 @@ async fn handle_sse(
         let mut scratch = Vec::with_capacity(8192);
         while let Some(first) = out_rx.recv().await {
             scratch.clear();
-            let mut append = |pkt: &[u8], buf: &mut Vec<u8>| {
+            let append = |pkt: &[u8], buf: &mut Vec<u8>| {
                 let encoded = general_purpose::STANDARD_NO_PAD.encode(pkt);
                 buf.extend_from_slice(b"data: ");
                 buf.extend_from_slice(encoded.as_bytes());
@@ -485,8 +487,6 @@ fn parse_sid(query: &str) -> Option<u64> {
 // last-resort fallback for native binaries when every other
 // transport is blocked.
 
-use base64::Engine as _;
-
 /// Internal: spawned task that drains the SSE stream into the
 /// `inbound` channel. Each `data: <base64>\n\n` event becomes one
 /// packet pushed onto the channel.
@@ -533,10 +533,7 @@ async fn sse_pump<S>(
 /// Drain every complete SSE event from `leftover` and push each
 /// decoded DRIFT packet onto `inbound`. Returns when there are no
 /// more complete events to drain.
-async fn drain_events(
-    leftover: &mut Vec<u8>,
-    inbound: &tokio::sync::mpsc::Sender<Vec<u8>>,
-) {
+async fn drain_events(leftover: &mut Vec<u8>, inbound: &tokio::sync::mpsc::Sender<Vec<u8>>) {
     loop {
         let Some(boundary) = find_event_boundary(leftover) else {
             return;
@@ -562,12 +559,11 @@ async fn drain_events(
             // STANDARD decoder would silently reject every event,
             // which is exactly the bug this comment exists to
             // prevent recurring.
-            let bytes = match base64::engine::general_purpose::STANDARD_NO_PAD
-                .decode(payload.as_bytes())
-            {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
+            let bytes =
+                match base64::engine::general_purpose::STANDARD_NO_PAD.decode(payload.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
             if inbound.send(bytes).await.is_err() {
                 return; // receiver dropped
             }
@@ -645,9 +641,7 @@ impl PacketIO for HttpClientPacketIO {
 
 fn http_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let addr = parse_ip_addr(&addr_str).await?;
         let base = format!("http://{}", addr);
@@ -664,7 +658,7 @@ fn http_connector_factory(
         // Open the streaming GET. The first event we'll see is
         // `SID:<hex>`; consume the response until that arrives,
         // then hand the rest of the stream to the pump task.
-        let mut resp = client
+        let resp = client
             .get(&sse_url)
             .send()
             .await
@@ -688,9 +682,7 @@ fn http_connector_factory(
                 Some(Ok(c)) => c,
                 Some(Err(e)) => return Err(io::Error::other(e)),
                 None => {
-                    return Err(io::Error::other(
-                        "SSE stream ended before SID handshake",
-                    ));
+                    return Err(io::Error::other("SSE stream ended before SID handshake"));
                 }
             };
             accum.extend_from_slice(&chunk);
@@ -698,8 +690,7 @@ fn http_connector_factory(
             // to parse it as SID.
             if let Some(boundary) = find_event_boundary(&accum) {
                 let event_bytes: Vec<u8> = accum.drain(..boundary.end).collect();
-                let event_str = std::str::from_utf8(&event_bytes)
-                    .map_err(io::Error::other)?;
+                let event_str = std::str::from_utf8(&event_bytes).map_err(io::Error::other)?;
                 for line in event_str.lines() {
                     if let Some(payload) = line.strip_prefix("data: ") {
                         if let Some(s) = payload.strip_prefix("SID:") {

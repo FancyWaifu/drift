@@ -32,9 +32,9 @@ use std::time::Duration;
 /// WARN at every daemon startup using the Linux path on Mac).
 ///
 ///   * Linux:  `/run/drift-vpn/status.sock` — systemd-managed,
-///             writable for root.
+///     writable for root.
 ///   * macOS:  `/var/run/drift-vpn/status.sock` — equivalent
-///             tmpfs-style location that's actually writable.
+///     tmpfs-style location that's actually writable.
 ///   * other:  `$TMPDIR/drift-vpn/status.sock` as a last resort.
 pub fn default_socket_path() -> PathBuf {
     #[cfg(target_os = "macos")]
@@ -260,8 +260,7 @@ pub async fn fetch(path: &Path) -> Result<StatusReport> {
         .await
         .context("status socket read timeout")?
         .context("reading status response")?;
-    let report: StatusReport =
-        serde_json::from_str(buf.trim()).context("parsing status JSON")?;
+    let report: StatusReport = serde_json::from_str(buf.trim()).context("parsing status JSON")?;
     Ok(report)
 }
 
@@ -272,10 +271,7 @@ pub fn render_human(report: &StatusReport) -> String {
     let _ = writeln!(
         out,
         "local: peer={} iface={} addr={} uptime={}s",
-        &report.local.peer_id_hex,
-        report.local.iface,
-        report.local.addr,
-        report.local.uptime_secs
+        &report.local.peer_id_hex, report.local.iface, report.local.addr, report.local.uptime_secs
     );
     let _ = writeln!(out, "  pubkey: {}", report.local.pubkey_hex);
     let _ = writeln!(out);
@@ -389,15 +385,24 @@ pub fn render_prometheus(report: &StatusReport) -> String {
     // --- Daemon-wide counters ---
     let m = &report.metrics;
 
-    let _ = writeln!(out, "# HELP drift_vpn_uptime_seconds Daemon uptime since startup");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_uptime_seconds Daemon uptime since startup"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_uptime_seconds gauge");
     let _ = writeln!(out, "drift_vpn_uptime_seconds {}", report.local.uptime_secs);
 
-    let _ = writeln!(out, "# HELP drift_vpn_tun_writes_total Packets successfully written to the TUN device");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_tun_writes_total Packets successfully written to the TUN device"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_tun_writes_total counter");
     let _ = writeln!(out, "drift_vpn_tun_writes_total {}", m.tun_writes);
 
-    let _ = writeln!(out, "# HELP drift_vpn_tun_bytes_total Bytes successfully written to the TUN device");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_tun_bytes_total Bytes successfully written to the TUN device"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_tun_bytes_total counter");
     let _ = writeln!(out, "drift_vpn_tun_bytes_total {}", m.tun_bytes_written);
 
@@ -405,34 +410,93 @@ pub fn render_prometheus(report: &StatusReport) -> String {
     let _ = writeln!(out, "# TYPE drift_vpn_tun_write_errors_total counter");
     let _ = writeln!(out, "drift_vpn_tun_write_errors_total {}", m.tun_write_errs);
 
-    let _ = writeln!(out, "# HELP drift_vpn_egress_packets_total Packets handed to the transport from the TUN");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_egress_packets_total Packets handed to the transport from the TUN"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_egress_packets_total counter");
-    let _ = writeln!(out, "drift_vpn_egress_packets_total{{outcome=\"ok\"}} {}", m.send_data_ok);
-    let _ = writeln!(out, "drift_vpn_egress_packets_total{{outcome=\"error\"}} {}", m.send_data_errs);
-    let _ = writeln!(out, "drift_vpn_egress_packets_total{{outcome=\"no_route\"}} {}", m.no_route_drops);
+    let _ = writeln!(
+        out,
+        "drift_vpn_egress_packets_total{{outcome=\"ok\"}} {}",
+        m.send_data_ok
+    );
+    let _ = writeln!(
+        out,
+        "drift_vpn_egress_packets_total{{outcome=\"error\"}} {}",
+        m.send_data_errs
+    );
+    let _ = writeln!(
+        out,
+        "drift_vpn_egress_packets_total{{outcome=\"no_route\"}} {}",
+        m.no_route_drops
+    );
 
     let _ = writeln!(out, "# HELP drift_vpn_rpfilter_drops_total Inbound packets dropped by the reverse-path filter, by cause");
     let _ = writeln!(out, "# TYPE drift_vpn_rpfilter_drops_total counter");
-    let _ = writeln!(out, "drift_vpn_rpfilter_drops_total{{cause=\"config_mismatch\"}} {}", m.rpfilter_config_mismatch);
-    let _ = writeln!(out, "drift_vpn_rpfilter_drops_total{{cause=\"unknown_peer\"}} {}", m.rpfilter_unknown_peer);
-    let _ = writeln!(out, "drift_vpn_rpfilter_drops_total{{cause=\"parse_failed\"}} {}", m.rpfilter_parse_failed);
+    let _ = writeln!(
+        out,
+        "drift_vpn_rpfilter_drops_total{{cause=\"config_mismatch\"}} {}",
+        m.rpfilter_config_mismatch
+    );
+    let _ = writeln!(
+        out,
+        "drift_vpn_rpfilter_drops_total{{cause=\"unknown_peer\"}} {}",
+        m.rpfilter_unknown_peer
+    );
+    let _ = writeln!(
+        out,
+        "drift_vpn_rpfilter_drops_total{{cause=\"parse_failed\"}} {}",
+        m.rpfilter_parse_failed
+    );
 
-    let _ = writeln!(out, "# HELP drift_vpn_failover_commits_total Committed failovers, by destination scheme");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_failover_commits_total Committed failovers, by destination scheme"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_failover_commits_total counter");
-    let _ = writeln!(out, "drift_vpn_failover_commits_total{{scheme=\"udp\"}} {}", m.failover_to_udp);
-    let _ = writeln!(out, "drift_vpn_failover_commits_total{{scheme=\"tcp\"}} {}", m.failover_to_tcp);
-    let _ = writeln!(out, "drift_vpn_failover_commits_total{{scheme=\"other\"}} {}", m.failover_to_other);
+    let _ = writeln!(
+        out,
+        "drift_vpn_failover_commits_total{{scheme=\"udp\"}} {}",
+        m.failover_to_udp
+    );
+    let _ = writeln!(
+        out,
+        "drift_vpn_failover_commits_total{{scheme=\"tcp\"}} {}",
+        m.failover_to_tcp
+    );
+    let _ = writeln!(
+        out,
+        "drift_vpn_failover_commits_total{{scheme=\"other\"}} {}",
+        m.failover_to_other
+    );
 
-    let _ = writeln!(out, "# HELP drift_vpn_failover_restarts_total Failovers that fell through to a fresh handshake");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_failover_restarts_total Failovers that fell through to a fresh handshake"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_failover_restarts_total counter");
-    let _ = writeln!(out, "drift_vpn_failover_restarts_total {}", m.failover_restarts);
+    let _ = writeln!(
+        out,
+        "drift_vpn_failover_restarts_total {}",
+        m.failover_restarts
+    );
 
-    let _ = writeln!(out, "# HELP drift_vpn_failover_hold_skipped_total Failover attempts suppressed by hysteresis");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_failover_hold_skipped_total Failover attempts suppressed by hysteresis"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_failover_hold_skipped_total counter");
-    let _ = writeln!(out, "drift_vpn_failover_hold_skipped_total {}", m.failover_hold_skipped);
+    let _ = writeln!(
+        out,
+        "drift_vpn_failover_hold_skipped_total {}",
+        m.failover_hold_skipped
+    );
 
     // --- Per-peer metrics ---
-    let _ = writeln!(out, "# HELP drift_vpn_peer_established Whether the peer is in Established state (1=yes, 0=no)");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_peer_established Whether the peer is in Established state (1=yes, 0=no)"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_peer_established gauge");
     for p in &report.peers {
         let _ = writeln!(
@@ -443,7 +507,10 @@ pub fn render_prometheus(report: &StatusReport) -> String {
         );
     }
 
-    let _ = writeln!(out, "# HELP drift_vpn_peer_srtt_seconds Smoothed round-trip time per peer");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_peer_srtt_seconds Smoothed round-trip time per peer"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_peer_srtt_seconds gauge");
     for p in &report.peers {
         if let Some(us) = p.srtt_us {
@@ -474,7 +541,10 @@ pub fn render_prometheus(report: &StatusReport) -> String {
         );
     }
 
-    let _ = writeln!(out, "# HELP drift_vpn_peer_tx_packets_total Packets sent to peer in current session");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_peer_tx_packets_total Packets sent to peer in current session"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_peer_tx_packets_total counter");
     for p in &report.peers {
         let _ = writeln!(
@@ -484,7 +554,10 @@ pub fn render_prometheus(report: &StatusReport) -> String {
         );
     }
 
-    let _ = writeln!(out, "# HELP drift_vpn_peer_rx_packets_total Packets received from peer in current session");
+    let _ = writeln!(
+        out,
+        "# HELP drift_vpn_peer_rx_packets_total Packets received from peer in current session"
+    );
     let _ = writeln!(out, "# TYPE drift_vpn_peer_rx_packets_total counter");
     for p in &report.peers {
         let _ = writeln!(
@@ -532,15 +605,13 @@ pub async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusContext>
             // headers — we just need to see "GET /metrics" so
             // we can return either the metrics or a 404.
             let mut buf = [0u8; 1024];
-            let n = match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                sock.read(&mut buf),
-            )
-            .await
-            {
-                Ok(Ok(n)) => n,
-                _ => return,
-            };
+            let n =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), sock.read(&mut buf))
+                    .await
+                {
+                    Ok(Ok(n)) => n,
+                    _ => return,
+                };
             let req = String::from_utf8_lossy(&buf[..n]);
             let first_line = req.lines().next().unwrap_or("");
 
@@ -558,8 +629,7 @@ pub async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusContext>
                     body
                 )
             } else if first_line.starts_with("GET / ") || first_line.starts_with("GET / HTTP") {
-                let body =
-                    "drift-vpn metrics endpoint\n\nGET /metrics for Prometheus scrape.\n";
+                let body = "drift-vpn metrics endpoint\n\nGET /metrics for Prometheus scrape.\n";
                 format!(
                     "HTTP/1.1 200 OK\r\n\
                      Content-Type: text/plain\r\n\

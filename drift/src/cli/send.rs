@@ -86,13 +86,11 @@ pub async fn run(args: &SendArgs, identity_path: &str) -> Result<()> {
     // exit nonzero so the operator's wrapper script sees the
     // failure.
     if args.await_ack {
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(args.await_timeout);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(args.await_timeout);
         // Kick the handshake with a 1-byte probe (it'll be queued
         // and flushed once Established).
-        let _ = transport
-            .send_data(&added_peer_id, b".", 0, 0)
-            .await;
+        let _ = transport.send_data(&added_peer_id, b".", 0, 0).await;
         while tokio::time::Instant::now() < deadline {
             if transport.peer_is_established(&added_peer_id).await {
                 break;

@@ -111,12 +111,7 @@ async fn emit_beacons_skips_via_mesh_peers() {
     // subsequent recv timeouts don't include in-flight traffic
     // from the handshake phase.
     for t in [&alice, &bob, &bridge] {
-        loop {
-            match tokio::time::timeout(Duration::from_millis(100), t.recv()).await {
-                Ok(Some(_)) => {}
-                _ => break,
-            }
-        }
+        while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(100), t.recv()).await {}
     }
 
     // Snapshot metrics, then observe beacon emission rate over a

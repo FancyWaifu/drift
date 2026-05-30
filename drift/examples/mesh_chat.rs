@@ -68,8 +68,7 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -136,10 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     //    The bridge process discards everything it receives (it's
     //    just a relay), so this byte is harmless.
-    if let Err(e) = transport
-        .send_data(&bridge_handle, b".", 0, 0)
-        .await
-    {
+    if let Err(e) = transport.send_data(&bridge_handle, b".", 0, 0).await {
         eprintln!("[evt] bridge trigger send_data error: {} (continuing)", e);
     }
 
@@ -183,7 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Let the bridge handshake complete + beacons propagate
     //    so the bridge learns the route to the target. Without
     //    this, the first few send_data calls return UnknownPeer.
-    println!("[evt] waiting {}s for mesh route to settle...", args.settle_secs);
+    println!(
+        "[evt] waiting {}s for mesh route to settle...",
+        args.settle_secs
+    );
     tokio::time::sleep(Duration::from_secs(args.settle_secs)).await;
 
     // 6. Send count messages to the mesh-routed target. Each
@@ -200,15 +199,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Retry loop in case the mesh route isn't learned yet.
         let mut tries = 0;
         loop {
-            match transport
-                .send_data(&target_handle, &msg, 0, 0)
-                .await
-            {
+            match transport.send_data(&target_handle, &msg, 0, 0).await {
                 Ok(_) => break,
                 Err(e) => {
                     tries += 1;
                     if tries >= args.send_retries {
-                        return Err(format!("send_data #{} gave up after {} retries: {}", i, tries, e).into());
+                        return Err(format!(
+                            "send_data #{} gave up after {} retries: {}",
+                            i, tries, e
+                        )
+                        .into());
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }

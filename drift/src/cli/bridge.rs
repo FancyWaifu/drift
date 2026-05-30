@@ -20,8 +20,8 @@
 use super::identity::load_identity;
 use super::{expand_path, BridgeArgs};
 use anyhow::{anyhow, bail, Context, Result};
-use drift::identity::Identity;
 use drift::crypto::derive_peer_id;
+use drift::identity::Identity;
 use drift::{Direction, Transport, TransportConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -186,10 +186,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             // to the reliability cost. Federation behavior is
             // now identical regardless of whether the target
             // is a homelab IP or a public WAN one.
-            let scheme = url
-                .split_once("://")
-                .map(|(s, _)| s)
-                .unwrap_or(&url);
+            let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or(&url);
             // `iroh://` is QUIC over UDP with its own ALPN-
             // multiplexed bidirectional streams — the same shape
             // as `webtransport://` (which is already preferred),
@@ -246,11 +243,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             match transport.connect_federate(&url, pubkey).await {
                 Ok(handle) => {
                     outbound_handles.push(handle);
-                    eprintln!(
-                        "│   {} ({})",
-                        spec,
-                        &hex::encode(pubkey)[..16]
-                    );
+                    eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
                 }
                 Err(e) => {
                     eprintln!(
@@ -263,8 +256,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
                     let t = transport.clone();
                     let url_owned = url.clone();
                     tokio::spawn(async move {
-                        let mut backoff =
-                            std::time::Duration::from_millis(500);
+                        let mut backoff = std::time::Duration::from_millis(500);
                         let max = std::time::Duration::from_secs(10);
                         loop {
                             tokio::time::sleep(backoff).await;
@@ -278,14 +270,11 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
                                     // loop for this peer inline,
                                     // since the outer for-loop has
                                     // already moved past it.
-                                    let mut ticker = tokio::time::interval(
-                                        std::time::Duration::from_secs(2),
-                                    );
+                                    let mut ticker =
+                                        tokio::time::interval(std::time::Duration::from_secs(2));
                                     loop {
                                         ticker.tick().await;
-                                        let _ = t
-                                            .send_data(&handle, b".", 0, 0)
-                                            .await;
+                                        let _ = t.send_data(&handle, b".", 0, 0).await;
                                     }
                                 }
                                 Err(e) => {
@@ -357,10 +346,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
                 let entries = t.established_client_entries().await;
                 let n = entries.len();
                 t.announce_directory(&entries).await;
-                tracing::debug!(
-                    n_clients = n,
-                    "federation directory: announced"
-                );
+                tracing::debug!(n_clients = n, "federation directory: announced");
                 ticker.tick().await;
             }
         });
@@ -388,8 +374,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
 fn listen_urls_from_inventory(args: &BridgeArgs) -> Result<Vec<String>> {
     let path = match &args.config {
         Some(p) => p.clone(),
-        None => drift_config::io::default_path()
-            .context("resolve default drift.toml path")?,
+        None => drift_config::io::default_path().context("resolve default drift.toml path")?,
     };
     if !path.exists() {
         bail!(
@@ -399,8 +384,7 @@ fn listen_urls_from_inventory(args: &BridgeArgs) -> Result<Vec<String>> {
             path.display()
         );
     }
-    let doc = drift_config::io::read(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let doc = drift_config::io::read(&path).with_context(|| format!("read {}", path.display()))?;
 
     let host_name = match &args.host_name {
         Some(n) => n.clone(),
@@ -441,8 +425,8 @@ fn parse_peer_spec(spec: &str) -> Result<(SocketAddr, [u8; 32])> {
             spec
         )
     })?;
-    let pubkey_bytes = hex::decode(pub_hex)
-        .with_context(|| format!("hex decode of pubkey in {:?}", spec))?;
+    let pubkey_bytes =
+        hex::decode(pub_hex).with_context(|| format!("hex decode of pubkey in {:?}", spec))?;
     if pubkey_bytes.len() != 32 {
         bail!(
             "--peer {} pubkey must be 64 hex chars (32 bytes), got {}",
@@ -457,10 +441,7 @@ fn parse_peer_spec(spec: &str) -> Result<(SocketAddr, [u8; 32])> {
     // because the bridge already has a listener socket bound;
     // `add_peer(addr, Initiator)` records the addr and DRIFT
     // uses the existing interface to send to it.
-    let host_port = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url);
+    let host_port = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let addr: SocketAddr = host_port
         .parse()
         .with_context(|| format!("parse host:port from {:?}", url))?;
@@ -484,8 +465,8 @@ fn parse_federate_spec(spec: &str) -> Result<(String, [u8; 32])> {
             spec
         )
     })?;
-    let pubkey_bytes = hex::decode(pub_hex)
-        .with_context(|| format!("hex decode of pubkey in {:?}", spec))?;
+    let pubkey_bytes =
+        hex::decode(pub_hex).with_context(|| format!("hex decode of pubkey in {:?}", spec))?;
     if pubkey_bytes.len() != 32 {
         bail!(
             "--federate {} pubkey must be 64 hex chars (32 bytes), got {}",

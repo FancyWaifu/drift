@@ -256,14 +256,9 @@ async fn pipe(stream: Stream, tcp: TcpStream) {
     // stream → tcp
     let sr = stream.clone();
     let s_to_t = tokio::spawn(async move {
-        loop {
-            match sr.recv().await {
-                Some(bytes) => {
-                    if tcp_w.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                None => break,
+        while let Some(bytes) = sr.recv().await {
+            if tcp_w.write_all(&bytes).await.is_err() {
+                break;
             }
         }
         let _ = tcp_w.shutdown().await;

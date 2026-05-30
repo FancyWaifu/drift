@@ -159,8 +159,7 @@ impl SessionKey {
     pub fn seal(&self, seq: u32, packet_type: u8, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(plaintext.len() + AUTH_TAG_LEN);
         out.extend_from_slice(plaintext);
-        let nonce =
-            RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
+        let nonce = RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
         let tag = self
             .key
             .seal_in_place_separate_tag(nonce, RingAad::from(aad), &mut out)
@@ -183,8 +182,7 @@ impl SessionKey {
     ) -> Result<()> {
         let start = out.len();
         out.extend_from_slice(plaintext);
-        let nonce =
-            RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
+        let nonce = RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
         let tag = self
             .key
             .seal_in_place_separate_tag(nonce, RingAad::from(aad), &mut out[start..])
@@ -211,8 +209,7 @@ impl SessionKey {
         // portion of the buffer. Copy in, open, truncate to the
         // plaintext length.
         let mut buf = ciphertext.to_vec();
-        let nonce =
-            RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
+        let nonce = RingNonce::assume_unique_for_key(nonce_bytes(self.direction, seq, packet_type));
         let pt_len = self
             .key
             .open_in_place(nonce, RingAad::from(aad), &mut buf)

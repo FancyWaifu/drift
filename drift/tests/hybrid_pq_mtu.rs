@@ -153,7 +153,11 @@ async fn hybrid_pq_handshake_succeeds_at_1500_mtu() {
     );
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let server_handle = client

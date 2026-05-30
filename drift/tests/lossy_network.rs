@@ -227,22 +227,19 @@ async fn coalescing_under_reorder() {
     let mut count = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), bob_t.recv()).await {
-            Ok(Some(p)) => {
-                let tick = u32::from_be_bytes(p.payload.try_into().unwrap());
-                // Critical property: the receiver must never see a tick
-                // that's lower than one it already received, because
-                // coalescing drops stale packets.
-                assert!(
-                    tick > highest_seen,
-                    "coalesce violation: saw {} after {}",
-                    tick,
-                    highest_seen
-                );
-                highest_seen = tick;
-                count += 1;
-            }
-            _ => {}
+        if let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(500), bob_t.recv()).await {
+            let tick = u32::from_be_bytes(p.payload.try_into().unwrap());
+            // Critical property: the receiver must never see a tick
+            // that's lower than one it already received, because
+            // coalescing drops stale packets.
+            assert!(
+                tick > highest_seen,
+                "coalesce violation: saw {} after {}",
+                tick,
+                highest_seen
+            );
+            highest_seen = tick;
+            count += 1;
         }
     }
     println!(

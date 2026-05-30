@@ -17,8 +17,7 @@ use drift::{Direction, Transport, TransportConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
-async fn make_pair() -> (Arc<Transport>, Arc<Transport>, drift::PeerId, drift::PeerId)
-{
+async fn make_pair() -> (Arc<Transport>, Arc<Transport>, drift::PeerId, drift::PeerId) {
     let alice_id = Identity::from_secret_bytes([0xA1; 32]);
     let bob_id = Identity::from_secret_bytes([0xB1; 32]);
     let alice_pub = alice_id.public_bytes();
@@ -34,7 +33,11 @@ async fn make_pair() -> (Arc<Transport>, Arc<Transport>, drift::PeerId, drift::P
     );
     let bob_addr = bob.local_addr().unwrap();
     let bob_peer = bob
-        .add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let alice = Arc::new(
@@ -133,13 +136,15 @@ async fn restart_after_addr_change_targets_new_addr() {
 
     // Switch alice to point at bob2 + reset session.
     let alice_pub = Identity::from_secret_bytes([0xA1; 32]).public_bytes();
-    bob2.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob2.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     assert!(
-        alice
-            .update_peer_addr(&alice_peer_for_bob, bob2_addr)
-            .await,
+        alice.update_peer_addr(&alice_peer_for_bob, bob2_addr).await,
         "update_peer_addr should succeed"
     );
     alice.restart_handshake(&alice_peer_for_bob).await.unwrap();
@@ -158,7 +163,7 @@ async fn restart_after_addr_change_targets_new_addr() {
     // Sanity: the original bob shouldn't have received this.
     let leaked = tokio::time::timeout(Duration::from_millis(200), bob.recv()).await;
     assert!(
-        matches!(leaked, Err(_)),
+        leaked.is_err(),
         "original bob should NOT have received the post-restart packet"
     );
 }

@@ -26,13 +26,9 @@ async fn thousand_concurrent_handshakes() {
         ..Default::default()
     };
     let server = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            server_id,
-            server_cfg,
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), server_id, server_cfg)
+            .await
+            .unwrap(),
     );
     let server_addr = server.local_addr().unwrap();
 
@@ -59,7 +55,6 @@ async fn thousand_concurrent_handshakes() {
     // Fire all N clients concurrently.
     let mut handles = Vec::with_capacity(N);
     for secret in client_secrets {
-        let server_pub = server_pub;
         handles.push(tokio::spawn(async move {
             let client = Transport::bind(
                 "127.0.0.1:0".parse().unwrap(),

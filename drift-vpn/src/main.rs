@@ -20,11 +20,11 @@ mod status;
 // v0.12: tun/utun via the `tun` crate works on Linux + macOS;
 // Windows Wintun is on the roadmap.
 #[cfg(unix)]
-mod daemon;
+mod adapter_probe;
 #[cfg(unix)]
 mod bridge_failover;
 #[cfg(unix)]
-mod adapter_probe;
+mod daemon;
 
 #[derive(Parser)]
 #[clap(
@@ -220,10 +220,10 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Add a [vpn] block to drift.toml with the chosen CIDR.
+    /// Add a `[vpn]` block to drift.toml with the chosen CIDR.
     Init {
         /// Path to drift.toml. Default: /etc/drift/drift.toml as
-        /// root, otherwise <user-config>/drift/drift.toml.
+        /// root, otherwise `<user-config>/drift/drift.toml`.
         #[clap(short, long)]
         config: Option<PathBuf>,
         /// Tun network range, e.g. 10.99.0.0/24.
@@ -233,21 +233,21 @@ enum ConfigCmd {
         #[clap(long, default_value = "1340")]
         mtu: u32,
     },
-    /// Assign a tun address + role to one host in [vpn].
+    /// Assign a tun address + role to one host in `[vpn]`.
     Assign {
         /// Path to drift.toml.
         #[clap(short, long)]
         config: Option<PathBuf>,
-        /// Host name (must already exist in [hosts.X]).
+        /// Host name (must already exist in `[hosts.X]`).
         host: String,
-        /// IP inside the [vpn] cidr, e.g. 10.99.0.1.
+        /// IP inside the `[vpn]` cidr, e.g. 10.99.0.1.
         #[clap(long)]
         tun: String,
         /// hub | spoke | client.
         #[clap(long, default_value = "spoke")]
         role: String,
     },
-    /// Generate per-host config.toml files into ./out/<host>/.
+    /// Generate per-host config.toml files into `./out/<host>/`.
     Gen {
         /// Path to drift.toml.
         #[clap(short, long)]
@@ -318,7 +318,10 @@ async fn main() -> Result<()> {
                 anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
             }
         }
-        Cmd::Doctor { config: path, probe } => {
+        Cmd::Doctor {
+            config: path,
+            probe,
+        } => {
             #[cfg(unix)]
             {
                 let path = resolve_vpn_config_path(path);
@@ -330,9 +333,7 @@ async fn main() -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (path, probe);
-                anyhow::bail!(
-                    "drift-vpn doctor requires a Unix-like OS (Linux + macOS today)"
-                );
+                anyhow::bail!("drift-vpn doctor requires a Unix-like OS (Linux + macOS today)");
             }
         }
         Cmd::Install {
@@ -443,7 +444,7 @@ fn resolve_config_path(opt: Option<PathBuf>) -> Result<PathBuf> {
 /// (`up`, `doctor`). Walks a list of candidate paths and picks
 /// the first that exists, falling back to the system-level
 /// `/etc/drift-vpn/config.toml` so the caller gets a clear
-/// "not found at <that path>" if nothing is configured anywhere.
+/// "not found at `<that path>`" if nothing is configured anywhere.
 ///
 /// Distinct from `resolve_config_path` (which resolves the
 /// shared drift.toml inventory used by `drift-vpn config`).
@@ -520,7 +521,10 @@ mod resolve_vpn_config_path_tests {
         // point of the fix.
         let cands = default_vpn_config_candidates();
         let sys = PathBuf::from("/etc/drift-vpn/config.toml");
-        let sys_idx = cands.iter().position(|p| p == &sys).expect("sys path present");
+        let sys_idx = cands
+            .iter()
+            .position(|p| p == &sys)
+            .expect("sys path present");
         assert!(
             cands.len() > 1 && sys_idx > 0 || std::env::var_os("HOME").is_none(),
             "per-user candidate must come before the system fallback (cands = {:?})",

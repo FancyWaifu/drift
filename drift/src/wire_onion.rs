@@ -1,4 +1,4 @@
-//! `onion://` — DRIFT over Tor via [arti].
+//! `onion://` — DRIFT over Tor via `arti`.
 //!
 //! Two halves, both wrapping arti's `DataStream` (which impls
 //! `AsyncRead + AsyncWrite`) in length-prefix framing identical
@@ -87,12 +87,8 @@ fn synthesize_peer_addr() -> SocketAddr {
 // stream.
 
 pub struct OnionPacketIO {
-    reader: tokio::sync::Mutex<
-        Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
-    >,
-    writer: tokio::sync::Mutex<
-        Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>,
-    >,
+    reader: tokio::sync::Mutex<Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>>,
+    writer: tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
 }
@@ -103,10 +99,8 @@ impl OnionPacketIO {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
     {
         let (r, w) = tokio::io::split(stream);
-        let boxed_r: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static> =
-            Box::new(r);
-        let boxed_w: Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static> =
-            Box::new(w);
+        let boxed_r: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static> = Box::new(r);
+        let boxed_w: Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static> = Box::new(w);
         Self {
             reader: tokio::sync::Mutex::new(boxed_r),
             writer: tokio::sync::Mutex::new(boxed_w),
@@ -159,9 +153,7 @@ impl PacketIO for OnionPacketIO {
 
 fn onion_connector_factory(
     addr_str: String,
-) -> Pin<
-    Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>,
-> {
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
     Box::pin(async move {
         let client = shared_tor_client().await?;
         let stream = client
@@ -197,9 +189,7 @@ pub struct OnionListenerIO {
     // containing `OnionListenerIO` can satisfy the `Listener:
     // Send + Sync` bound. `accept(&mut self)` is the only place
     // we touch it, so contention is zero.
-    stream_requests: tokio::sync::Mutex<
-        Pin<Box<dyn Stream<Item = StreamRequest> + Send>>,
-    >,
+    stream_requests: tokio::sync::Mutex<Pin<Box<dyn Stream<Item = StreamRequest> + Send>>>,
 }
 
 impl OnionListenerIO {
@@ -225,8 +215,8 @@ impl OnionListenerIO {
             .and_then(|p| p.parse::<u16>().ok());
 
         let client = shared_tor_client().await?;
-        let nickname_str = std::env::var("DRIFT_ONION_NICKNAME")
-            .unwrap_or_else(|_| "drift".to_string());
+        let nickname_str =
+            std::env::var("DRIFT_ONION_NICKNAME").unwrap_or_else(|_| "drift".to_string());
         let nickname: HsNickname = nickname_str.clone().try_into().map_err(|e| {
             io::Error::other(format!("invalid nickname {:?}: {:?}", nickname_str, e))
         })?;
@@ -274,9 +264,10 @@ impl Listener for OnionListenerIO {
     }
     async fn accept(&mut self) -> io::Result<Arc<dyn PacketIO>> {
         let mut stream = self.stream_requests.lock().await;
-        let req = stream.next().await.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "onion stream ended")
-        })?;
+        let req = stream
+            .next()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "onion stream ended"))?;
         drop(stream);
         let stream = req
             .accept(Connected::new_empty())
@@ -291,9 +282,9 @@ impl Listener for OnionListenerIO {
 fn onion_listener_factory(
     addr_str: String,
 ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
-    Box::pin(async move {
-        Ok(Box::new(OnionListenerIO::bind(addr_str).await?) as Box<dyn Listener>)
-    })
+    Box::pin(
+        async move { Ok(Box::new(OnionListenerIO::bind(addr_str).await?) as Box<dyn Listener>) },
+    )
 }
 
 inventory::submit! {

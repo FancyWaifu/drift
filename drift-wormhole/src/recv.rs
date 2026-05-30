@@ -40,8 +40,7 @@ pub async fn run(args: RecvArgs) -> Result<()> {
         (pk, url)
     } else {
         // No `@` → treat as petname.
-        let book = drift::contacts::Contacts::load_default()
-            .context("loading contacts")?;
+        let book = drift::contacts::Contacts::load_default().context("loading contacts")?;
         let contact = book.resolve(&args.peer).ok_or_else(|| {
             anyhow!(
                 "no contact named {:?} (and the value isn't a PUBHEX@addr literal). \
@@ -59,10 +58,9 @@ pub async fn run(args: RecvArgs) -> Result<()> {
     };
 
     let identity = crate::load_identity(args.identity_file)?;
-    let (transport, peer_addr) =
-        Transport::connect_url(&url, identity, TransportConfig::default())
-            .await
-            .with_context(|| format!("connecting to {}", url))?;
+    let (transport, peer_addr) = Transport::connect_url(&url, identity, TransportConfig::default())
+        .await
+        .with_context(|| format!("connecting to {}", url))?;
     let transport = Arc::new(transport);
     let server_peer = transport
         .add_peer(sender_pub, peer_addr, Direction::Initiator)
@@ -117,10 +115,13 @@ pub async fn run(args: RecvArgs) -> Result<()> {
     let mut received: u64 = 0;
 
     while received < header.size {
-        let chunk = stream
-            .recv()
-            .await
-            .ok_or_else(|| anyhow!("sender closed stream early at {} / {} bytes", received, header.size))?;
+        let chunk = stream.recv().await.ok_or_else(|| {
+            anyhow!(
+                "sender closed stream early at {} / {} bytes",
+                received,
+                header.size
+            )
+        })?;
         // Guard against a runaway sender writing past the
         // declared size. If they overshoot we trim and reject.
         let max_take = (header.size - received) as usize;

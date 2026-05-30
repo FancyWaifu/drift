@@ -67,7 +67,7 @@ async fn peak_packet_rate_single_pair() {
         // drain. Without yielding, the single-threaded runtime would
         // never schedule the receiver and the kernel buffer would drop
         // most packets.
-        if sent % 100 == 0 {
+        if sent.is_multiple_of(100) {
             tokio::task::yield_now().await;
         }
     }

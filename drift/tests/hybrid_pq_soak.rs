@@ -60,7 +60,11 @@ async fn hybrid_pq_soak_stable_steady_state() {
     );
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let server_handle = client
@@ -95,10 +99,7 @@ async fn hybrid_pq_soak_stable_steady_state() {
     let mut ticker = tokio::time::interval(Duration::from_millis(10));
     while start.elapsed() < Duration::from_secs(soak_secs) {
         ticker.tick().await;
-        match client
-            .send_data(&server_handle, b"soak-tick", 0, 0)
-            .await
-        {
+        match client.send_data(&server_handle, b"soak-tick", 0, 0).await {
             Ok(_) => sent += 1,
             Err(_) => send_errors += 1,
         }

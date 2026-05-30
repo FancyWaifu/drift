@@ -12,7 +12,7 @@
 //!    handling, ranges, MIME, or any of the other things hyper
 //!    already does correctly.
 //!
-//! 2. [`Identity`] helpers — the persistent X25519 identity at
+//! 2. `Identity` helpers — the persistent X25519 identity at
 //!    `~/.config/drift/identity.key` (shared with future DRIFT
 //!    tools so a friend's pubkey is the same across drift-mosh,
 //!    drift-http, etc.). Auto-created on first call, mode 0600.

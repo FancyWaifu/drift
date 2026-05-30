@@ -622,8 +622,7 @@ impl Inner {
                 // under attack load. See `peer_shards.rs` for the
                 // two-step verify pattern and stale-positive
                 // analysis.
-                let src_is_known_peer =
-                    self.peers.addr_belongs_to_known_peer(&src_addr).await;
+                let src_is_known_peer = self.peers.addr_belongs_to_known_peer(&src_addr).await;
                 if !src_is_known_peer {
                     self.metrics
                         .forward_unauth_drops

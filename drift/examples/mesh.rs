@@ -60,14 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bob's receive loop (in a task).
     tokio::spawn(async move {
-        loop {
-            match bob.recv().await {
-                Some(p) => {
-                    let s = String::from_utf8_lossy(&p.payload).to_string();
-                    println!("BOB recv seq={} from mesh: {:?}", p.seq, s);
-                }
-                None => break,
-            }
+        while let Some(p) = bob.recv().await {
+            let s = String::from_utf8_lossy(&p.payload).to_string();
+            println!("BOB recv seq={} from mesh: {:?}", p.seq, s);
         }
     });
 

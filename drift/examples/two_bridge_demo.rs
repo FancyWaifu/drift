@@ -40,8 +40,8 @@ const PORT: u16 = 9000;
 fn identity_for(idx: u8) -> Identity {
     let mut seed = [0u8; 32];
     seed[0] = 0xC0 | idx; // make seeds visibly distinct in logs
-    for i in 1..32 {
-        seed[i] = idx;
+    for byte in seed.iter_mut().skip(1) {
+        *byte = idx;
     }
     Identity::from_secret_bytes(seed)
 }
@@ -147,9 +147,7 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
         loop {
             ticker.tick().await;
-            let _ = t_for_ping
-                .send_data(&other_pid, b"bridge-ping", 0, 0)
-                .await;
+            let _ = t_for_ping.send_data(&other_pid, b"bridge-ping", 0, 0).await;
         }
     });
 
@@ -157,11 +155,8 @@ async fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
     // need to drain `recv()` so the channel doesn't fill up;
     // any message addressed to the bridge itself (the
     // periodic pings) is silently dropped.
-    loop {
-        match transport.recv().await {
-            Some(_msg) => {} // drain
-            None => break,
-        }
+    while let Some(_msg) = transport.recv().await {
+        // drain
     }
     Ok(())
 }
@@ -220,7 +215,11 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         transport
-            .add_peer(pubkey_for(client_idx(other)), placeholder, Direction::Initiator)
+            .add_peer(
+                pubkey_for(client_idx(other)),
+                placeholder,
+                Direction::Initiator,
+            )
             .await
             .ok();
     }

@@ -56,17 +56,17 @@ async fn hybrid_pq_handshake_with_always_cookies() {
     let client_id = Identity::from_secret_bytes([0xC2; 32]);
     let client_pub = client_id.public_bytes();
     let client = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            client_id,
-            pq_client_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), client_id, pq_client_cfg())
+            .await
+            .unwrap(),
     );
 
     server
-        .add_peer(client_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
+        .add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
         .await
         .unwrap();
     let server_handle = client

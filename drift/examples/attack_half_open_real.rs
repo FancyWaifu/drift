@@ -22,10 +22,7 @@ use std::time::Duration;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!(
-            "usage: {} <bridge_url> <bridge_pub_hex> <N>",
-            args[0]
-        );
+        eprintln!("usage: {} <bridge_url> <bridge_pub_hex> <N>", args[0]);
         std::process::exit(1);
     }
     let bridge_url = args[1].clone();
@@ -40,12 +37,7 @@ async fn main() -> Result<()> {
     let mut failures = 0;
     for i in 0..n {
         let id = Identity::generate();
-        let result = Transport::connect_url(
-            &bridge_url,
-            id,
-            TransportConfig::default(),
-        )
-        .await;
+        let result = Transport::connect_url(&bridge_url, id, TransportConfig::default()).await;
         match result {
             Ok((t, addr)) => {
                 let t = Arc::new(t);

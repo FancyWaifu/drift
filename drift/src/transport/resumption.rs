@@ -692,13 +692,17 @@ impl Inner {
             };
             peer.addr = src;
 
-            (wire, src, prev_session, was_awaiting_data, addr_changed_from)
+            (
+                wire,
+                src,
+                prev_session,
+                was_awaiting_data,
+                addr_changed_from,
+            )
         };
         let _ = prev_session; // (used inside the block via clone)
         if let Some(old) = addr_changed_from {
-            self.peers
-                .note_addr_changed(client_peer_id, old, src)
-                .await;
+            self.peers.note_addr_changed(client_peer_id, old, src).await;
         }
 
         if was_awaiting_data {

@@ -35,10 +35,7 @@ use tokio::time::sleep;
 ///   [2..4] count (u16 BE)
 ///   [4..]  count * (32-byte pubkey ‖ 96-byte ticket)
 /// ```
-fn build_directory_payload(
-    client_seeds: &[[u8; 32]],
-    announcing_bridge_pub: &[u8; 32],
-) -> Vec<u8> {
+fn build_directory_payload(client_seeds: &[[u8; 32]], announcing_bridge_pub: &[u8; 32]) -> Vec<u8> {
     let count = client_seeds.len() as u16;
     let mut out = Vec::with_capacity(4 + client_seeds.len() * (32 + 96));
     out.push(2); // version
@@ -110,10 +107,9 @@ async fn three_bridges() -> (
         Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_b_id, cfg.clone())
             .await
             .unwrap();
-    let bridge_c =
-        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_c_id, cfg)
-            .await
-            .unwrap();
+    let bridge_c = Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bridge_c_id, cfg)
+        .await
+        .unwrap();
 
     let b_to_receiver = bridge_b
         .add_peer(receiver_pub, receiver_addr, Direction::Initiator)
@@ -156,8 +152,7 @@ async fn three_bridges() -> (
 
 #[tokio::test]
 async fn cross_announcer_conflict_keeps_first_writer() {
-    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv, b_pub, c_pub) =
-        three_bridges().await;
+    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv, b_pub, c_pub) = three_bridges().await;
 
     // A deterministic seed for the contested client identity,
     // so both B and C can mint valid tickets for "themselves
@@ -262,10 +257,7 @@ async fn announce_set_replaces_announcer_entries() {
     // bridge with zero clients (e.g. just-restarted) signals
     // "drop everything you previously recorded under me".
     bridge_b
-        .__debug_send_directory_announcement(
-            &b_to_recv,
-            &build_directory_payload(&[], &b_pub),
-        )
+        .__debug_send_directory_announcement(&b_to_recv, &build_directory_payload(&[], &b_pub))
         .await
         .unwrap();
     sleep(Duration::from_millis(300)).await;
@@ -287,8 +279,7 @@ async fn announce_set_replaces_announcer_entries() {
 
 #[tokio::test]
 async fn migration_after_silence_is_allowed() {
-    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv, b_pub, c_pub) =
-        three_bridges().await;
+    let (receiver, bridge_b, bridge_c, b_to_recv, c_to_recv, b_pub, c_pub) = three_bridges().await;
 
     let migrating_seed = [0xCDu8; 32];
     let migrating = pub_for(&migrating_seed);
@@ -306,10 +297,7 @@ async fn migration_after_silence_is_allowed() {
 
     // B announces it no longer has the client (it disconnected).
     bridge_b
-        .__debug_send_directory_announcement(
-            &b_to_recv,
-            &build_directory_payload(&[], &b_pub),
-        )
+        .__debug_send_directory_announcement(&b_to_recv, &build_directory_payload(&[], &b_pub))
         .await
         .unwrap();
     sleep(Duration::from_millis(300)).await;
@@ -336,7 +324,5 @@ async fn migration_after_silence_is_allowed() {
          first-write-wins only fires while the prior write is \
          still live."
     );
-    println!(
-        "MIGRATION OK: client moved B → C cleanly after B's empty announce"
-    );
+    println!("MIGRATION OK: client moved B → C cleanly after B's empty announce");
 }

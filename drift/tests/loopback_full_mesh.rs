@@ -47,8 +47,8 @@ fn fast_cfg() -> TransportConfig {
 }
 
 fn parse_bound_url(url: &str) -> SocketAddr {
-    url.splitn(2, "://")
-        .nth(1)
+    url.split_once("://")
+        .map(|x| x.1)
         .expect("bound URL must have scheme")
         .parse()
         .expect("bound URL ends in valid socketaddr")
@@ -81,7 +81,8 @@ fn assert_full_mesh_delivered(received: &[HashSet<String>], label: &str) {
             .map(|i| format!("from-{}-to-{}", i + 1, recv_idx + 1))
             .collect();
         assert_eq!(
-            got, &expected,
+            got,
+            &expected,
             "{}: peer {} got {:?} but expected {:?}",
             label,
             recv_idx + 1,
@@ -236,11 +237,11 @@ async fn build_url_bridge_and_peers(
     let bridge_id = Identity::generate();
     let bridge_pub = bridge_id.public_bytes();
     let bridge_pid = drift::crypto::derive_peer_id(&bridge_pub);
-    let (bridge, primary_bound_url) =
-        Transport::bind_url(&primary_url, bridge_id, cfg.clone()).await.unwrap();
+    let (bridge, primary_bound_url) = Transport::bind_url(&primary_url, bridge_id, cfg.clone())
+        .await
+        .unwrap();
     let bridge = Arc::new(bridge);
-    let mut bridge_urls: std::collections::HashMap<&str, String> =
-        std::collections::HashMap::new();
+    let mut bridge_urls: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     bridge_urls.insert(primary, primary_bound_url);
     for scheme in wanted.iter().copied() {
         if scheme == primary {
@@ -253,12 +254,15 @@ async fn build_url_bridge_and_peers(
 
     let mut peers: Vec<PeerState> = Vec::with_capacity(N);
     for scheme in per_peer_scheme.iter().copied() {
-        let bridge_url = bridge_urls.get(scheme).expect("scheme has no bridge listener");
+        let bridge_url = bridge_urls
+            .get(scheme)
+            .expect("scheme has no bridge listener");
         let id = Identity::generate();
         let pubkey = id.public_bytes();
         let peer_id = drift::crypto::derive_peer_id(&pubkey);
-        let (transport, peer_addr) =
-            Transport::connect_url(bridge_url, id, cfg.clone()).await.unwrap();
+        let (transport, peer_addr) = Transport::connect_url(bridge_url, id, cfg.clone())
+            .await
+            .unwrap();
         let transport = Arc::new(transport);
         transport
             .add_peer(bridge_pub, peer_addr, Direction::Initiator)
@@ -423,8 +427,7 @@ async fn build_webrtc_bridge_and_peers() -> (Arc<Transport>, PeerId, Vec<PeerSta
             .unwrap(),
     );
 
-    async fn new_pc(
-    ) -> Result<Arc<RTCPeerConnection>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn new_pc() -> Result<Arc<RTCPeerConnection>, Box<dyn std::error::Error + Send + Sync>> {
         let api = APIBuilder::new().build();
         let cfg = RTCConfiguration {
             ice_servers: vec![],
@@ -441,11 +444,7 @@ async fn build_webrtc_bridge_and_peers() -> (Arc<Transport>, PeerId, Vec<PeerSta
     /// Build one bridge↔peer pair, exchange SDP in-process,
     /// return the two ready-to-use DataChannels. Bridge is the
     /// offerer (creates the DC), peer is the answerer.
-    async fn rtc_pair(
-    ) -> (
-        Arc<RTCDataChannel>,
-        Arc<RTCDataChannel>,
-    ) {
+    async fn rtc_pair() -> (Arc<RTCDataChannel>, Arc<RTCDataChannel>) {
         let pc_b = new_pc().await.unwrap();
         let pc_p = new_pc().await.unwrap();
 
@@ -497,8 +496,7 @@ async fn build_webrtc_bridge_and_peers() -> (Arc<Transport>, PeerId, Vec<PeerSta
         pc_p.set_local_description(answer).await.unwrap();
         ice_complete(pc_p.clone()).await;
         let p_local = pc_p.local_description().await.unwrap();
-        pc_b
-            .set_remote_description(RTCSessionDescription::answer(p_local.sdp).unwrap())
+        pc_b.set_remote_description(RTCSessionDescription::answer(p_local.sdp).unwrap())
             .await
             .unwrap();
 
@@ -531,13 +529,15 @@ async fn build_webrtc_bridge_and_peers() -> (Arc<Transport>, PeerId, Vec<PeerSta
 
         // Peer-side data channel becomes the peer's transport's
         // primary interface.
-        let peer_io: Arc<dyn PacketIO> =
-            Arc::new(WebRTCPacketIO::new(dc_peer_side, placeholder_p));
+        let peer_io: Arc<dyn PacketIO> = Arc::new(WebRTCPacketIO::new(dc_peer_side, placeholder_p));
         let id = Identity::generate();
         let pubkey = id.public_bytes();
         let peer_id = drift::crypto::derive_peer_id(&pubkey);
-        let transport =
-            Arc::new(Transport::bind_with_io(peer_io, id, cfg.clone()).await.unwrap());
+        let transport = Arc::new(
+            Transport::bind_with_io(peer_io, id, cfg.clone())
+                .await
+                .unwrap(),
+        );
         transport
             .add_peer(bridge_pub, placeholder_b, Direction::Initiator)
             .await

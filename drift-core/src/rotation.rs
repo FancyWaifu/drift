@@ -71,7 +71,12 @@ pub struct RotationAnnounce {
 
 /// Build the byte sequence that gets signed. Keep this in lockstep
 /// with [`verify`] — any change here is a wire-incompatible break.
-fn signed_body(old_pub: &[u8; 32], new_pub: &[u8; 32], issued_at_ms: u64, nonce: &[u8; 32]) -> [u8; 104] {
+fn signed_body(
+    old_pub: &[u8; 32],
+    new_pub: &[u8; 32],
+    issued_at_ms: u64,
+    nonce: &[u8; 32],
+) -> [u8; 104] {
     let mut buf = [0u8; 104];
     buf[0..32].copy_from_slice(old_pub);
     buf[32..64].copy_from_slice(new_pub);

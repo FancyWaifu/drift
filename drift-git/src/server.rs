@@ -68,9 +68,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    "drift=warn,drift_git=info,drift_git_server=info".into()
-                }),
+                .unwrap_or_else(|_| "drift=warn,drift_git=info,drift_git_server=info".into()),
         )
         .init();
 
@@ -95,8 +93,10 @@ async fn main() -> Result<()> {
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    let mut config = TransportConfig::default();
-    config.accept_any_peer = true; // we ACL on the stream side
+    let config = TransportConfig {
+        accept_any_peer: true, // we ACL on the stream side
+        ..TransportConfig::default()
+    };
 
     // Two modes:
     //   --bind  → listen on a wire (existing flow)
@@ -156,9 +156,10 @@ async fn main() -> Result<()> {
 
     let manager = StreamManager::bind(transport.clone()).await;
 
-    let root = cli.root.canonicalize().with_context(|| {
-        format!("canonicalizing root {:?}", cli.root)
-    })?;
+    let root = cli
+        .root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing root {:?}", cli.root))?;
     let allow_any = cli.allow_any;
     let allowed = Arc::new(allowed);
 
@@ -175,10 +176,8 @@ async fn main() -> Result<()> {
         let allowed = allowed.clone();
         let root = root.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_stream(
-                stream, peer_id, transport, allowed, root, allow_any,
-            )
-            .await
+            if let Err(e) =
+                handle_stream(stream, peer_id, transport, allowed, root, allow_any).await
             {
                 warn!(?peer_id, error = %e, "stream handler exited with error");
             }
@@ -220,7 +219,9 @@ async fn handle_stream(
     let resolved = match resolve_repo(&root, &repo_path) {
         Ok(p) => p,
         Err(e) => {
-            let _ = stream.send(&build_err_reply(&format!("bad repo path: {}", e))).await;
+            let _ = stream
+                .send(&build_err_reply(&format!("bad repo path: {}", e)))
+                .await;
             return Err(e);
         }
     };
@@ -228,7 +229,10 @@ async fn handle_stream(
         let _ = stream
             .send(&build_err_reply(&format!("no such repo: {}", repo_path)))
             .await;
-        return Err(anyhow!("requested repo {:?} not found under root", repo_path));
+        return Err(anyhow!(
+            "requested repo {:?} not found under root",
+            repo_path
+        ));
     }
 
     info!(
@@ -374,8 +378,7 @@ fn resolve_repo(root: &Path, requested: &str) -> Result<PathBuf> {
 }
 
 fn parse_pubkey_hex(s: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(s)
-        .with_context(|| format!("invalid hex pubkey: {:?}", s))?;
+    let bytes = hex::decode(s).with_context(|| format!("invalid hex pubkey: {:?}", s))?;
     if bytes.len() != 32 {
         return Err(anyhow!(
             "pubkey must be 32 bytes (64 hex chars), got {}",
@@ -397,12 +400,10 @@ async fn load_identity(path: &Path) -> Result<Identity> {
         b
     } else {
         let s = std::str::from_utf8(&raw)
-            .with_context(|| {
-                format!("identity file {:?} not UTF-8 hex or raw 32 bytes", path)
-            })?
+            .with_context(|| format!("identity file {:?} not UTF-8 hex or raw 32 bytes", path))?
             .trim();
-        let bytes = hex::decode(s)
-            .with_context(|| format!("identity file {:?} hex decode", path))?;
+        let bytes =
+            hex::decode(s).with_context(|| format!("identity file {:?} hex decode", path))?;
         if bytes.len() != 32 {
             return Err(anyhow!("identity file must contain 32 bytes (raw or hex)"));
         }

@@ -105,9 +105,13 @@ async fn pair_via_proxy(
             .await
             .unwrap(),
     );
-    bob.add_peer(alice_pub, "0.0.0.0:0".parse().unwrap(), Direction::Responder)
-        .await
-        .unwrap();
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
     let bob_addr = bob.local_addr().unwrap();
 
     let proxy_addr = if bw_bps > 0 {

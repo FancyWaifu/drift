@@ -18,9 +18,7 @@
 //!     means the production path will also work.
 
 use drift::identity::Identity;
-use drift::wire_dns::{
-    build_response_message, decode_fragment, parse_qname_labels,
-};
+use drift::wire_dns::{build_response_message, decode_fragment, parse_qname_labels};
 use drift::wire_doh::DohPacketIO;
 use drift::{Direction, Transport, TransportConfig};
 use std::collections::HashMap;
@@ -43,10 +41,7 @@ use hyper_util::rt::TokioIo;
 
 type Inboxes = Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>;
 
-async fn handle(
-    req: Request<Incoming>,
-    inboxes: Inboxes,
-) -> Result<Response<String>, Infallible> {
+async fn handle(req: Request<Incoming>, inboxes: Inboxes) -> Result<Response<String>, Infallible> {
     if req.method() != Method::POST {
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -118,7 +113,8 @@ async fn handle(
     // Cap responses to 8 fragments per round-trip so we don't blow
     // through the 16-byte u16 RDLENGTH or have weirdly huge bodies.
     // Anything beyond 8 stays queued for the next poll.
-    let (return_now, defer): (Vec<_>, Vec<_>) = pending.into_iter().enumerate().partition(|(i, _)| *i < 8);
+    let (return_now, defer): (Vec<_>, Vec<_>) =
+        pending.into_iter().enumerate().partition(|(i, _)| *i < 8);
     if !defer.is_empty() {
         let mut map = inboxes.lock().await;
         let entry = map.entry(me_hex.clone()).or_default();
@@ -169,10 +165,7 @@ async fn spawn_mock_relay() -> std::net::SocketAddr {
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| handle(req, inboxes.clone())),
-                    )
+                    .serve_connection(io, service_fn(move |req| handle(req, inboxes.clone())))
                     .await;
             });
         }
@@ -198,18 +191,20 @@ async fn handshake_and_data_through_doh_relay() {
     // Bob's URL: me=bob, peer=alice.
     let bob_url = format!("doh://{}/v1/{}/{}", relay_addr, bob_hex, alice_hex);
 
-    let alice_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(DohPacketIO::connect(&format!(
+    let alice_io: Arc<dyn drift::io::PacketIO> = Arc::new(
+        DohPacketIO::connect(&format!(
             "http://{}/v1/{}/{}",
             relay_addr, alice_hex, bob_hex
         ))
-        .unwrap());
-    let bob_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(DohPacketIO::connect(&format!(
+        .unwrap(),
+    );
+    let bob_io: Arc<dyn drift::io::PacketIO> = Arc::new(
+        DohPacketIO::connect(&format!(
             "http://{}/v1/{}/{}",
             relay_addr, bob_hex, alice_hex
         ))
-        .unwrap());
+        .unwrap(),
+    );
 
     // Sanity that the URLs round-tripped fine — these aren't
     // used past this point but exercising the formatter ensures
@@ -237,7 +232,11 @@ async fn handshake_and_data_through_doh_relay() {
             .unwrap(),
     );
     let bob_peer = alice_t
-        .add_peer(bob_pub, "127.0.0.1:1".parse().unwrap(), Direction::Initiator)
+        .add_peer(
+            bob_pub,
+            "127.0.0.1:1".parse().unwrap(),
+            Direction::Initiator,
+        )
         .await
         .unwrap();
 

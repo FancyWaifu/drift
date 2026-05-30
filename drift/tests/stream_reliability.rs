@@ -63,7 +63,7 @@ async fn spawn_proxy(target: SocketAddr, profile: LossProfile) -> SocketAddr {
             }
 
             let base = profile.latency_ms;
-            let jitter = rng.gen_range(0..=profile.jitter_ms.saturating_add(1)) as u64;
+            let jitter = rng.gen_range(0..=profile.jitter_ms.saturating_add(1));
             let mut delay = base + jitter;
             if rng.gen::<f64>() < profile.reorder_rate {
                 delay += rng.gen_range(10..=50);

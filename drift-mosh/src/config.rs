@@ -90,9 +90,8 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 }

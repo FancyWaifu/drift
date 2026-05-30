@@ -113,8 +113,11 @@ async fn main() -> Result<()> {
     let identity = load_identity(cli.identity_file.as_deref())?;
     let pub_bytes = identity.public_bytes();
     let pub_hex: String = pub_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    let peer_id_hex: String =
-        identity.peer_id().iter().map(|b| format!("{:02x}", b)).collect();
+    let peer_id_hex: String = identity
+        .peer_id()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
 
     let tcfg = TransportConfig {
         // Auth model: client pins our pubkey (--server-pub).
@@ -142,16 +145,15 @@ async fn main() -> Result<()> {
         let (bridge_url, bridge_pub_hex) = bridge_spec
             .split_once('@')
             .ok_or_else(|| anyhow!("--bridge expected <url>@<pubkey-hex>"))?;
-        let bridge_pub_bytes = hex::decode(bridge_pub_hex)
-            .context("--bridge pubkey is not valid hex")?;
+        let bridge_pub_bytes =
+            hex::decode(bridge_pub_hex).context("--bridge pubkey is not valid hex")?;
         if bridge_pub_bytes.len() != 32 {
             return Err(anyhow!("--bridge pubkey must be 32 bytes"));
         }
         let mut bridge_pub = [0u8; 32];
         bridge_pub.copy_from_slice(&bridge_pub_bytes);
 
-        let (t, bridge_addr) =
-            Transport::connect_url(bridge_url, identity, tcfg).await?;
+        let (t, bridge_addr) = Transport::connect_url(bridge_url, identity, tcfg).await?;
         let t = Arc::new(t);
         let bridge_handle = t
             .add_peer(bridge_pub, bridge_addr, drift::Direction::Initiator)
@@ -181,8 +183,7 @@ async fn main() -> Result<()> {
         let t_watchdog = t.clone();
         let bridge_handle_watchdog = bridge_handle;
         tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(2));
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
             // Skip the first tick (which fires immediately) — we
             // already sent the warmup byte above.
             ticker.tick().await;
@@ -221,12 +222,8 @@ async fn main() -> Result<()> {
                 // the path warm.
                 match t_watchdog.peer_metrics(&bridge_handle_watchdog).await {
                     None => {
-                        tracing::warn!(
-                            "bridge peer entry vanished; restarting handshake"
-                        );
-                        let _ = t_watchdog
-                            .restart_handshake(&bridge_handle_watchdog)
-                            .await;
+                        tracing::warn!("bridge peer entry vanished; restarting handshake");
+                        let _ = t_watchdog.restart_handshake(&bridge_handle_watchdog).await;
                         let _ = t_watchdog
                             .send_data(&bridge_handle_watchdog, b".", 0, 0)
                             .await;
@@ -238,9 +235,7 @@ async fn main() -> Result<()> {
                                 elapsed_s = elapsed.as_secs(),
                                 "bridge link silent for >60s; restarting handshake"
                             );
-                            let _ = t_watchdog
-                                .restart_handshake(&bridge_handle_watchdog)
-                                .await;
+                            let _ = t_watchdog.restart_handshake(&bridge_handle_watchdog).await;
                             let _ = t_watchdog
                                 .send_data(&bridge_handle_watchdog, b".", 0, 0)
                                 .await;
@@ -267,8 +262,7 @@ async fn main() -> Result<()> {
             // moment to complete; `register_presence_to` errors
             // out cleanly if the session isn't Established yet.
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(300));
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
                 for _ in 0..3 {
                     match t_presence
@@ -299,8 +293,8 @@ async fn main() -> Result<()> {
     // the `<scheme>://` prefix to get the bare `host:port`
     // form the legacy banner uses.
     let local_addr_str = bound_url
-        .splitn(2, "://")
-        .nth(1)
+        .split_once("://")
+        .map(|x| x.1)
         .unwrap_or(&bound_url)
         .to_string();
 
@@ -427,6 +421,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session_worker(
     sessions: Arc<Mutex<HashMap<PeerId, Session>>>,
     peer_id: PeerId,
@@ -709,7 +704,7 @@ async fn session_worker(
                 _ = &mut resize_cancel_rx => break,
             }
         }
-        pty_master_for_resize  // returned so main can store it back
+        pty_master_for_resize // returned so main can store it back
     });
 
     // Wait for any reason to detach — either a live task
@@ -748,7 +743,9 @@ async fn session_worker(
         let _ = ctrl_stream.close().await;
     }
 
-    session.attached.store(false, std::sync::atomic::Ordering::Release);
+    session
+        .attached
+        .store(false, std::sync::atomic::Ordering::Release);
     session.last_detached = Some(Instant::now());
     if let Some(m) = master_back {
         session.pty_master = Some(m);
@@ -862,8 +859,7 @@ fn load_identity(file: Option<&str>) -> Result<Identity> {
         Some(path) => {
             let hex_str = std::fs::read_to_string(path)
                 .with_context(|| format!("reading identity {}", path))?;
-            let bytes = hex::decode(hex_str.trim())
-                .context("identity file is not hex")?;
+            let bytes = hex::decode(hex_str.trim()).context("identity file is not hex")?;
             if bytes.len() != 32 {
                 return Err(anyhow!("identity must be 32 bytes, got {}", bytes.len()));
             }

@@ -26,6 +26,11 @@
 //! handle — don't retain pointers into them across a free call.
 
 #![allow(non_camel_case_types)]
+// Every `unsafe extern "C" fn` in this crate carries the same
+// safety contract: callers must pass valid pointers obtained from
+// the corresponding constructor. The contract is documented in
+// the C header (drift_ffi.h), not in per-function Rust docs.
+#![allow(clippy::missing_safety_doc)]
 
 use drift::identity::Identity;
 use drift::{Direction, Received, Transport};
@@ -139,9 +144,7 @@ pub struct DriftIdentity(Identity);
 /// Generate a fresh random identity.
 #[no_mangle]
 pub extern "C" fn drift_identity_generate() -> *mut DriftIdentity {
-    ffi_catch_ptr!({
-        Box::into_raw(Box::new(DriftIdentity(Identity::generate())))
-    })
+    ffi_catch_ptr!({ Box::into_raw(Box::new(DriftIdentity(Identity::generate()))) })
 }
 
 /// Build an identity deterministically from a 32-byte seed.

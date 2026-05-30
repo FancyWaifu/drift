@@ -271,8 +271,7 @@ impl Inner {
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
-            let echoed =
-                rx.open(header.seq, PacketType::PathResponse as u8, &aad, body)?;
+            let echoed = rx.open(header.seq, PacketType::PathResponse as u8, &aad, body)?;
             if echoed.len() != PATH_CHALLENGE_LEN {
                 return Ok(());
             }

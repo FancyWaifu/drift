@@ -36,7 +36,11 @@ pub async fn run(args: SendArgs) -> Result<()> {
     // byte-fidelity. For large files this is a couple of
     // seconds of disk I/O — perfectly acceptable for the
     // share-with-a-friend use case.
-    eprintln!("hashing {} ({})...", name, humansize::format_size(size, humansize::BINARY));
+    eprintln!(
+        "hashing {} ({})...",
+        name,
+        humansize::format_size(size, humansize::BINARY)
+    );
     let sha256 = hash_file(&args.file).await?;
 
     // Identity + DRIFT transport.
@@ -79,10 +83,14 @@ pub async fn run(args: SendArgs) -> Result<()> {
         .or_else(|| bound_urls.first())
         .cloned()
         .unwrap();
-    let primary_addr = primary.splitn(2, "://").nth(1).unwrap_or(&primary);
+    let primary_addr = primary.split_once("://").map(|x| x.1).unwrap_or(&primary);
 
     eprintln!();
-    eprintln!("Ready to send: {} ({})", name, humansize::format_size(size, humansize::BINARY));
+    eprintln!(
+        "Ready to send: {} ({})",
+        name,
+        humansize::format_size(size, humansize::BINARY)
+    );
     eprintln!();
     eprintln!("Run on the recipient:");
     eprintln!();
@@ -91,8 +99,8 @@ pub async fn run(args: SendArgs) -> Result<()> {
     if bound_urls.len() > 1 {
         eprintln!("Or via another transport:");
         for url in &bound_urls {
-            let scheme = url.splitn(2, "://").next().unwrap_or("?");
-            let addr = url.splitn(2, "://").nth(1).unwrap_or(url);
+            let scheme = url.split("://").next().unwrap_or("?");
+            let addr = url.split_once("://").map(|x| x.1).unwrap_or(url);
             if scheme == "udp" {
                 continue; // already printed
             }
@@ -163,7 +171,11 @@ pub async fn run(args: SendArgs) -> Result<()> {
     match ack {
         Ack::Ok { recipient_name } => {
             eprintln!();
-            eprintln!("done — sent {} ({})", name, humansize::format_size(size, humansize::BINARY));
+            eprintln!(
+                "done — sent {} ({})",
+                name,
+                humansize::format_size(size, humansize::BINARY)
+            );
             // Record the recipient in our local contacts file
             // (we already have their pubkey from the DRIFT
             // handshake). Best-effort.

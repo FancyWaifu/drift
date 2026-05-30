@@ -179,19 +179,14 @@ async fn find_peer_resolves_cross_bridge_and_caches() {
     // for client_x and has an Established session with them.
     let client_x_secret = [0x33; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (_client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (_client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
     // Pre-conditions: bridge_b knows nothing about client_x yet.
     assert!(
         !bridge_b.peer_directory_contains(&client_x_pub),
         "directory should be empty before lookup"
     );
-    assert_eq!(
-        bridge_b.pending_finds_count(),
-        0,
-        "no pending finds yet"
-    );
+    assert_eq!(bridge_b.pending_finds_count(), 0, "no pending finds yet");
 
     // Trigger: ship a Federated envelope at bridge_b with
     // target_bridge_pub = UNKNOWN_BRIDGE_PUB, target_client_pub
@@ -235,12 +230,8 @@ async fn find_peer_resolves_cross_bridge_and_caches() {
 
     // Second envelope for the same target: must NOT originate a
     // new FindPeer (cache hit).
-    let env2 = build_unknown_target_envelope(
-        &client_x_pub,
-        &b_pub,
-        &source_client_pub,
-        b"second packet",
-    );
+    let env2 =
+        build_unknown_target_envelope(&client_x_pub, &b_pub, &source_client_pub, b"second packet");
     bridge_a
         .__debug_send_federated_envelope(&_a_to_b, &env2)
         .await
@@ -276,8 +267,7 @@ async fn find_peer_multi_hop_chain() {
 
     let client_x_secret = [0xDD; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (_client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (_client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
     assert!(
         !bridge_c.peer_directory_contains(&client_x_pub),
@@ -290,12 +280,7 @@ async fn find_peer_multi_hop_chain() {
     // B doesn't host client_x but its ttl > 1, so B forwards
     // to A. A replies PeerHere → B re-emits with extended path
     // → C caches.
-    let env = build_unknown_target_envelope(
-        &client_x_pub,
-        &c_pub,
-        &[0x77; 32],
-        b"hop-test",
-    );
+    let env = build_unknown_target_envelope(&client_x_pub, &c_pub, &[0x77; 32], b"hop-test");
     bridge_b
         .__debug_send_federated_envelope(&_b_to_c, &env)
         .await
@@ -339,15 +324,10 @@ async fn find_peer_disabled_blocks_discovery() {
 
     let client_x_secret = [0xE3; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (_client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (_client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
-    let env = build_unknown_target_envelope(
-        &client_x_pub,
-        &b_pub,
-        &[0x77; 32],
-        b"should-be-dropped",
-    );
+    let env =
+        build_unknown_target_envelope(&client_x_pub, &b_pub, &[0x77; 32], b"should-be-dropped");
     bridge_a
         .__debug_send_federated_envelope(&a_to_b, &env)
         .await
@@ -378,22 +358,15 @@ async fn originate_hashed_resolves_and_caches() {
     // the hash on the wire.
     let bridge_a = build_transport([0xE5; 32]).await;
     let a_pub = Identity::from_secret_bytes([0xE5; 32]).public_bytes();
-    let bridge_b =
-        build_transport_with_mode([0xE6; 32], FindPeerMode::OriginateHashed).await;
+    let bridge_b = build_transport_with_mode([0xE6; 32], FindPeerMode::OriginateHashed).await;
     let b_pub = Identity::from_secret_bytes([0xE6; 32]).public_bytes();
     let (a_to_b, _b_to_a) = federate(&bridge_a, &a_pub, &bridge_b, &b_pub).await;
 
     let client_x_secret = [0xE7; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (_client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (_client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
-    let env = build_unknown_target_envelope(
-        &client_x_pub,
-        &b_pub,
-        &[0x77; 32],
-        b"hashed-trigger",
-    );
+    let env = build_unknown_target_envelope(&client_x_pub, &b_pub, &[0x77; 32], b"hashed-trigger");
     bridge_a
         .__debug_send_federated_envelope(&a_to_b, &env)
         .await
@@ -422,8 +395,7 @@ async fn no_forward_mode_answers_local_but_does_not_transit() {
     // for client_x.
     let bridge_a = build_transport([0xF1; 32]).await;
     let a_pub = Identity::from_secret_bytes([0xF1; 32]).public_bytes();
-    let bridge_b =
-        build_transport_with_mode([0xF2; 32], FindPeerMode::NoForward).await;
+    let bridge_b = build_transport_with_mode([0xF2; 32], FindPeerMode::NoForward).await;
     let b_pub = Identity::from_secret_bytes([0xF2; 32]).public_bytes();
     let bridge_c = build_transport([0xF3; 32]).await;
     let c_pub = Identity::from_secret_bytes([0xF3; 32]).public_bytes();
@@ -434,16 +406,11 @@ async fn no_forward_mode_answers_local_but_does_not_transit() {
     let client_x_secret = [0xF4; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
     // Place client_x on C, not B.
-    let (_client_x, _x_to_c) =
-        client_on_bridge(&bridge_c, &c_pub, client_x_secret).await;
+    let (_client_x, _x_to_c) = client_on_bridge(&bridge_c, &c_pub, client_x_secret).await;
 
     // Trigger A → B with UNKNOWN_BRIDGE_PUB for client_x.
-    let env = build_unknown_target_envelope(
-        &client_x_pub,
-        &b_pub,
-        &[0x88; 32],
-        b"noforward-trigger",
-    );
+    let env =
+        build_unknown_target_envelope(&client_x_pub, &b_pub, &[0x88; 32], b"noforward-trigger");
     bridge_b
         .__debug_send_federated_envelope(&_b_to_a, &env)
         .await
@@ -503,12 +470,8 @@ async fn bridge_fault_counter_increments_on_unfulfilled_claim() {
     // Trigger a FindPeer originating from A for the phony
     // target. A's local lookup misses, peer_directory misses,
     // neg_cache misses, B's filter says "yes" → FindPeer to B.
-    let env = build_unknown_target_envelope(
-        &phony_target,
-        &a_pub,
-        &[0xDD; 32],
-        b"claim-but-no-deliver",
-    );
+    let env =
+        build_unknown_target_envelope(&phony_target, &a_pub, &[0xDD; 32], b"claim-but-no-deliver");
     bridge_b
         .__debug_send_federated_envelope(&b_to_a, &env)
         .await
@@ -614,12 +577,8 @@ async fn fanout_skips_peer_past_fault_threshold() {
         .unwrap();
     sleep(Duration::from_millis(150)).await;
 
-    let env = build_unknown_target_envelope(
-        &phony_target,
-        &a_pub,
-        &[0xCC; 32],
-        b"should-not-reach-B",
-    );
+    let env =
+        build_unknown_target_envelope(&phony_target, &a_pub, &[0xCC; 32], b"should-not-reach-B");
     bridge_b
         .__debug_send_federated_envelope(&b_to_a, &env)
         .await
@@ -859,8 +818,7 @@ async fn unknown_bridge_pub_resolves_to_local_client() {
     // so the bridge has session+ticket gates satisfied (same
     // gates handle_find_peer would check).
     let local_client_secret = [0x92; 32];
-    let local_client_pub =
-        Identity::from_secret_bytes(local_client_secret).public_bytes();
+    let local_client_pub = Identity::from_secret_bytes(local_client_secret).public_bytes();
     let (_local_client, _local_to_bridge) =
         client_on_bridge(&bridge, &bridge_pub, local_client_secret).await;
 
@@ -930,8 +888,7 @@ async fn proactive_announce_propagates_2_hops() {
 
     let client_x_secret = [0xDE; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (_client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (_client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
     // First announce hop: A → B.
     let a_entries = bridge_a.established_client_entries().await;
@@ -991,8 +948,7 @@ async fn proactive_announce_respects_configurable_hops_cap() {
 
     let client_x_secret = [0xEF; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (_client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (_client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
     // Walk announces along the chain. Each bridge has to
     // re-emit before the next hop learns.
@@ -1060,8 +1016,7 @@ async fn live_multi_hop_forwarding_via_directory() {
 
     let client_x_secret = [0xDF; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (client_x, _x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (client_x, _x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
     // Drive announces both hops:
     //   1) A → B: B learns X with hops=0 (direct).
@@ -1104,8 +1059,8 @@ async fn live_multi_hop_forwarding_via_directory() {
     let payload = b"live-multi-hop-phase-f";
     let env = build_unknown_target_envelope(
         &client_x_pub,
-        &c_pub,           // source_bridge: the envelope claims to come from a client on C
-        &[0xEE; 32],      // source_client: hypothetical
+        &c_pub,      // source_bridge: the envelope claims to come from a client on C
+        &[0xEE; 32], // source_client: hypothetical
         payload,
     );
     bridge_b
@@ -1141,16 +1096,10 @@ async fn peer_gone_evicts_cached_route() {
 
     let client_x_secret = [0xCC; 32];
     let client_x_pub = Identity::from_secret_bytes(client_x_secret).public_bytes();
-    let (client_x, x_to_a) =
-        client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
+    let (client_x, x_to_a) = client_on_bridge(&bridge_a, &a_pub, client_x_secret).await;
 
     // Trigger initial discovery so bridge_b caches the route.
-    let env = build_unknown_target_envelope(
-        &client_x_pub,
-        &b_pub,
-        &[0x77; 32],
-        b"trigger",
-    );
+    let env = build_unknown_target_envelope(&client_x_pub, &b_pub, &[0x77; 32], b"trigger");
     bridge_a
         .__debug_send_federated_envelope(&a_to_b, &env)
         .await

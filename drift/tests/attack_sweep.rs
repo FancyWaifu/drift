@@ -39,12 +39,8 @@ async fn med1_oversized_frame_is_rejected() {
     .await
     .unwrap();
     let _bridge = Arc::new(bridge);
-    let bridge_addr: std::net::SocketAddr = bridge_url
-        .splitn(2, "://")
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let bridge_addr: std::net::SocketAddr =
+        bridge_url.split_once("://").unwrap().1.parse().unwrap();
     use tokio::io::AsyncWriteExt;
     let mut s = TcpStream::connect(bridge_addr).await.unwrap();
     // Send a length prefix claiming 65535 bytes, then send 0
@@ -79,12 +75,8 @@ async fn med2_http_smuggling_malformed_headers_dont_panic() {
     .await
     .unwrap();
     let _bridge = Arc::new(bridge);
-    let bridge_addr: std::net::SocketAddr = bridge_url
-        .splitn(2, "://")
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let bridge_addr: std::net::SocketAddr =
+        bridge_url.split_once("://").unwrap().1.parse().unwrap();
     use tokio::io::AsyncWriteExt;
     // Malformed: no host header, conflicting CL, oversized header.
     let payloads: &[&[u8]] = &[
@@ -129,12 +121,8 @@ async fn med3_ws_ping_flood_is_handled_by_tungstenite() {
     .await
     .unwrap();
     let _bridge = Arc::new(bridge);
-    let bridge_addr: std::net::SocketAddr = bridge_url
-        .splitn(2, "://")
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let bridge_addr: std::net::SocketAddr =
+        bridge_url.split_once("://").unwrap().1.parse().unwrap();
     let url = format!("ws://{}/", bridge_addr);
     if let Ok((mut ws, _)) = tokio_tungstenite::connect_async(&url).await {
         // 100 pings in tight succession.

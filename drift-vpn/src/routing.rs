@@ -91,6 +91,7 @@ impl RouteTable {
     /// scan would need to also check that the matching peer is
     /// the one we received from, which is the same number of
     /// comparisons but with worse locality.
+    #[allow(dead_code)]
     pub fn src_is_valid(&self, peer: &PeerId, src: IpAddr) -> bool {
         matches!(self.src_status(peer, src), SrcStatus::Allowed)
     }
@@ -198,8 +199,7 @@ pub fn classify_for_qos(pkt: &[u8]) -> (u16, u32) {
                 return (0, 0);
             }
             let sport = u16::from_be_bytes([pkt[header_len], pkt[header_len + 1]]);
-            let dport =
-                u16::from_be_bytes([pkt[header_len + 2], pkt[header_len + 3]]);
+            let dport = u16::from_be_bytes([pkt[header_len + 2], pkt[header_len + 3]]);
             let payload_len = pkt.len() - header_len - 8;
             // Latency-sensitive control? DNS, NTP, mDNS, …
             if dport < 1024 || sport < 1024 {
@@ -282,12 +282,8 @@ mod tests {
     fn parse_ipv6() {
         let mut pkt = vec![0x60];
         pkt.resize(40, 0);
-        pkt[8..24].copy_from_slice(&[
-            0x20, 0x01, 0xdb, 0x8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ]);
-        pkt[24..40].copy_from_slice(&[
-            0x20, 0x01, 0xdb, 0x8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-        ]);
+        pkt[8..24].copy_from_slice(&[0x20, 0x01, 0xdb, 0x8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        pkt[24..40].copy_from_slice(&[0x20, 0x01, 0xdb, 0x8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
         let (src, dst) = parse_endpoints(&pkt).unwrap();
         assert!(matches!(src, IpAddr::V6(_)));
         assert!(matches!(dst, IpAddr::V6(_)));
@@ -304,11 +300,17 @@ mod tests {
             peer_id: [2u8; 8],
             allowed_ips: vec!["10.0.1.0/24".parse().unwrap()],
         });
-        let r = t.route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))).unwrap();
+        let r = t
+            .route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
+            .unwrap();
         assert_eq!(r.peer_id, [1u8; 8]);
-        let r = t.route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 9))).unwrap();
+        let r = t
+            .route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 9)))
+            .unwrap();
         assert_eq!(r.peer_id, [2u8; 8]);
-        assert!(t.route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1))).is_none());
+        assert!(t
+            .route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1)))
+            .is_none());
     }
 
     #[test]
@@ -329,10 +331,14 @@ mod tests {
             allowed_ips: vec!["10.0.5.0/24".parse().unwrap()],
         });
         // 10.0.5.7 is in both, B is more specific.
-        let r = t.route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 5, 7))).unwrap();
+        let r = t
+            .route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 5, 7)))
+            .unwrap();
         assert_eq!(r.peer_id, pid_b, "more specific prefix must win");
         // 10.0.7.1 is only in A's /8.
-        let r = t.route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1))).unwrap();
+        let r = t
+            .route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1)))
+            .unwrap();
         assert_eq!(r.peer_id, pid_a);
         // Insert order shouldn't matter — repeat with reversed insert.
         let mut t2 = RouteTable::new();
@@ -344,7 +350,9 @@ mod tests {
             peer_id: pid_a,
             allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
         });
-        let r = t2.route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 5, 7))).unwrap();
+        let r = t2
+            .route_for_dst(IpAddr::V4(Ipv4Addr::new(10, 0, 5, 7)))
+            .unwrap();
         assert_eq!(r.peer_id, pid_b);
     }
 

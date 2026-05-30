@@ -311,7 +311,7 @@ async fn header_bit_flip_rejected() {
     hdr.encode(&mut buf);
     let _aad = canonical_aad(&buf);
     let mut wire = buf.to_vec();
-    wire.extend_from_slice(&vec![0u8; 16]);
+    wire.extend_from_slice(&[0u8; 16]);
 
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     sock.send_to(&wire, bob_t.local_addr().unwrap())

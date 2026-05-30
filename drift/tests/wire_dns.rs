@@ -31,10 +31,8 @@ async fn handshake_and_data_over_dns() {
     let bob_addr = bob_sock.local_addr().unwrap();
     let alice_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-    let bob_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(DnsPacketIO::new(bob_sock).unwrap());
-    let alice_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(DnsPacketIO::new(alice_sock).unwrap());
+    let bob_io: Arc<dyn drift::io::PacketIO> = Arc::new(DnsPacketIO::new(bob_sock).unwrap());
+    let alice_io: Arc<dyn drift::io::PacketIO> = Arc::new(DnsPacketIO::new(alice_sock).unwrap());
 
     let bob_t = Arc::new(
         Transport::bind_with_io(bob_io, bob_id, TransportConfig::default())
@@ -115,13 +113,10 @@ async fn handshake_via_url_dispatch() {
     let alice_pub = alice_id.public_bytes();
     let bob_pub = bob_id.public_bytes();
 
-    let (bob_t, bob_url) = Transport::bind_url(
-        "dns://127.0.0.1:0",
-        bob_id,
-        TransportConfig::default(),
-    )
-    .await
-    .unwrap();
+    let (bob_t, bob_url) =
+        Transport::bind_url("dns://127.0.0.1:0", bob_id, TransportConfig::default())
+            .await
+            .unwrap();
     let bob_t = Arc::new(bob_t);
     assert!(bob_url.starts_with("dns://"));
     bob_t
@@ -133,13 +128,10 @@ async fn handshake_via_url_dispatch() {
         .await
         .unwrap();
 
-    let (alice_t, bob_addr) = Transport::connect_url(
-        &bob_url,
-        alice_id,
-        TransportConfig::default(),
-    )
-    .await
-    .unwrap();
+    let (alice_t, bob_addr) =
+        Transport::connect_url(&bob_url, alice_id, TransportConfig::default())
+            .await
+            .unwrap();
     let alice_t = Arc::new(alice_t);
     let bob_peer = alice_t
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
@@ -172,10 +164,8 @@ async fn large_payload_fragmentation() {
     let bob_addr = bob_sock.local_addr().unwrap();
     let alice_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-    let bob_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(DnsPacketIO::new(bob_sock).unwrap());
-    let alice_io: Arc<dyn drift::io::PacketIO> =
-        Arc::new(DnsPacketIO::new(alice_sock).unwrap());
+    let bob_io: Arc<dyn drift::io::PacketIO> = Arc::new(DnsPacketIO::new(bob_sock).unwrap());
+    let alice_io: Arc<dyn drift::io::PacketIO> = Arc::new(DnsPacketIO::new(alice_sock).unwrap());
 
     let bob_t = Arc::new(
         Transport::bind_with_io(bob_io, bob_id, TransportConfig::default())

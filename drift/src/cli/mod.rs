@@ -313,9 +313,9 @@ pub struct RelayArgs {
 
 /// Expand ~ to home directory.
 pub fn expand_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
+    if let Some(stripped) = path.strip_prefix("~/") {
         if let Some(home) = dirs_home() {
-            return home.join(&path[2..]);
+            return home.join(stripped);
         }
     }
     PathBuf::from(path)

@@ -23,7 +23,7 @@
 //!   - A hears from B1: "I can reach C at cost ~0 µs."
 //!   - A hears from B2: "I can reach C at cost ~0 µs."
 //!   - A composes: "C via B1" cost ≈ neighbor_rtt_to_B1 (fast)
-//!                 "C via B2" cost ≈ neighbor_rtt_to_B2 (slow)
+//!     "C via B2" cost ≈ neighbor_rtt_to_B2 (slow)
 //!   - RTT-weighted `update_if_better` picks B1.
 //!
 //! We verify this by watching A's routing table and asserting

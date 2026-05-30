@@ -67,9 +67,9 @@ impl DriftGitUrl {
             ("udp".to_string(), body)
         };
 
-        let at_idx = body
-            .find('@')
-            .ok_or_else(|| anyhow!("URL missing `@` separator (need <peerhex>@<host>:<port>/<path>)"))?;
+        let at_idx = body.find('@').ok_or_else(|| {
+            anyhow!("URL missing `@` separator (need <peerhex>@<host>:<port>/<path>)")
+        })?;
         let (peer_hex, rest) = body.split_at(at_idx);
         let rest = &rest[1..]; // skip '@'
         if peer_hex.len() != 64 {
@@ -78,8 +78,8 @@ impl DriftGitUrl {
                 peer_hex.len()
             ));
         }
-        let peer_bytes = hex::decode(peer_hex)
-            .map_err(|e| anyhow!("invalid hex in peer pubkey: {}", e))?;
+        let peer_bytes =
+            hex::decode(peer_hex).map_err(|e| anyhow!("invalid hex in peer pubkey: {}", e))?;
         let mut peer_pub = [0u8; 32];
         peer_pub.copy_from_slice(&peer_bytes);
 
@@ -160,7 +160,12 @@ impl GitService {
 /// Build the request envelope a helper sends as the first chunk
 /// on a freshly-opened stream.
 pub fn build_request(service: GitService, repo_path: &str) -> Vec<u8> {
-    let s = format!("{}\n{}\n{}\n\n", PROTO_TAG, service.binary_name(), repo_path);
+    let s = format!(
+        "{}\n{}\n{}\n\n",
+        PROTO_TAG,
+        service.binary_name(),
+        repo_path
+    );
     s.into_bytes()
 }
 
@@ -175,8 +180,8 @@ pub fn parse_request(buf: &[u8]) -> Result<(GitService, String, usize)> {
         .windows(2)
         .position(|w| w == b"\n\n")
         .ok_or_else(|| anyhow!("incomplete handshake (no terminating blank line)"))?;
-    let head = std::str::from_utf8(&buf[..term])
-        .map_err(|_| anyhow!("non-UTF-8 handshake header"))?;
+    let head =
+        std::str::from_utf8(&buf[..term]).map_err(|_| anyhow!("non-UTF-8 handshake header"))?;
     let mut lines = head.lines();
     let tag = lines.next().ok_or_else(|| anyhow!("empty handshake"))?;
     if tag != PROTO_TAG {
@@ -269,8 +274,7 @@ pub fn parse_reply(buf: &[u8]) -> Result<usize> {
         .windows(2)
         .position(|w| w == b"\n\n")
         .ok_or_else(|| anyhow!("incomplete reply"))?;
-    let head = std::str::from_utf8(&buf[..term])
-        .map_err(|_| anyhow!("non-UTF-8 reply"))?;
+    let head = std::str::from_utf8(&buf[..term]).map_err(|_| anyhow!("non-UTF-8 reply"))?;
     let first = head.lines().next().unwrap_or("");
     if first == format!("{} ok", PROTO_TAG) {
         Ok(term + 2)

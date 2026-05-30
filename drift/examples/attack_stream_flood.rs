@@ -11,7 +11,7 @@
 //!   cargo run --release --example attack_stream_flood -p drift -- \
 //!     <bridge_url> <bridge_pub_hex> <N>
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use drift::identity::Identity;
 use drift::streams::StreamManager;
 use drift::{Direction, Transport, TransportConfig};
@@ -61,7 +61,12 @@ async fn main() -> Result<()> {
             }
         }
         if (i + 1) % 500 == 0 {
-            println!("  attempted {} (opened={}, failed={})", i + 1, opened, failed);
+            println!(
+                "  attempted {} (opened={}, failed={})",
+                i + 1,
+                opened,
+                failed
+            );
         }
     }
     println!("Done: opened={}, failed={}", opened, failed);

@@ -138,6 +138,7 @@ struct ConnectArgs {
     ///     contact, or
     ///   * a literal `PUBHEX@host:port` (or with scheme
     ///     prefix `PUBHEX@tcp://host:port`, etc.)
+    ///
     /// Pubkey is 64 hex chars (32 bytes).
     #[clap(long)]
     peer: String,
@@ -300,10 +301,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
 
 /// Apache-mode: run hyper http1 over the DRIFT stream and serve
 /// files from `root` via `tower-http::ServeDir`.
-async fn serve_files_on_stream(
-    stream: Arc<drift::streams::Stream>,
-    root: PathBuf,
-) -> Result<()> {
+async fn serve_files_on_stream(stream: Arc<drift::streams::Stream>, root: PathBuf) -> Result<()> {
     let io = TokioIo::new(StreamIo::new(stream));
     let serve_dir = ServeDir::new(root);
 
@@ -337,7 +335,11 @@ async fn serve_proxy_on_stream(
         .with_context(|| format!("dialing upstream {}", upstream))?;
     let mut io = StreamIo::new(stream);
     let (a, b) = tokio::io::copy_bidirectional(&mut io, &mut tcp).await?;
-    tracing::debug!(client_to_upstream = a, upstream_to_client = b, "proxy stream done");
+    tracing::debug!(
+        client_to_upstream = a,
+        upstream_to_client = b,
+        "proxy stream done"
+    );
     Ok(())
 }
 
@@ -452,8 +454,7 @@ async fn run_open(args: OpenArgs) -> Result<()> {
         // themselves.
         println!("{}", http_url);
     } else {
-        ::open::that(&http_url)
-            .with_context(|| format!("launching browser for {}", http_url))?;
+        ::open::that(&http_url).with_context(|| format!("launching browser for {}", http_url))?;
         eprintln!("opened {} in your default browser", http_url);
     }
     Ok(())
@@ -514,7 +515,7 @@ fn install_handler_macos(exe: &std::path::Path, user_apps: bool, dry_run: bool) 
     // failed open is debuggable after the fact (since GUI launches
     // have no terminal). `quoted form of` is AppleScript's safe
     // shell-escape — it handles spaces, quotes, $, etc.
-    let log_path = format!("$HOME/Library/Logs/drift-url.log");
+    let log_path = "$HOME/Library/Logs/drift-url.log".to_string();
     let script_contents = format!(
         "on open location this_URL\n\
          \tdo shell script \"{} open \" & quoted form of this_URL & \" >> {} 2>&1\"\n\
@@ -568,22 +569,27 @@ fn install_handler_macos(exe: &std::path::Path, user_apps: bool, dry_run: bool) 
     // LSUIElement keys osacompile didn't generate.
     let plist = app.join("Contents/Info.plist");
     let pb = "/usr/libexec/PlistBuddy";
-    let plist_str = plist.to_str().ok_or_else(|| anyhow!("non-utf8 plist path"))?;
+    let plist_str = plist
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 plist path"))?;
     // Bundle id — the LSSetDefault call below references it.
-    plistbuddy(pb, plist_str, "Set :CFBundleIdentifier app.drift.urlhandler")
-        .or_else(|_| {
-            plistbuddy(
-                pb,
-                plist_str,
-                "Add :CFBundleIdentifier string app.drift.urlhandler",
-            )
-        })
-        .context("setting CFBundleIdentifier")?;
+    plistbuddy(
+        pb,
+        plist_str,
+        "Set :CFBundleIdentifier app.drift.urlhandler",
+    )
+    .or_else(|_| {
+        plistbuddy(
+            pb,
+            plist_str,
+            "Add :CFBundleIdentifier string app.drift.urlhandler",
+        )
+    })
+    .context("setting CFBundleIdentifier")?;
     // CFBundleURLTypes array (skip if it already exists; PlistBuddy
     // returns nonzero in that case but the structure is fine).
     let _ = plistbuddy(pb, plist_str, "Add :CFBundleURLTypes array");
-    plistbuddy(pb, plist_str, "Add :CFBundleURLTypes:0 dict")
-        .context("adding URL type dict")?;
+    plistbuddy(pb, plist_str, "Add :CFBundleURLTypes:0 dict").context("adding URL type dict")?;
     plistbuddy(
         pb,
         plist_str,
@@ -680,8 +686,7 @@ fn tempdir_in_apps() -> Result<std::path::PathBuf> {
         .ok_or_else(|| anyhow!("no cache dir"))?
         .join("drift-http")
         .join("install");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -753,4 +758,3 @@ fn install_handler_linux(exe: &std::path::Path, dry_run: bool) -> Result<()> {
     println!("clicking a drift:// link should now run drift-http open");
     Ok(())
 }
-

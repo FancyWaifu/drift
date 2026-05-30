@@ -40,8 +40,8 @@ fn bridge_cfg() -> TransportConfig {
 }
 
 fn parse_bound(url: &str) -> SocketAddr {
-    url.splitn(2, "://")
-        .nth(1)
+    url.split_once("://")
+        .map(|x| x.1)
         .expect("scheme")
         .parse()
         .expect("socketaddr")
@@ -63,10 +63,7 @@ async fn open_stuck_connections(target: SocketAddr, n: usize) -> Vec<TcpStream> 
 
 /// Try to dial a legit drift client. Returns whether the
 /// handshake completes within `budget`.
-async fn legit_client_can_connect(
-    bridge_url: &str,
-    budget: Duration,
-) -> bool {
+async fn legit_client_can_connect(bridge_url: &str, budget: Duration) -> bool {
     let id = Identity::generate();
     let cfg = TransportConfig {
         handshake_max_attempts: 3,
@@ -74,23 +71,16 @@ async fn legit_client_can_connect(
         ..TransportConfig::default()
     };
     let connect = Transport::connect_url(bridge_url, id, cfg);
-    matches!(
-        tokio::time::timeout(budget, connect).await,
-        Ok(Ok(_))
-    )
+    matches!(tokio::time::timeout(budget, connect).await, Ok(Ok(_)))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ws_slowloris_can_exhaust_bridge_capacity() {
     // Bind a WS bridge.
     let bridge_id = Identity::from_secret_bytes([0xB0; 32]);
-    let (bridge, bridge_url) = Transport::bind_url(
-        "ws://127.0.0.1:0",
-        bridge_id,
-        bridge_cfg(),
-    )
-    .await
-    .unwrap();
+    let (bridge, bridge_url) = Transport::bind_url("ws://127.0.0.1:0", bridge_id, bridge_cfg())
+        .await
+        .unwrap();
     let _bridge = Arc::new(bridge);
     let bridge_addr = parse_bound(&bridge_url);
 
@@ -143,13 +133,9 @@ async fn ws_slowloris_can_exhaust_bridge_capacity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_slowloris_can_exhaust_bridge_capacity() {
     let bridge_id = Identity::from_secret_bytes([0xB0; 32]);
-    let (bridge, bridge_url) = Transport::bind_url(
-        "tls://127.0.0.1:0",
-        bridge_id,
-        bridge_cfg(),
-    )
-    .await
-    .unwrap();
+    let (bridge, bridge_url) = Transport::bind_url("tls://127.0.0.1:0", bridge_id, bridge_cfg())
+        .await
+        .unwrap();
     let _bridge = Arc::new(bridge);
     let bridge_addr = parse_bound(&bridge_url);
 
@@ -178,13 +164,9 @@ async fn tcp_slowloris_is_bounded_by_per_ip_cap() {
     // means a single attacker IP tops out at 32 stuck connections.
     // Legit clients should still get through.
     let bridge_id = Identity::from_secret_bytes([0xB0; 32]);
-    let (bridge, bridge_url) = Transport::bind_url(
-        "tcp://127.0.0.1:0",
-        bridge_id,
-        bridge_cfg(),
-    )
-    .await
-    .unwrap();
+    let (bridge, bridge_url) = Transport::bind_url("tcp://127.0.0.1:0", bridge_id, bridge_cfg())
+        .await
+        .unwrap();
     let _bridge = Arc::new(bridge);
     let bridge_addr = parse_bound(&bridge_url);
 

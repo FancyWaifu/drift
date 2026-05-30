@@ -48,9 +48,7 @@ async fn wait_for_ice_complete(pc: Arc<RTCPeerConnection>) {
 /// Mirror of the wasm-side flow: connect to signaling, receive
 /// offer, send answer, wait for the data channel to open via
 /// `ondatachannel`. Returns the opened channel.
-async fn connect_client(
-    ws_url: &str,
-) -> Arc<RTCDataChannel> {
+async fn connect_client(ws_url: &str) -> Arc<RTCDataChannel> {
     let (ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -103,7 +101,7 @@ async fn connect_client(
         sdp: local.sdp,
     })
     .unwrap();
-    ws_tx.send(Message::Text(answer_json.into())).await.unwrap();
+    ws_tx.send(Message::Text(answer_json)).await.unwrap();
 
     timeout(Duration::from_secs(15), dc_rx)
         .await
@@ -131,8 +129,9 @@ async fn webrtc_url_listener_end_to_end() {
         accept_any_peer: true,
         ..Default::default()
     };
-    let (server, bound_url) =
-        Transport::bind_url("webrtc://127.0.0.1:0", server_id, cfg).await.unwrap();
+    let (server, bound_url) = Transport::bind_url("webrtc://127.0.0.1:0", server_id, cfg)
+        .await
+        .unwrap();
     let server = Arc::new(server);
     eprintln!("[test] server bound at {}", bound_url);
 

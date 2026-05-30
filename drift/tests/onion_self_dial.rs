@@ -66,8 +66,7 @@ async fn drift_self_dial_through_tor() {
     // accepted PacketIO to a Transport. Only one client is
     // expected for this test, but the loop pattern matches what
     // a real server does.
-    let (bob_tx, mut bob_rx) =
-        tokio::sync::mpsc::channel::<Arc<dyn drift::io::PacketIO>>(1);
+    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel::<Arc<dyn drift::io::PacketIO>>(1);
     let _accept_task = tokio::spawn(async move {
         match bob_listener.accept().await {
             Ok(io) => {

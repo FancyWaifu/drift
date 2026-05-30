@@ -76,9 +76,7 @@ fn strip_pq_flag_if_hello(pkt: &mut Vec<u8>) -> bool {
 
 /// Bidirectional UDP proxy that strips PQ flags from client→server
 /// HELLOs. Returns (proxy_listen_addr, strip_counter).
-async fn spawn_strip_proxy(
-    server: SocketAddr,
-) -> (SocketAddr, Arc<AtomicUsize>) {
+async fn spawn_strip_proxy(server: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
     let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let addr = sock.local_addr().unwrap();
     let strip_count = Arc::new(AtomicUsize::new(0));
@@ -122,13 +120,9 @@ async fn pq_downgrade_via_flag_strip_is_refused() {
     let bob_id = Identity::from_secret_bytes([0xB0; 32]);
     let bob_pub = bob_id.public_bytes();
     let bob = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bob_id,
-            pq_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bob_id, pq_cfg())
+            .await
+            .unwrap(),
     );
     let bob_addr = bob.local_addr().unwrap();
 
@@ -139,13 +133,9 @@ async fn pq_downgrade_via_flag_strip_is_refused() {
     // through the proxy.
     let alice_id = Identity::from_secret_bytes([0xA0; 32]);
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            pq_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, pq_cfg())
+            .await
+            .unwrap(),
     );
     let bob_handle = alice
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)
@@ -194,13 +184,9 @@ async fn pq_handshake_works_when_proxy_passes_through_unmodified() {
     let bob_id = Identity::from_secret_bytes([0xB0; 32]);
     let bob_pub = bob_id.public_bytes();
     let bob = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            bob_id,
-            pq_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), bob_id, pq_cfg())
+            .await
+            .unwrap(),
     );
     let bob_addr = bob.local_addr().unwrap();
 
@@ -232,13 +218,9 @@ async fn pq_handshake_works_when_proxy_passes_through_unmodified() {
 
     let alice_id = Identity::from_secret_bytes([0xA0; 32]);
     let alice = Arc::new(
-        Transport::bind_with_config(
-            "127.0.0.1:0".parse().unwrap(),
-            alice_id,
-            pq_cfg(),
-        )
-        .await
-        .unwrap(),
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), alice_id, pq_cfg())
+            .await
+            .unwrap(),
     );
     let bob_handle = alice
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)

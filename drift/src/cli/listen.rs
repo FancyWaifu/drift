@@ -91,7 +91,7 @@ pub async fn run(args: &ListenArgs, identity_path: &str) -> Result<()> {
         }
     });
 
-    eprintln!("");
+    eprintln!();
     eprintln!("peer_id:    {}", hex(&transport.local_peer_id()));
     eprintln!("public_key: {}", hex(&transport.local_public()));
 
@@ -197,11 +197,10 @@ async fn handle_stream(stream: Stream, output_dir: Option<&Path>) -> Result<()> 
         data.extend_from_slice(&header);
     }
 
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv()).await {
-            Ok(Some(chunk)) => data.extend_from_slice(&chunk),
-            _ => break,
-        }
+    while let Ok(Some(chunk)) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv()).await
+    {
+        data.extend_from_slice(&chunk);
     }
 
     if let Some(dir) = output_dir {

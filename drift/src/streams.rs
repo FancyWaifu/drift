@@ -740,10 +740,7 @@ impl StreamManager {
         manager
     }
 
-    async fn run_session_reset_loop(
-        self: Arc<Self>,
-        mut rx: mpsc::UnboundedReceiver<PeerId>,
-    ) {
+    async fn run_session_reset_loop(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<PeerId>) {
         while let Some(peer) = rx.recv().await {
             self.wipe_peer_streams(&peer).await;
         }

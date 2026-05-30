@@ -31,8 +31,8 @@ pub fn default_dir() -> Result<PathBuf> {
     if is_root() {
         Ok(PathBuf::from("/etc/drift"))
     } else {
-        let base = dirs::config_dir()
-            .ok_or_else(|| anyhow!("could not resolve user config dir"))?;
+        let base =
+            dirs::config_dir().ok_or_else(|| anyhow!("could not resolve user config dir"))?;
         Ok(base.join("drift"))
     }
 }
@@ -62,10 +62,9 @@ fn is_root() -> bool {
 /// schema; missing file is an error (callers that want
 /// "load-or-default" use `read_or_default`).
 pub fn read(path: &Path) -> Result<DriftToml> {
-    let s = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let parsed: DriftToml = toml::from_str(&s)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let s = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let parsed: DriftToml =
+        toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
     Ok(parsed)
 }
 
@@ -89,8 +88,7 @@ pub fn write(path: &Path, doc: &DriftToml) -> Result<()> {
     }
     let body = toml::to_string_pretty(doc).context("serialize drift.toml")?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, &body)
-        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

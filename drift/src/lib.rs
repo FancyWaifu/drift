@@ -3,6 +3,14 @@
 //! Deadline-aware, Routed, Identity-based, Fresh-over-stale, Tiny-footprint
 //! UDP transport protocol.
 
+// Wire adapter dispatchers (`Pin<Box<dyn Future<Output =
+// io::Result<...>> + Send>>`) and a handful of internal lookup
+// tables share complex generic types that clippy flags as
+// `type_complexity`. Refactoring all of them into named type
+// aliases is its own project (~15 sites across the wire_* modules);
+// allow crate-wide for now.
+#![allow(clippy::type_complexity)]
+
 // Re-export platform-independent core modules.
 pub use drift_core::crypto;
 pub use drift_core::directory;

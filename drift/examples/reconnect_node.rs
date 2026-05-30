@@ -54,21 +54,16 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut seen = 0u32;
-    loop {
-        match t.recv().await {
-            Some(pkt) => {
-                seen += 1;
-                let m = t.metrics();
-                println!(
-                    "[server] recv #{} payload={:?} handshakes={} auth_fail={}",
-                    seen,
-                    String::from_utf8_lossy(&pkt.payload),
-                    m.handshakes_completed,
-                    m.auth_failures
-                );
-            }
-            None => break,
-        }
+    while let Some(pkt) = t.recv().await {
+        seen += 1;
+        let m = t.metrics();
+        println!(
+            "[server] recv #{} payload={:?} handshakes={} auth_fail={}",
+            seen,
+            String::from_utf8_lossy(&pkt.payload),
+            m.handshakes_completed,
+            m.auth_failures
+        );
     }
     Ok(())
 }

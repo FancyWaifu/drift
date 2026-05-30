@@ -66,8 +66,10 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     // (Handshake workload) gets admitted via the responder path
     // without us pre-registering its pubkey. Single-session
     // workloads (Rtt, Throughput) work fine under the same flag.
-    let mut config = TransportConfig::default();
-    config.accept_any_peer = true;
+    let config = TransportConfig {
+        accept_any_peer: true,
+        ..TransportConfig::default()
+    };
     let (server, bound_url) = Transport::bind_url(&listen_url, server_id, config)
         .await
         .with_context(|| format!("DRIFT server bind on {}", listen_url))?;
@@ -78,13 +80,10 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
         Workload::Handshake | Workload::Rtt => {
             // Handshake: echo so the client measures connect→
             // first-byte-back. Rtt: echo for ping-pong timing.
-            loop {
-                match tokio::time::timeout(Duration::from_secs(30), server.recv()).await {
-                    Ok(Some(msg)) => {
-                        let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
-                    }
-                    _ => break,
-                }
+            while let Ok(Some(msg)) =
+                tokio::time::timeout(Duration::from_secs(30), server.recv()).await
+            {
+                let _ = server.send_data(&msg.peer_id, &msg.payload, 0, 0).await;
             }
         }
         Workload::Throughput => {
@@ -97,18 +96,15 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let mut total_bytes = 0u64;
             let mut first_recv: Option<Instant> = None;
             let mut last_recv: Option<Instant> = None;
-            loop {
-                match tokio::time::timeout(Duration::from_secs(5), server.recv()).await {
-                    Ok(Some(msg)) => {
-                        let now = Instant::now();
-                        if first_recv.is_none() {
-                            first_recv = Some(now);
-                        }
-                        last_recv = Some(now);
-                        total_bytes += msg.payload.len() as u64;
-                    }
-                    _ => break,
+            while let Ok(Some(msg)) =
+                tokio::time::timeout(Duration::from_secs(5), server.recv()).await
+            {
+                let now = Instant::now();
+                if first_recv.is_none() {
+                    first_recv = Some(now);
                 }
+                last_recv = Some(now);
+                total_bytes += msg.payload.len() as u64;
             }
             if let (Some(s), Some(l)) = (first_recv, last_recv) {
                 let dur = (l - s).as_secs_f64();
@@ -132,13 +128,10 @@ pub async fn client(cli: &Cli) -> Result<Option<Report>> {
             // connect from a new process," not "reconnect with
             // saved keys."
             let client_id = Identity::generate();
-            let (client, peer_addr) = Transport::connect_url(
-                &target_url,
-                client_id,
-                TransportConfig::default(),
-            )
-            .await
-            .with_context(|| format!("connecting to {}", target_url))?;
+            let (client, peer_addr) =
+                Transport::connect_url(&target_url, client_id, TransportConfig::default())
+                    .await
+                    .with_context(|| format!("connecting to {}", target_url))?;
             let client = Arc::new(client);
             let server_peer = client
                 .add_peer(server_pub, peer_addr, Direction::Initiator)
@@ -174,12 +167,8 @@ async fn run_handshake(
     // (QUIC, WireGuard) reports: connect → first byte echoed.
     for _ in 0..cli.handshake_iters {
         let client_id = Identity::generate();
-        let (client, peer_addr) = Transport::connect_url(
-            target_url,
-            client_id,
-            TransportConfig::default(),
-        )
-        .await?;
+        let (client, peer_addr) =
+            Transport::connect_url(target_url, client_id, TransportConfig::default()).await?;
         let client = Arc::new(client);
         let server_peer = client
             .add_peer(server_pub, peer_addr, Direction::Initiator)
@@ -198,11 +187,7 @@ async fn run_handshake(
     Ok(Some(report))
 }
 
-async fn run_rtt(
-    cli: &Cli,
-    client: &Transport,
-    server_peer: &[u8; 8],
-) -> Result<Option<Report>> {
+async fn run_rtt(cli: &Cli, client: &Transport, server_peer: &[u8; 8]) -> Result<Option<Report>> {
     let mut report = Report::new("drift", "rtt");
     let payload = vec![0xA5u8; cli.payload_bytes];
 

@@ -82,9 +82,8 @@ async fn load_server_addr() -> Result<EndpointAddr> {
         .map_err(|e| anyhow!("parse endpoint id: {}", e))?;
     let mut addr = EndpointAddr::new(id);
     for s in &published.addrs {
-        let sock: std::net::SocketAddr = s
-            .parse()
-            .map_err(|e| anyhow!("parse addr {}: {}", s, e))?;
+        let sock: std::net::SocketAddr =
+            s.parse().map_err(|e| anyhow!("parse addr {}: {}", s, e))?;
         addr = addr.with_ip_addr(sock);
     }
     Ok(addr)
@@ -109,16 +108,11 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
                 };
                 if let Ok((mut send, mut recv)) = conn.accept_bi().await {
                     let mut buf = [0u8; 16];
-                    if let Ok(Ok(n)) = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        recv.read(&mut buf),
-                    )
-                    .await
+                    if let Ok(Ok(Some(n))) =
+                        tokio::time::timeout(Duration::from_secs(5), recv.read(&mut buf)).await
                     {
-                        if let Some(n) = n {
-                            let _ = send.write_all(&buf[..n]).await;
-                            let _ = send.finish();
-                        }
+                        let _ = send.write_all(&buf[..n]).await;
+                        let _ = send.finish();
                     }
                     conn.closed().await;
                 }
@@ -133,16 +127,11 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let conn = incoming.await?;
             let (mut send, mut recv) = conn.accept_bi().await?;
             let mut buf = vec![0u8; cli.payload_bytes];
-            loop {
-                match tokio::time::timeout(Duration::from_secs(30), recv.read_exact(&mut buf))
-                    .await
-                {
-                    Ok(Ok(())) => {
-                        if send.write_all(&buf).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => break,
+            while let Ok(Ok(())) =
+                tokio::time::timeout(Duration::from_secs(30), recv.read_exact(&mut buf)).await
+            {
+                if send.write_all(&buf).await.is_err() {
+                    break;
                 }
             }
         }
@@ -156,11 +145,10 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
             let mut buf = vec![0u8; 64 * 1024];
             let mut bytes_received: u64 = 0;
             let start = Instant::now();
-            loop {
-                match tokio::time::timeout(Duration::from_secs(2), recv.read(&mut buf)).await {
-                    Ok(Ok(Some(n))) => bytes_received += n as u64,
-                    _ => break,
-                }
+            while let Ok(Ok(Some(n))) =
+                tokio::time::timeout(Duration::from_secs(2), recv.read(&mut buf)).await
+            {
+                bytes_received += n as u64;
             }
             let elapsed = start.elapsed().as_secs_f64();
             eprintln!("BENCH_BYTES_RECEIVED={}", bytes_received);
