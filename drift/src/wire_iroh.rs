@@ -182,17 +182,14 @@ impl PacketIO for IrohPacketIO {
         // `Connection::max_datagram_size()`. If a DRIFT packet is
         // larger we error out — the upstream IO layer treats this
         // like a UDP MTU rejection, same shape as the udp:// wire.
-        let max = self.conn.max_datagram_size().ok_or_else(|| {
-            io::Error::other("iroh peer didn't negotiate QUIC datagram support")
-        })?;
+        let max = self
+            .conn
+            .max_datagram_size()
+            .ok_or_else(|| io::Error::other("iroh peer didn't negotiate QUIC datagram support"))?;
         if buf.len() > max {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "iroh datagram too large: {} bytes > {} max",
-                    buf.len(),
-                    max
-                ),
+                format!("iroh datagram too large: {} bytes > {} max", buf.len(), max),
             ));
         }
         self.conn
@@ -214,13 +211,20 @@ impl PacketIO for IrohPacketIO {
         if n > MAX_DATAGRAM {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("iroh datagram exceeds defensive cap: {} > {}", n, MAX_DATAGRAM),
+                format!(
+                    "iroh datagram exceeds defensive cap: {} > {}",
+                    n, MAX_DATAGRAM
+                ),
             ));
         }
         if n > out.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("iroh datagram too large for caller buffer: {} > {}", n, out.len()),
+                format!(
+                    "iroh datagram too large for caller buffer: {} > {}",
+                    n,
+                    out.len()
+                ),
             ));
         }
         out[..n].copy_from_slice(&datagram);
@@ -315,11 +319,8 @@ impl IrohListenerIO {
                 // "ready" signal — no need to wait on accept_bi.
                 // Wrap and ship.
                 let peer = peer_addr_for_connection(&conn);
-                let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(
-                    conn,
-                    peer,
-                    endpoint_for_accept.clone(),
-                ));
+                let io: Arc<dyn PacketIO> =
+                    Arc::new(IrohPacketIO::new(conn, peer, endpoint_for_accept.clone()));
                 let _ = ready_tx.send(io).await;
             }
         });
