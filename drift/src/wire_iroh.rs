@@ -56,8 +56,30 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
-use iroh::endpoint::{presets, Connection};
+use iroh::endpoint::{presets, Connection, QuicTransportConfig};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
+
+/// Start QUIC MTU discovery at 1400. Iroh / noq default to 1200,
+/// which after QUIC overhead leaves only `max_datagram_size()`
+/// = 1162 bytes — smaller than DRIFT's standard 1300-byte
+/// packet, which makes the datagram path reject every DATA-bearing
+/// send with "iroh datagram too large". Starting at 1400 lets
+/// max_datagram_size land ~1362, comfortably above DRIFT's max.
+/// MTU discovery still probes upward from here when path MTU
+/// allows. Floor stays at the QUIC minimum (1200).
+///
+/// This tuning is config-only — no per-Connection memory
+/// footprint, unlike the datagram_receive_buffer_size knob we
+/// tried earlier (which regressed Drift-4 because deeper queues
+/// + CPU-starved drain = stale-packet drops). Initial MTU is
+/// pure handshake-time policy.
+const INITIAL_MTU: u16 = 1400;
+
+fn drift_iroh_transport_config() -> QuicTransportConfig {
+    QuicTransportConfig::builder()
+        .initial_mtu(INITIAL_MTU)
+        .build()
+}
 
 /// Process-wide singleton iroh `Endpoint`. Iroh's own docs
 /// recommend "It is recommended to only create a single instance
@@ -88,7 +110,11 @@ static SHARED_ENDPOINT: OnceCell<Endpoint> = OnceCell::const_new();
 async fn shared_endpoint(bind_hint: Option<SocketAddr>) -> io::Result<Endpoint> {
     SHARED_ENDPOINT
         .get_or_try_init(|| async {
-            let mut builder = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]);
+            let mut builder = Endpoint::builder(presets::Minimal)
+                .alpns(vec![ALPN.to_vec()])
+                // Initial MTU bump so max_datagram_size() comfortably
+                // exceeds DRIFT's 1300-byte packet ceiling.
+                .transport_config(drift_iroh_transport_config());
             if let Some(sk) = iroh_secret_from_env() {
                 builder = builder.secret_key(sk);
             }
