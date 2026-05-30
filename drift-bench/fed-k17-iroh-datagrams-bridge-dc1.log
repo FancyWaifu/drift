@@ -1,0 +1,21 @@
+
+┌─ drift bridge ─────────────────────────────────────────
+│ pubkey: 99a71550b9aa1cc5a847cd89199ca8f92ea2ff5d17f175ed71f284b040a25952
+│ listen:
+│   udp://127.0.0.1:51840
+iroh listener bound — id=cb5f812c78580cb264c84ba095ca2fe9a52f9c0679d30165f02e7d4200fc6b74 sockets=[0.0.0.0:51848, [::]:34539]
+│   iroh://0.0.0.0:51848
+│ accept_any_peer: true (any peer with the pubkey can connect)
+│ federation peers:
+[2m2026-05-30T17:38:23.746484Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://3a7877611e27e64c61c8c540dff1d27c1e99d0d187bdf3cda295d9245f4b7111@127.0.0.1:51858@cc595ad45caa10f98cea23581663faba1c4395f679db43df25b0d9ea7b2fd241 (cc595ad45caa10f9)
+[2m2026-05-30T17:38:24.751830Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://13bacc56f8504f9111b0afa6ba6362265b37e5313bec0fc97856bb5c883d8aa6@127.0.0.1:51868@d45e10dbc17da099374e4178291c34e16f6cf929d84073c967c34b0f13af2a52 (d45e10dbc17da099)
+│   iroh://0b9ac9d777aafa602a9eac9075b148b02cf7d986675049e5454eb02be1c31534@127.0.0.1:51828@86cb7723daaa56713f52bdebeba0d2740879b29cf72568d31931e496fb53b876 (86cb7723daaa5671) — passive role (lower-keyed peer dials in)
+[2m2026-05-30T17:38:24.753987Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://4c3e1042b07c6cb1aef0c8b3d839936b8749fa7b09a85eb3d03557d4216965ba@127.0.0.1:51878@f3c58eab8ab4bc6e4b511e6748b2017c511204a446680efb4c7477e9a142e65a (f3c58eab8ab4bc6e)
+│   iroh://a72ac2082ff02ae12d8919030634ea590c3789717b7616c8e8d6372edc446f89@127.0.0.1:51898@70915799fb80809d0aa1a58d975be83384b6447fbc4fd76378089921fd966968 (70915799fb80809d) — passive role (lower-keyed peer dials in)
+└───────────────────────────────────────────────────────
+
+ready. share the pubkey above with anyone you want to bridge.
+ctrl-c to stop.

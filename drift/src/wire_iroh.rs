@@ -16,13 +16,25 @@
 //!      `drift/iroh/1`. Each incoming `iroh::Connection` becomes
 //!      one DRIFT peer.
 //!   2. Connector parses `iroh://<endpoint_id_hex>@<host:port>`,
-//!      constructs an `EndpointAddr`, dials it, and opens one
-//!      bidirectional QUIC stream.
-//!   3. The bidi stream carries length-prefixed DRIFT packets:
-//!      2-byte big-endian length + payload, same as `tcp://`.
-//!   4. Per-stream `IrohPacketIO::send_to` writes a frame,
-//!      `recv` reads one. DRIFT's own AEAD authenticates; iroh's
-//!      QUIC encryption is hop-to-hop confidentiality.
+//!      constructs an `EndpointAddr`, and dials it.
+//!   3. DRIFT packets ride as **QUIC datagrams** (RFC 9221):
+//!      one DRIFT packet per QUIC datagram, no framing, no
+//!      head-of-line blocking. Iroh wraps quinn's datagram
+//!      extension and negotiates support during the TLS
+//!      handshake.
+//!   4. Unreliable + unordered, matching DRIFT's packet model
+//!      and the `udp://` wire's semantics. DRIFT's own session
+//!      layer handles drops and reordering at the protocol
+//!      level (it already does for `udp://`).
+//!   5. DRIFT's AEAD authenticates each packet; iroh's QUIC
+//!      encryption is hop-to-hop confidentiality.
+//!
+//! Why datagrams instead of bidi streams: each DRIFT packet is
+//! independent. Riding a single QUIC stream made every packet
+//! pay per-frame stream overhead AND introduced head-of-line
+//! blocking — one slow frame stalled every subsequent packet
+//! in the link. Datagrams are how QUIC says "low-overhead
+//! independent messages."
 //!
 //! URL format:
 //!
@@ -44,7 +56,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
-use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
+use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 
 /// Process-wide singleton iroh `Endpoint`. Iroh's own docs
@@ -97,7 +109,14 @@ async fn shared_endpoint(bind_hint: Option<SocketAddr>) -> io::Result<Endpoint> 
 }
 
 const ALPN: &[u8] = b"drift/iroh/1";
-const MAX_FRAME: usize = 64 * 1024;
+/// Defensive upper bound on a single datagram we'll accept from
+/// the recv path. QUIC datagram size is capped by path MTU minus
+/// QUIC overhead — typically ~1200 B on the public internet,
+/// larger on LAN/loopback. The actual per-connection ceiling is
+/// `Connection::max_datagram_size()`; we use this constant only
+/// to bound the in-buffer copy on receive so a malformed peer
+/// can't trick us into a giant allocation.
+const MAX_DATAGRAM: usize = 64 * 1024;
 
 /// SocketAddr for the iroh peer, derived deterministically
 /// from its `EndpointId`. The post-handshake `Connection` API
@@ -128,39 +147,29 @@ fn peer_addr_for_connection(conn: &Connection) -> SocketAddr {
     SocketAddr::from(([192, 0, 2, octet], port))
 }
 
-// ─── Per-stream PacketIO ──────────────────────────────────────────
+// ─── Per-connection PacketIO ─────────────────────────────────────
 
 pub struct IrohPacketIO {
-    send: Mutex<SendStream>,
-    recv: Mutex<RecvStream>,
+    conn: Connection,
     peer_addr: SocketAddr,
     // iroh::Endpoint owns the underlying QUIC state. If it
-    // drops, every connection it owns dies — including the
-    // SendStream/RecvStream pair above. We keep it alive for
-    // the lifetime of the PacketIO so the connector's
-    // endpoint doesn't go out of scope after the factory
-    // returns.
+    // drops, every connection it owns dies. Keep it alive
+    // for the lifetime of the PacketIO.
     _endpoint: Endpoint,
-    // Same for the Connection — the streams hold references
-    // to it, but explicit ownership here makes the intent
-    // unambiguous against future iroh API changes.
-    _conn: Connection,
+    // Serializes read_datagram() calls — quinn's datagram
+    // receive queue allows one reader at a time per Connection.
+    // send_datagram() is non-blocking + queues internally, so
+    // it doesn't need a lock.
+    recv_lock: Mutex<()>,
 }
 
 impl IrohPacketIO {
-    fn new(
-        send: SendStream,
-        recv: RecvStream,
-        peer_addr: SocketAddr,
-        endpoint: Endpoint,
-        conn: Connection,
-    ) -> Self {
+    fn new(conn: Connection, peer_addr: SocketAddr, endpoint: Endpoint) -> Self {
         Self {
-            send: Mutex::new(send),
-            recv: Mutex::new(recv),
+            conn,
             peer_addr,
             _endpoint: endpoint,
-            _conn: conn,
+            recv_lock: Mutex::new(()),
         }
     }
 }
@@ -168,52 +177,54 @@ impl IrohPacketIO {
 #[async_trait]
 impl PacketIO for IrohPacketIO {
     async fn send_to(&self, buf: &[u8], _dest: SocketAddr) -> io::Result<usize> {
-        if buf.len() > MAX_FRAME {
+        // QUIC datagrams are bounded by the path MTU minus QUIC
+        // overhead. iroh exposes the negotiated ceiling via
+        // `Connection::max_datagram_size()`. If a DRIFT packet is
+        // larger we error out — the upstream IO layer treats this
+        // like a UDP MTU rejection, same shape as the udp:// wire.
+        let max = self.conn.max_datagram_size().ok_or_else(|| {
+            io::Error::other("iroh peer didn't negotiate QUIC datagram support")
+        })?;
+        if buf.len() > max {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "iroh frame too large",
+                format!(
+                    "iroh datagram too large: {} bytes > {} max",
+                    buf.len(),
+                    max
+                ),
             ));
         }
-        let len = buf.len() as u32;
-        let mut send = self.send.lock().await;
-        // 2-byte big-endian length prefix, same shape as tcp://.
-        let mut header = [0u8; 2];
-        header[0] = (len >> 8) as u8;
-        header[1] = (len & 0xff) as u8;
-        send.write_all(&header)
-            .await
-            .map_err(|e| io::Error::other(format!("iroh send header: {}", e)))?;
-        send.write_all(buf)
-            .await
-            .map_err(|e| io::Error::other(format!("iroh send payload: {}", e)))?;
-        // No flush per packet — quinn's send stream auto-flushes
-        // when it has room in the congestion window, and an
-        // explicit per-packet flush forces tiny QUIC datagrams
-        // which kills throughput by ~10× in docker bridge
-        // networking. The streams are kept alive by the
-        // Endpoint inside this struct so the first write to
-        // an opened bidi stream eventually transmits even
-        // without explicit flush.
+        self.conn
+            .send_datagram(bytes::Bytes::copy_from_slice(buf))
+            .map_err(|e| io::Error::other(format!("iroh send_datagram: {}", e)))?;
         Ok(buf.len())
     }
 
     async fn recv_from(&self, out: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let mut recv = self.recv.lock().await;
-        let mut header = [0u8; 2];
-        recv.read_exact(&mut header)
+        // One reader at a time per Connection. The send side is
+        // lock-free so this doesn't block outbound packets.
+        let _g = self.recv_lock.lock().await;
+        let datagram = self
+            .conn
+            .read_datagram()
             .await
-            .map_err(|e| io::Error::other(format!("iroh recv header: {}", e)))?;
-        let len = ((header[0] as usize) << 8) | (header[1] as usize);
-        if len > MAX_FRAME || len > out.len() {
+            .map_err(|e| io::Error::other(format!("iroh read_datagram: {}", e)))?;
+        let n = datagram.len();
+        if n > MAX_DATAGRAM {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("iroh frame too large: {}", len),
+                format!("iroh datagram exceeds defensive cap: {} > {}", n, MAX_DATAGRAM),
             ));
         }
-        recv.read_exact(&mut out[..len])
-            .await
-            .map_err(|e| io::Error::other(format!("iroh recv payload: {}", e)))?;
-        Ok((len, self.peer_addr))
+        if n > out.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("iroh datagram too large for caller buffer: {} > {}", n, out.len()),
+            ));
+        }
+        out[..n].copy_from_slice(&datagram);
+        Ok((n, self.peer_addr))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -300,21 +311,16 @@ impl IrohListenerIO {
                         continue;
                     }
                 };
-                let ready_tx = ready_tx.clone();
-                let endpoint_for_io = endpoint_for_accept.clone();
-                tokio::spawn(async move {
-                    let (send, recv) = match conn.accept_bi().await {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            tracing::debug!(error = %e, "iroh listener: accept_bi failed");
-                            return;
-                        }
-                    };
-                    let peer = peer_addr_for_connection(&conn);
-                    let io: Arc<dyn PacketIO> =
-                        Arc::new(IrohPacketIO::new(send, recv, peer, endpoint_for_io, conn));
-                    let _ = ready_tx.send(io).await;
-                });
+                // Datagram mode: the Connection itself is the
+                // "ready" signal — no need to wait on accept_bi.
+                // Wrap and ship.
+                let peer = peer_addr_for_connection(&conn);
+                let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(
+                    conn,
+                    peer,
+                    endpoint_for_accept.clone(),
+                ));
+                let _ = ready_tx.send(io).await;
             }
         });
 
@@ -376,12 +382,8 @@ async fn connect_iroh_client(spec: &str) -> io::Result<(Arc<dyn PacketIO>, Socke
         .connect(target, ALPN)
         .await
         .map_err(|e| io::Error::other(format!("iroh connect: {}", e)))?;
-    let (send, recv) = conn
-        .open_bi()
-        .await
-        .map_err(|e| io::Error::other(format!("iroh open_bi: {}", e)))?;
     let peer = peer_addr_for_connection(&conn);
-    let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(send, recv, peer, endpoint, conn));
+    let io: Arc<dyn PacketIO> = Arc::new(IrohPacketIO::new(conn, peer, endpoint));
     Ok((io, peer))
 }
 
