@@ -390,21 +390,23 @@ Mesh routing discovers paths via beacons; federation is the explicit-config flav
 
 **Federation trust is symmetric and explicit.** Each bridge declares its peer bridges with `--federate <url>@<pub>`, on both sides. Inbound Federated envelopes from a peer not in the federation table are dropped — without this rule, any client of an `accept_any_peer` bridge could (a) spoof other clients' identities by forging the envelope's `source_client_pub`, and (b) poison the bridge's routing table by claiming arbitrary `source_bridge_pub`. Regression-locked in `drift/tests/adversarial_federation.rs`.
 
+**Default federation wire: `h2s://`** (HTTP/2 over TLS). The `HTTP.FED.STRICT` policy in `bridge.rs` only accepts `h2`, `h2s`, `webtransport`, or `iroh` for `--federate` URLs without `--allow-legacy-federation`. h2s is the recommended default: TCP-style semantics (no mutual-init races), automatic kernel buffer tuning, indistinguishable from HTTPS to middleboxes, and battle-tested at K=17 corporate density (66–82/96 dial success). For when h2s isn't the right fit, see [§ Alternative wire: `iroh://`](#alternative-federation-wire-iroh) below.
+
 Clients address far-side peers by `(remote_bridge_pub, remote_client_pub)` and the wire envelope is `PacketType::Federated`:
 
 ```bash
-# Bridge A: listens for clients on UDP; federates to B over TLS.
+# Bridge A: listens for clients on UDP; federates to B over h2s (TLS-shaped).
 drift bridge --listen udp://0.0.0.0:51820 \
-             --federate tls://bridge-b.example:51821@<B_PUBHEX>
+             --listen h2s://0.0.0.0:51821 \
+             --federate h2s://bridge-b.example:51821@<B_PUBHEX>
 
-# Bridge B: listens for clients on WebSocket + TLS for the federation
-# link from A. Also --federate's back to A.
-drift bridge --listen tls://0.0.0.0:51821 \
-             --listen ws://0.0.0.0:51822 \
-             --federate udp://bridge-a.example:51820@<A_PUBHEX>
+# Bridge B: federates back to A.
+drift bridge --listen udp://0.0.0.0:51820 \
+             --listen h2s://0.0.0.0:51821 \
+             --federate h2s://bridge-a.example:51821@<A_PUBHEX>
 ```
 
-Symmetric `--federate` on connection-oriented schemes (TCP/TLS/WS) creates a startup race: each side tries to connect before the other is listening. `bridge.rs` handles this by retrying initial-connect failures on a background task with exponential backoff — start order doesn't matter.
+Symmetric `--federate` on connection-oriented schemes (TCP/TLS/WS/h2s) creates a startup race: each side tries to connect before the other is listening. `bridge.rs` handles this by retrying initial-connect failures on a background task with exponential backoff — start order doesn't matter.
 
 A client connected to A reaches a client connected to B with one extra call:
 
@@ -417,6 +419,47 @@ transport.send_data(&remote, b"hello across bridges", 0, 0).await?;
 After `add_federated_peer`, normal `send_data(&remote, ...)` is transparently wrapped in a Federated envelope and shipped via `bridge_a`. The receiving client's `recv()` yields a `Received` whose `peer_id` matches the original sender (the bridge is invisible to the application).
 
 Internally, federation uses `Transport::connect_federate(url, pubkey)` to open an honest outbound connection on the URL's scheme — TCP/TLS/WS work as bridge-to-bridge links, not just UDP. Verified end-to-end across UDP, TCP, TLS, and WebSocket combinations (`drift-mosh/tests/mixed_transport_federation_test.sh`).
+
+### Alternative federation wire: `iroh://`
+
+When `h2s://` isn't the right fit, `iroh://` (QUIC over UDP, via the [iroh crate](https://docs.rs/iroh)) is the recommended second choice. Pick it when:
+
+- **You can't port-forward.** iroh's QUIC stack has built-in NAT traversal (especially with the `N0` discovery preset). Bridges behind home NAT or restrictive corporate egress can still federate.
+- **Bridges join a discovery-based mesh.** Federation peers learn each other's endpoint IDs via iroh's discovery service rather than hard-coded URLs — useful when the federation graph isn't fully known at config time.
+
+> **Sysctl required.** Linux's default `net.core.rmem_max` (~425 KB) is too small for K-large iroh federation. Under burst load — say, K=17 with 22 federation edges — QUIC packets get silently dropped at the kernel UDP buffer, throwing off iroh's congestion control. Apply on every bridge host *before* enabling iroh federation:
+>
+> ```bash
+> sudo sysctl -w net.core.rmem_max=134217728
+> sudo sysctl -w net.core.wmem_max=134217728
+> # persist:
+> sudo tee /etc/sysctl.d/99-drift.conf <<EOF
+> net.core.rmem_max=134217728
+> net.core.wmem_max=134217728
+> EOF
+> ```
+>
+> h2s federation does NOT need this — TCP buffers are kernel-auto-tuned.
+
+iroh federation URLs have three `@`-separated parts (one more than h2s):
+
+```bash
+# Bridge A: iroh listener on a fixed UDP port. The endpoint ID is derived
+# from DRIFT_IROH_SECRET_HEX (32-byte hex). Without it, the ID is random
+# per restart and federation URLs from peers become stale.
+DRIFT_IROH_SECRET_HEX=<32-byte-hex> \
+drift bridge --listen udp://0.0.0.0:51820 \
+             --listen iroh://0.0.0.0:51821 \
+             --federate iroh://<B_ENDPOINT_ID>@bridge-b.example:51821@<B_PUBHEX>
+
+# B's <B_ENDPOINT_ID> is logged at A's startup as
+# "iroh listener bound — id=...". Operators usually capture it once and
+# distribute it alongside <B_PUBHEX>.
+```
+
+`bridge.rs` applies a **deterministic listener role** for iroh federation: at each peer pair, the higher-keyed bridge pre-registers the peer in its routing table and waits passively for an incoming connection; the lower-keyed bridge always dials. Only one HELLO is ever in flight per pair, which eliminates the simultaneous-init session-key divergence that hit at K=17 density (full chronology in [`drift-bench/FEDERATION-IROH-VS-H2S.md`](drift-bench/FEDERATION-IROH-VS-H2S.md)). h2s and webtransport keep mutual dials — TCP-style semantics already prevent the divergence there.
+
+iroh K=17 corporate-federation pass rate after the listener-role fix: 75/96 (78 %) — matches h2s. Carries a measurable per-byte overhead vs h2s (the cross-wire portability tax), so for bulk data-plane federation between high-throughput bridges, h2s remains slightly cheaper.
 
 ### Zero-config client dial — inventory-driven discovery
 

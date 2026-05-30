@@ -1113,7 +1113,8 @@ pub(crate) fn apply_udp_recv_buffer(sock: &UdpSocket, want_bytes: usize) {
                  drop UDP packets under burst load. Fix on the host: \
                  `echo 'net.core.rmem_max=134217728' >> /etc/sysctl.d/99-drift.conf \
                  && sysctl -p /etc/sysctl.d/99-drift.conf`. See \
-                 docs/BRIDGE_OPTIMIZATION.md item 2 for the full sysctl tuning."
+                 docs/BRIDGE_OPTIMIZATION.md item 10 for the full sysctl tuning. \
+                 Matters most for iroh:// federation; h2s/h2/webtransport are unaffected."
             ),
             Some(g) if g < want_bytes => tracing::info!(
                 requested = want_bytes,
