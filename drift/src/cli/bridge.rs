@@ -21,6 +21,7 @@ use super::identity::load_identity;
 use super::{expand_path, BridgeArgs};
 use anyhow::{anyhow, bail, Context, Result};
 use drift::identity::Identity;
+use drift::crypto::derive_peer_id;
 use drift::{Direction, Transport, TransportConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,7 +53,8 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
 
     let secret = load_identity(&expand_path(identity_path))?;
     let id = Identity::from_secret_bytes(secret);
-    let pubkey_hex = hex::encode(id.public_bytes());
+    let local_pub = id.public_bytes();
+    let pubkey_hex = hex::encode(local_pub);
 
     let config = TransportConfig {
         // Bridges are meeting points — anyone with the pubkey
@@ -209,6 +211,37 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
                      the scaling failure mode that motivated the change).",
                     scheme
                 );
+            }
+            // Deterministic listener role for iroh://: lower-keyed
+            // peer dials, higher-keyed peer waits passively. Eliminates
+            // simultaneous HELLO races between peer pairs at high
+            // federation density (K=17 corp test). h2s/webtransport
+            // don't need this — TCP gives each direction an independent
+            // stream so mutual dials don't diverge session keys.
+            //
+            // With shared iroh Endpoint, both sides ending up with
+            // different session keys after racing HELLOs is the failure
+            // mode behind the ~5 persistently-broken federation edges
+            // at K=17 (drift-bench/FEDERATION-IROH-VS-H2S.md). The
+            // accept loop on the listener side still registers the
+            // peer when the dialer arrives; both sides converge on a
+            // single Connection with matching keys.
+            if scheme == "iroh" && local_pub > pubkey {
+                // Pre-register the federation peer so mesh routing
+                // knows about it before the lower-keyed peer dials
+                // in. The peer entry in the peers table is created
+                // when the inbound HELLO arrives, and federation
+                // routing already gates on session-established
+                // before forwarding, so an empty peer slot here
+                // is safe — just metadata for the routing table.
+                let pid = derive_peer_id(&pubkey);
+                transport.register_federation_peer(pubkey, pid);
+                eprintln!(
+                    "│   {} ({}) — passive role (lower-keyed peer dials in)",
+                    spec,
+                    &hex::encode(pubkey)[..16]
+                );
+                continue;
             }
             match transport.connect_federate(&url, pubkey).await {
                 Ok(handle) => {

@@ -1,0 +1,72 @@
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
+ssh: 
+Host '192.168.50.33' key accepted unconditionally.
+(ssh-ed25519 fingerprint SHA256:Qn8DmJ28aJbt6HxeoxPkCR9ZSJrYLYS/Y68hGpUFlRI)
+
+[2m2026-05-29T21:35:47.821268Z[0m [33m WARN[0m [2mdrift::io[0m[2m:[0m SO_RCVBUF was clamped by the kernel. The bridge will silently drop UDP packets under burst load. Fix on the host: `echo 'net.core.rmem_max=134217728' >> /etc/sysctl.d/99-drift.conf && sysctl -p /etc/sysctl.d/99-drift.conf`. See docs/BRIDGE_OPTIMIZATION.md item 2 for the full sysctl tuning. [3mrequested[0m[2m=[0m4194304 [3mgranted[0m[2m=[0m425984
+
+┌─ drift bridge ─────────────────────────────────────────
+│ pubkey: d0921d5ac94a8a7637778543d527cef9f5d78df7cd994145a32fee8a3180d25a
+│ listen:
+│   udp://127.0.0.1:51840
+iroh listener bound — id=cb5f812c78580cb264c84ba095ca2fe9a52f9c0679d30165f02e7d4200fc6b74 sockets=[0.0.0.0:51848, [::]:45351]
+│   iroh://0.0.0.0:51848
+│ accept_any_peer: true (any peer with the pubkey can connect)
+│ federation peers:
+[2m2026-05-29T21:35:47.839436Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://3a7877611e27e64c61c8c540dff1d27c1e99d0d187bdf3cda295d9245f4b7111@127.0.0.1:51858@a7d4a401e245c1a10a6e0389a44ac6250bfcc3862aec17fb8c397cf37e6f8c0b (a7d4a401e245c1a1)
+[2m2026-05-29T21:35:48.843874Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://13bacc56f8504f9111b0afa6ba6362265b37e5313bec0fc97856bb5c883d8aa6@127.0.0.1:51868@b814d43d79c633b6873b58aefe72ff9ecb973c13c4af041db61230fef0628040 (b814d43d79c633b6)
+[2m2026-05-29T21:35:48.847025Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://0b9ac9d777aafa602a9eac9075b148b02cf7d986675049e5454eb02be1c31534@127.0.0.1:51828@7b9ff9436dc35e8ac44379dd7786af77144a005f0dfccf94d42f52487988df28 (7b9ff9436dc35e8a)
+[2m2026-05-29T21:35:48.850568Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://4c3e1042b07c6cb1aef0c8b3d839936b8749fa7b09a85eb3d03557d4216965ba@127.0.0.1:51878@7aabf9a46b9d71b3a4bb3d768350ab42557fe495bac0c5f93a4339d1c2d84248 (7aabf9a46b9d71b3)
+[2m2026-05-29T21:35:48.853684Z[0m [33m WARN[0m [2miroh::socket::remote_map::remote_state[0m[2m:[0m Address Lookup failed: No address lookup configured
+│   iroh://a72ac2082ff02ae12d8919030634ea590c3789717b7616c8e8d6372edc446f89@127.0.0.1:51898@d9bdbc30b137e0f0fbb0545d07f3173e6a2eedb42f8eb951ddcdafc6042a063a (d9bdbc30b137e0f0)
+└───────────────────────────────────────────────────────
+
+ready. share the pubkey above with anyone you want to bridge.
+ctrl-c to stop.
+[2m2026-05-29T21:35:49.273045Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m0
+[2m2026-05-29T21:35:50.358840Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m12
+[2m2026-05-29T21:35:51.359504Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:35:52.391433Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m6
+[2m2026-05-29T21:35:53.391861Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m11
+[2m2026-05-29T21:35:54.773045Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m6
+[2m2026-05-29T21:35:55.773134Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:35:56.773201Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m5
+[2m2026-05-29T21:35:57.773396Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m11
+[2m2026-05-29T21:35:58.791048Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid short-header packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:35:59.859367Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:00.891467Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m7
+[2m2026-05-29T21:36:01.891645Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m7
+[2m2026-05-29T21:36:02.891935Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:03.893962Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m10
+[2m2026-05-29T21:36:04.942146Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid short-header packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m10
+[2m2026-05-29T21:36:06.273497Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m6
+[2m2026-05-29T21:36:07.359339Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:08.391747Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:09.773232Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:10.791646Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid short-header packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m6
+[2m2026-05-29T21:36:11.859371Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m12
+[2m2026-05-29T21:36:12.891830Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:14.273242Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:15.359254Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:16.391753Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m6
+[2m2026-05-29T21:36:17.391865Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:18.772845Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m13
+[2m2026-05-29T21:36:19.773175Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:20.790802Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid short-header packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m6
+[2m2026-05-29T21:36:21.859054Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:22.859433Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m7
+[2m2026-05-29T21:36:23.891189Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m10
+[2m2026-05-29T21:36:24.891472Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m7
+[2m2026-05-29T21:36:26.272816Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m11
+[2m2026-05-29T21:36:27.273128Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:28.273186Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.218:15955 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:29.358659Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m9
+[2m2026-05-29T21:36:30.359095Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m5
+[2m2026-05-29T21:36:31.359475Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.123:54354 [3msuppressed[0m[2m=[0m8
+[2m2026-05-29T21:36:32.391280Z[0m [33m WARN[0m [2mdrift::transport[0m[2m:[0m dropped invalid packet [3merror[0m[2m=[0mauthentication failed [3msrc[0m[2m=[0m192.0.2.60:5462 [3msuppressed[0m[2m=[0m11
