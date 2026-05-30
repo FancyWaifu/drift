@@ -1,4 +1,0 @@
-protocol	pump_mbps	goodput_mbps	bytes
-drift	1513.5	1497.0	1890254852
-quic	1988.0	1988.0	2485054464
-iroh	1726.1	1708.7	2157720580
