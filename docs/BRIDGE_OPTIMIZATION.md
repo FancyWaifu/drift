@@ -61,6 +61,7 @@ adaptive window.
 | 7 | Reduce peer-table lock contention (146 lock sites in `transport/`) | medium-large | **Deferred** (premature without profiling; arc-swap on `peer_directory` is the textbook target if it becomes a hotspot). |
 | 8 | Drop-on-full + stale-drop at h2 send queue (IP-router style) | half a day | **Shipped `3fcfab8`** (correct under overload; bench-neutral on dial loop). |
 | 9 | ECN-style backpressure, ECMP multi-path, per-source fair queue | days each | **Deferred** (research showed weak fit for DRIFT's current bottleneck). |
+| 10 | **Kernel UDP buffer tuning** (`net.core.rmem_max` / `wmem_max` → 128 MB on the host) | 1 minute | **Required for iroh / UDP federation at K-large density.** Default `rmem_max` is ~425 KB; under burst load the kernel silently drops QUIC packets. h2s/h2/webtransport are unaffected (TCP buffers are auto-tuned). |
 
 The first three were the high-leverage initial wins. Items 5,
 5b, 6, 8 are smaller wins that also went in; their value shows
@@ -319,6 +320,44 @@ Standard mitigations:
   snapshot pointer; writers swap atomically.
 
 Profile-first. Won't matter if items 1-4 close the gap.
+
+### 10. Kernel UDP buffer tuning
+
+DRIFT requests `SO_RCVBUF = 4 MiB` per UDP socket. Linux clamps the
+actual grant to `net.core.rmem_max`, which on stock distros is
+~425 KB. The bridge logs the clamp at startup:
+
+```
+WARN drift::io: SO_RCVBUF was clamped by the kernel. The bridge
+will silently drop UDP packets under burst load.
+requested=4194304 granted=425984
+```
+
+For `h2`/`h2s`/`webtransport` federation this doesn't matter — those
+ride TCP, whose buffers Linux auto-tunes. For `iroh://` federation
+(QUIC over UDP) at K-large density it matters a lot: under burst
+(K=17 corporate test, 22 federation edges, simultaneous BEACONs),
+the UDP socket's receive ring fills and the kernel silently drops
+packets. iroh's QUIC stack sees this as connection loss, retransmits,
+and at the worst case desyncs handshake state across the peer pair.
+Measured impact in `docker/federation-corporate/RESULTS.md`: 58–68 %
+K=17 pass rate without tuning, 78 % with (matches h2s).
+
+Apply on every bridge host:
+
+```bash
+sudo sysctl -w net.core.rmem_max=134217728
+sudo sysctl -w net.core.wmem_max=134217728
+# persist across reboots:
+sudo tee /etc/sysctl.d/99-drift.conf <<'EOF'
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+EOF
+```
+
+LXC / unprivileged container note: the sysctls must be set on the
+host (Proxmox node, Docker host, etc.); from inside an unprivileged
+container `/proc/sys/net/core/rmem_max` is read-only.
 
 ## What's left after the 2026-05-20 round
 

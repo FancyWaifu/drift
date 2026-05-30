@@ -199,16 +199,17 @@ sudo drift-config peer add boxa --pubkey <PUB_A> \
 # on TCP/TLS/WS retries in the background, so start order doesn't
 # matter.
 #
-# Box A: federates to bridge-B over TLS (the connection-oriented
-#        link survives most middleboxes).
+# Box A: federates to bridge-B over h2s (HTTP/2 over TLS — the
+#        default federation wire; survives most middleboxes and
+#        TCP buffers are kernel-auto-tuned).
 sudo drift bridge --listen udp://0.0.0.0:51820 \
-                  --federate tls://<box-b-host>:51821@<PUB_B>
+                  --listen h2s://0.0.0.0:51821 \
+                  --federate h2s://<box-b-host>:51821@<PUB_B>
 
-# Box B: also --federate's back to A over UDP (so the trust is
-#        mutual).
-sudo drift bridge --listen tls://0.0.0.0:51821 \
-                  --listen ws://0.0.0.0:51822 \
-                  --federate udp://<box-a-host>:51820@<PUB_A>
+# Box B: also --federate's back to A (so the trust is mutual).
+sudo drift bridge --listen udp://0.0.0.0:51820 \
+                  --listen h2s://0.0.0.0:51821 \
+                  --federate h2s://<box-a-host>:51821@<PUB_A>
 ```
 
 Any DRIFT client connected to bridge-A (over UDP) can now reach
