@@ -269,8 +269,17 @@ for b in "${BRIDGES[@]}"; do
 done
 
 # ─── Convergence wait ────────────────────────────────────────────
-echo "[4/6] Waiting 30s for federation directory to converge…"
-sleep 30
+# 30s default — federation directory propagation needs ~25-30s
+# on a 12-core unconstrained host (every bridge's BEACON jitter
+# adds a half-interval spread; BFS over 22 federation edges
+# takes O(diameter × beacon_interval) to fully populate). On
+# constrained hosts (Drift-4: 2 cores) routes don't get faster
+# with longer waits — CPU is the bottleneck — but shortening
+# doesn't help either, so we keep the 30s default and let
+# operators override via env if they have a reason.
+CONVERGE_WAIT_SECS="${CONVERGE_WAIT_SECS:-30}"
+echo "[4/6] Waiting ${CONVERGE_WAIT_SECS}s for federation directory to converge…"
+sleep "$CONVERGE_WAIT_SECS"
 
 # ─── BFS hop-count matrix ────────────────────────────────────────
 echo "[5/6] Computing hop-count matrix…"
