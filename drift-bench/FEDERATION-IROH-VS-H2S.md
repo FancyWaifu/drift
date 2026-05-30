@@ -238,6 +238,59 @@ Raw evidence:
 - `drift-bench/fed-k17-iroh-v2-*`                                  — Run 2 with diagnostics
 - `drift-bench/fed-k17-iroh-v3-*`                                  — Run 3 post-sysctl
 - `drift-bench/fed-k17-iroh-v4-*`                                  — Run 4 with deterministic listener role
+- `drift-bench/fed-k17-iroh-orbstack-*`                            — Reproduction on OrbStack VM (72/96 ≈ 75%)
+
+## Test 4 — switch iroh wire from QUIC streams to QUIC datagrams
+
+After the listener-role fix landed, the K=17 4-hop pass rate
+sat at 47–56 % (about half the cross-region branch-to-branch
+dials). The remaining ceiling traced to two architectural
+properties of the stream-based adapter:
+
+1. **Per-frame stream overhead.** Each DRIFT packet was framed
+   with a 2-byte length prefix and written to a single
+   bidirectional QUIC stream per peer. Per-packet QUIC stream
+   bookkeeping dominated throughput at small sizes.
+2. **Head-of-line blocking.** QUIC streams guarantee in-order
+   delivery. A delayed frame stalled every subsequent DRIFT
+   packet on the same federation link — even though DRIFT
+   packets are independent. At 4 hops this compounded.
+
+QUIC datagrams (RFC 9221) skip both. iroh exposes
+`Connection::send_datagram` / `read_datagram`; the wire
+adapter swap is a single-file change in `drift/src/wire_iroh.rs`.
+Datagrams are unreliable + unordered, but DRIFT's session layer
+already handles drops and reordering at the protocol layer (it
+does the same for `udp://`), so the correctness story is the
+same.
+
+### Result — K=17 on OrbStack, datagrams vs streams
+
+| Hop | Streams (Test 3 / OrbStack repro) | Datagrams | Δ |
+|---|---|---|---|
+| 1 | 6/6 (100%) | 6/6 (100%) | — |
+| 2 | 19/24 (79%) | 22/24 (92%) | +3 |
+| 3 | 30/30 (100%) | 30/30 (100%) | — |
+| 4 | 17/36 (47%) | **27/36 (75%)** | **+10** |
+| **Total** | **72/96 (75%)** | **85/96 (88.5%)** | **+13** |
+| Auth-fails | 36 | 24 | −12 |
+
+The +10 at 4 hops is exactly what the head-of-line theory
+predicted: multi-hop forwarding is the case stream HoL hurt
+most, and datagrams free it. The 2-hop +3 picks up
+proportionally.
+
+**iroh-with-datagrams now exceeds the h2s baseline range
+(66–82/96, 69–85%) at corporate density.** This flips the wire
+recommendation:
+
+- Previous: "h2s for reliability, iroh for NAT-traversal."
+- Now: "iroh for reliability AND NAT-traversal, h2s for
+  middlebox compatibility (HTTPS shape, corporate proxies)."
+
+Raw evidence:
+- `drift-bench/fed-k17-iroh-datagrams-run.log` /
+  `…-bridge-dc1.log` — Run 6 with the datagram switch
 
 ## Implications (updated post-fix, K=3 only)
 
