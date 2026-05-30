@@ -163,6 +163,7 @@ pub(crate) fn ecn_outbound_active(socket: &UdpSocket) -> bool {
 ///
 /// Returns `(bytes_read, source_addr, tos_byte)`.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // pub(crate) — exposed for the GRO recv path
 pub(crate) async fn recv_with_tos(
     socket: &UdpSocket,
     buf: &mut [u8],
@@ -247,12 +248,17 @@ pub(crate) fn is_ce(tos: u8) -> bool {
     tos & ECN_MASK == ECN_CE
 }
 
+// Thin wrappers around libc's cmsg macros so the unsafe surface is
+// in one place. Currently only used by the GRO recv path; keep
+// available for future cmsg-parsing call sites.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 unsafe fn libc_cmsg_firsthdr(msg: *const libc::msghdr) -> *mut libc::cmsghdr {
     libc::CMSG_FIRSTHDR(msg)
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 unsafe fn libc_cmsg_nxthdr(
     msg: *const libc::msghdr,
     cmsg: *const libc::cmsghdr,
@@ -261,11 +267,13 @@ unsafe fn libc_cmsg_nxthdr(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 unsafe fn libc_cmsg_data(cmsg: *const libc::cmsghdr) -> *const u8 {
     libc::CMSG_DATA(cmsg)
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn sockaddr_storage_to_socket_addr(
     storage: &libc::sockaddr_storage,
     len: libc::socklen_t,

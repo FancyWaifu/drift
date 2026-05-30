@@ -54,7 +54,6 @@ pub(crate) async fn recv_batch_gro(
     out: &mut Vec<(usize, usize, std::net::SocketAddr)>,
 ) -> std::io::Result<()> {
     use std::mem::MaybeUninit;
-    use std::net::SocketAddr;
     use std::os::unix::io::AsRawFd;
     use tokio::io::Interest;
 
@@ -272,7 +271,6 @@ mod linux {
         for (b, _) in packets {
             buf.extend_from_slice(b);
         }
-        let nsent = packets.len();
 
         let result: io::Result<()> = socket
             .async_io(Interest::WRITABLE, || {
@@ -302,10 +300,7 @@ mod linux {
                 unsafe {
                     let cmsg_ptr = libc::CMSG_FIRSTHDR(&msg);
                     if cmsg_ptr.is_null() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            "CMSG_FIRSTHDR returned null",
-                        ));
+                        return Err(io::Error::other("CMSG_FIRSTHDR returned null"));
                     }
                     (*cmsg_ptr).cmsg_level = libc::SOL_UDP;
                     (*cmsg_ptr).cmsg_type = libc::UDP_SEGMENT;
@@ -332,10 +327,9 @@ mod linux {
                 // detection cost. Transient errors (EAGAIN handled
                 // by async_io, EINTR, ENOBUFS) shouldn't get here.
                 let kind = e.raw_os_error();
-                if matches!(
-                    kind,
-                    Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) | Some(libc::EINVAL)
-                ) {
+                // On Linux EOPNOTSUPP and ENOTSUP are the same value
+                // (clippy::unreachable_patterns); listing one is enough.
+                if matches!(kind, Some(libc::EOPNOTSUPP) | Some(libc::EINVAL)) {
                     GSO_BROKEN.store(true, Ordering::Relaxed);
                     tracing::warn!(
                         error = %e,

@@ -65,7 +65,7 @@ impl RouteTable {
         // prefixes (more specific) come first, so a linear
         // scan naturally implements longest-prefix match.
         self.flat
-            .sort_by(|(a, _), (b, _)| b.prefix_len().cmp(&a.prefix_len()));
+            .sort_by_key(|(b, _)| std::cmp::Reverse(b.prefix_len()));
     }
 
     /// Forward routing: which peer's allowed_ips contain this
