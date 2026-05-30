@@ -314,15 +314,32 @@ impl Inner {
     /// Periodic BEACON emitter: every few seconds, send each established
     /// direct neighbor a list of peers we can reach, so they can populate
     /// their routing tables dynamically.
+    ///
+    /// Each loop iteration sleeps a small uniform random
+    /// offset on top of the configured interval, so a federation
+    /// of K bridges started near-simultaneously doesn't fire
+    /// every beacon at the same wall-clock tick. Without
+    /// jitter, K=17 with `beacon_interval_ms=500` produces a
+    /// synchronized 17-bridge × 5-peer-each burst every half
+    /// second — kernel scheduler + UDP buffer + per-process
+    /// runqueue all spike together. Spreading the burst over
+    /// `beacon_interval_ms / 4` wall-clock ms cuts the worst-
+    /// case instantaneous queue depth without changing the
+    /// long-run rate.
     pub(crate) async fn run_beacon_loop(self: std::sync::Arc<Self>) {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-            self.config.beacon_interval_ms,
-        ));
+        use rand::Rng;
+        let interval_ms = self.config.beacon_interval_ms;
+        let jitter_max_ms = (interval_ms / 4).max(1);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
         // Skip the first immediate tick so we don't beacon before any
         // handshakes have completed.
         ticker.tick().await;
         loop {
             ticker.tick().await;
+            let jitter = rand::thread_rng().gen_range(0..=jitter_max_ms);
+            if jitter > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
+            }
             if let Err(e) = self.emit_beacons().await {
                 warn!(error = %e, "beacon emission failed");
             }
