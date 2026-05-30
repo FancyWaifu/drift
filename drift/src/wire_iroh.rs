@@ -71,7 +71,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 /// This tuning is config-only — no per-Connection memory
 /// footprint, unlike the datagram_receive_buffer_size knob we
 /// tried earlier (which regressed Drift-4 because deeper queues
-/// + CPU-starved drain = stale-packet drops). Initial MTU is
+/// plus CPU-starved drain = stale-packet drops). Initial MTU is
 /// pure handshake-time policy.
 const INITIAL_MTU: u16 = 1400;
 
