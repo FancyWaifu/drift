@@ -91,7 +91,11 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 /// tried earlier (which regressed Drift-4 because deeper queues
 /// plus CPU-starved drain = stale-packet drops). Initial MTU is
 /// pure handshake-time policy.
-const INITIAL_MTU: u16 = 1400;
+///
+/// Public so the integration regression test
+/// (`drift/tests/wire_iroh_mtu_regression.rs`) can assert the
+/// deployed value stays high enough for DRIFT's 1300-byte packets.
+pub const INITIAL_MTU: u16 = 1400;
 
 fn drift_iroh_transport_config() -> QuicTransportConfig {
     QuicTransportConfig::builder()
@@ -245,7 +249,14 @@ pub struct IrohPacketIO {
 }
 
 impl IrohPacketIO {
-    fn new(conn: Connection, peer_addr: SocketAddr, endpoint: Endpoint) -> Self {
+    /// Public for the integration-test suite in `drift/tests/`,
+    /// which builds raw iroh `Endpoint`s + `Connection`s and wraps
+    /// them in `IrohPacketIO` to validate wire-level behavior
+    /// (MTU regression, datagram round-trips). In production code,
+    /// always construct via `IrohListenerIO::bind` + `accept` or
+    /// the connector factories — those wire up the SHARED_ENDPOINT
+    /// dedup that K=3+ federation needs.
+    pub fn new(conn: Connection, peer_addr: SocketAddr, endpoint: Endpoint) -> Self {
         Self {
             conn,
             peer_addr,
