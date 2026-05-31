@@ -194,7 +194,7 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             // race that motivated HTTP.FED.STRICT was about
             // mutual-init UDP datagram timing, not QUIC streams,
             // so iroh shares webtransport's immunity.
-            let preferred = matches!(scheme, "h2" | "h2s" | "webtransport" | "iroh");
+            let preferred = matches!(scheme, "h2" | "h2s" | "webtransport" | "iroh" | "iroh-n0");
             if !preferred && !args.allow_legacy_federation {
                 bail!(
                     "refusing to federate over `{}://` — drift bridge \
@@ -223,7 +223,11 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             // accept loop on the listener side still registers the
             // peer when the dialer arrives; both sides converge on a
             // single Connection with matching keys.
-            if scheme == "iroh" && local_pub > pubkey {
+            // Deterministic listener role applies to both iroh
+            // schemes — the dual-init race is a property of iroh's
+            // shared-Endpoint dedup interacting with DRIFT's
+            // session table, not of the URL shape.
+            if (scheme == "iroh" || scheme == "iroh-n0") && local_pub > pubkey {
                 // Pre-register the federation peer so mesh routing
                 // knows about it before the lower-keyed peer dials
                 // in. The peer entry in the peers table is created
