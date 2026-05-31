@@ -142,8 +142,11 @@ async fn main() -> Result<()> {
     //     automatically; reply traffic flows back through the
     //     same bridge with no per-client configuration.
     let (transport, bound_url) = if let Some(bridge_spec) = cli.bridge.as_deref() {
+        // rsplit on LAST '@' so URLs that themselves contain '@'
+        // (iroh://<id>@<host:port>) still parse — the trailing
+        // @<pubkey-hex> always lives at the end.
         let (bridge_url, bridge_pub_hex) = bridge_spec
-            .split_once('@')
+            .rsplit_once('@')
             .ok_or_else(|| anyhow!("--bridge expected <url>@<pubkey-hex>"))?;
         let bridge_pub_bytes =
             hex::decode(bridge_pub_hex).context("--bridge pubkey is not valid hex")?;

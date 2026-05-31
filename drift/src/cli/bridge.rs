@@ -484,7 +484,11 @@ fn listen_urls_from_inventory(args: &BridgeArgs) -> Result<Vec<String>> {
 /// bridge's existing listener socket to be used for outbound
 /// sends, not a fresh connector socket.)
 fn parse_peer_spec(spec: &str) -> Result<(SocketAddr, [u8; 32])> {
-    let (url, pub_hex) = spec.split_once('@').ok_or_else(|| {
+    // rsplit on LAST '@' so URLs that themselves contain '@'
+    // (iroh://<id>@<host:port>) still parse — the trailing
+    // @<pubkey-hex> always lives at the end. Matches the
+    // federation parser at parse_federate_spec.
+    let (url, pub_hex) = spec.rsplit_once('@').ok_or_else(|| {
         anyhow!(
             "--peer spec {:?} missing '@'; format is <url>@<pubkey-hex>",
             spec
