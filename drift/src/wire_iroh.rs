@@ -36,8 +36,9 @@
 //! in the link. Datagrams are how QUIC says "low-overhead
 //! independent messages."
 //!
-//! URL format:
+//! URL formats — two flavors:
 //!
+//! **`iroh://` — direct, no discovery.**
 //!   - Listener: `iroh://0.0.0.0:51820` (or any sockaddr — the
 //!     port is informational; iroh picks its own UDP socket).
 //!     The endpoint's id is logged at bind time.
@@ -46,6 +47,23 @@
 //!     iroh `EndpointId`, the `<host:port>` is the direct iroh
 //!     listening address (no PKARR / relay lookup; we want
 //!     deterministic LAN/docker dispatch).
+//!
+//! **`iroh-n0://` — discovery + relay via n0-computer defaults.**
+//!   - Listener: `iroh-n0://0.0.0.0:51820`. Uses the `presets::N0`
+//!     bundle: publishes pubkey → addr to PKARR DNS at
+//!     `iroh.link`, enables relay fallback through n0-operated
+//!     relay servers. A warning is logged at bind time so this
+//!     isn't accidental — the bridge's pubkey + IP becomes
+//!     publicly resolvable.
+//!   - Connector: `iroh-n0://<endpoint_id_hex>` — just the
+//!     64-char hex; no `@host:port`. iroh's discovery resolves
+//!     the address at dial time and the relay handles NAT.
+//!
+//! Pick one per process. iroh recommends single-Endpoint-per-app
+//! and the K=3 dedup-fragmentation bug confirms it; the first
+//! `--listen` or `--federate` URL determines the preset for the
+//! whole bridge. Mixing `iroh://` and `iroh-n0://` in one bridge
+//! errors out at bind time.
 
 use crate::io::{Listener, PacketIO, SchemeRegistration};
 use async_trait::async_trait;
@@ -102,19 +120,56 @@ fn drift_iroh_transport_config() -> QuicTransportConfig {
 /// Connection per peer ever exists per process.
 static SHARED_ENDPOINT: OnceCell<Endpoint> = OnceCell::const_new();
 
+/// Which iroh preset the SHARED_ENDPOINT was built with. First
+/// `--listen`/`--federate` URL to bind decides for the whole
+/// process — iroh recommends single-Endpoint-per-application,
+/// and having two endpoints would re-introduce the dedup
+/// fragmentation we fixed for K=3. If a later URL implies a
+/// different preset (e.g. mixing `iroh://` and `iroh-n0://` in
+/// one bridge), bind fails with a clear error.
+static PRESET_CHOICE: OnceCell<IrohPreset> = OnceCell::const_new();
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IrohPreset {
+    /// Direct URLs only. No discovery, no relay. Listener
+    /// publishes nothing; connector dials a sockaddr.
+    /// Used by the `iroh://` scheme.
+    Minimal,
+    /// n0-computer's discovery + relay defaults. Listener
+    /// publishes pubkey → addr to `iroh.link` PKARR DNS;
+    /// connector resolves by pubkey alone. Relay fallback
+    /// when direct UDP fails. Used by `iroh-n0://`.
+    N0,
+}
+
 /// Gets or initializes the process-wide iroh `Endpoint`. The
 /// first caller's `bind_hint` (if Some and port != 0) determines
-/// the bound UDP port; subsequent calls ignore the hint and
-/// reuse the existing endpoint. Listeners pass the URL's port
-/// hint; connectors pass None.
-async fn shared_endpoint(bind_hint: Option<SocketAddr>) -> io::Result<Endpoint> {
+/// the bound UDP port AND `preset` determines the discovery /
+/// relay configuration. Subsequent calls ignore the hint and
+/// reuse the existing endpoint, but error out if a different
+/// preset is requested.
+async fn shared_endpoint(
+    bind_hint: Option<SocketAddr>,
+    preset: IrohPreset,
+) -> io::Result<Endpoint> {
+    let chosen = *PRESET_CHOICE.get_or_init(|| async { preset }).await;
+    if chosen != preset {
+        return Err(io::Error::other(format!(
+            "iroh preset mismatch: process already bound with {:?}, but this URL needs {:?}. \
+             Use only one of iroh:// or iroh-n0:// per bridge process.",
+            chosen, preset
+        )));
+    }
     SHARED_ENDPOINT
         .get_or_try_init(|| async {
-            let mut builder = Endpoint::builder(presets::Minimal)
-                .alpns(vec![ALPN.to_vec()])
-                // Initial MTU bump so max_datagram_size() comfortably
-                // exceeds DRIFT's 1300-byte packet ceiling.
-                .transport_config(drift_iroh_transport_config());
+            let mut builder = match preset {
+                IrohPreset::Minimal => Endpoint::builder(presets::Minimal),
+                IrohPreset::N0 => Endpoint::builder(presets::N0),
+            }
+            .alpns(vec![ALPN.to_vec()])
+            // Initial MTU bump so max_datagram_size() comfortably
+            // exceeds DRIFT's 1300-byte packet ceiling.
+            .transport_config(drift_iroh_transport_config());
             if let Some(sk) = iroh_secret_from_env() {
                 builder = builder.secret_key(sk);
             }
@@ -294,6 +349,10 @@ fn iroh_secret_from_env() -> Option<iroh::SecretKey> {
 
 impl IrohListenerIO {
     pub async fn bind(hint: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_preset(hint, IrohPreset::Minimal).await
+    }
+
+    pub async fn bind_with_preset(hint: SocketAddr, preset: IrohPreset) -> io::Result<Self> {
         // Use the process-wide shared Endpoint so a bridge that
         // both listens and federates outbound has ONE iroh
         // Endpoint for both directions. This is what enables
@@ -303,20 +362,41 @@ impl IrohListenerIO {
         // per peer which DRIFT's dual-init handler half-resolves,
         // leaving the mesh routing asymmetric. See the doc on
         // SHARED_ENDPOINT.
-        let endpoint = shared_endpoint(Some(hint)).await?;
+        let endpoint = shared_endpoint(Some(hint), preset).await?;
         let id = endpoint.id();
         let bound: Vec<SocketAddr> = endpoint.bound_sockets();
-        tracing::info!(
-            id = %id,
-            sockets = ?bound,
-            "iroh listener bound — connect with iroh://{}@<ip:port>",
-            id
-        );
+        match preset {
+            IrohPreset::Minimal => {
+                tracing::info!(
+                    id = %id,
+                    sockets = ?bound,
+                    "iroh listener bound — connect with iroh://{}@<ip:port>",
+                    id
+                );
+            }
+            IrohPreset::N0 => {
+                // N0 preset publishes pubkey → addr to public DNS.
+                // Make this loud so operators don't deploy by accident.
+                tracing::warn!(
+                    id = %id,
+                    sockets = ?bound,
+                    "iroh-n0 listener bound — publishing pubkey to public PKARR DNS \
+                     (iroh.link). Anyone with this pubkey can resolve to your \
+                     bridge's IP. n0 relay servers may proxy traffic when direct \
+                     UDP is blocked. Use the `iroh://` scheme instead for explicit-URL \
+                     federation with no public-DNS publication."
+                );
+            }
+        }
         // Also print the endpoint id + sockets to stderr so
         // non-tracing-init callers (drift-bench, smoke scripts)
         // can scrape it without setting RUST_LOG. Parser-friendly
         // single line.
-        eprintln!("iroh listener bound — id={} sockets={:?}", id, bound);
+        let scheme = match preset {
+            IrohPreset::Minimal => "iroh",
+            IrohPreset::N0 => "iroh-n0",
+        };
+        eprintln!("{} listener bound — id={} sockets={:?}", scheme, id, bound);
         // For the peer table / Transport surface, use the first
         // bound IPv4 socket if one exists, otherwise the unspecified
         // sockaddr — this `local_addr` is informational for the
@@ -393,7 +473,34 @@ async fn connect_iroh_client(spec: &str) -> io::Result<(Arc<dyn PacketIO>, Socke
         .parse()
         .map_err(|e| io::Error::other(format!("iroh direct addr parse: {}", e)))?;
     let target = EndpointAddr::new(id).with_ip_addr(direct);
+    connect_with_target(target, IrohPreset::Minimal).await
+}
 
+/// Connector for `iroh-n0://<bridge_pub_hex>`. No `@host:port` —
+/// the N0 preset's PKARR / DNS discovery resolves the pubkey to
+/// an iroh `EndpointAddr` at dial time. The `<bridge_pub_hex>`
+/// IS the target iroh `EndpointId` (and, by extension, the
+/// bridge's DRIFT identity pubkey when bridges use the
+/// auto-bound-identity pattern — see Tier-1 #2).
+async fn connect_iroh_n0_client(spec: &str) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
+    if spec.contains('@') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "iroh-n0:// connector takes <bridge_pub_hex> only — no @host:port \
+             (discovery resolves it). Use iroh:// if you want explicit addressing.",
+        ));
+    }
+    let id: EndpointId = spec
+        .parse()
+        .map_err(|e| io::Error::other(format!("iroh-n0 endpoint id parse: {}", e)))?;
+    let target = EndpointAddr::new(id);
+    connect_with_target(target, IrohPreset::N0).await
+}
+
+async fn connect_with_target(
+    target: EndpointAddr,
+    preset: IrohPreset,
+) -> io::Result<(Arc<dyn PacketIO>, SocketAddr)> {
     // Use the same process-wide shared Endpoint as the listener
     // (and as any other concurrent connect call). This is the
     // key to iroh's per-peer connection dedup: when bridge1's
@@ -404,7 +511,7 @@ async fn connect_iroh_client(spec: &str) -> io::Result<(Arc<dyn PacketIO>, Socke
     // through DRIFT's session-merge handler, which doesn't
     // populate both sides' federation_table — that's the K=3
     // BEACON-asymmetry bug.
-    let endpoint = shared_endpoint(None).await?;
+    let endpoint = shared_endpoint(None, preset).await?;
     let conn: Connection = endpoint
         .connect(target, ALPN)
         .await
@@ -440,5 +547,33 @@ inventory::submit! {
         scheme: "iroh",
         listener: iroh_listener_factory,
         connector: iroh_connector_factory,
+    }
+}
+
+fn iroh_n0_listener_factory(
+    addr_str: String,
+) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>> {
+    Box::pin(async move {
+        let hint: SocketAddr = addr_str
+            .parse()
+            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+        Ok(
+            Box::new(IrohListenerIO::bind_with_preset(hint, IrohPreset::N0).await?)
+                as Box<dyn Listener>,
+        )
+    })
+}
+
+fn iroh_n0_connector_factory(
+    addr_str: String,
+) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>> {
+    Box::pin(async move { connect_iroh_n0_client(&addr_str).await })
+}
+
+inventory::submit! {
+    SchemeRegistration {
+        scheme: "iroh-n0",
+        listener: iroh_n0_listener_factory,
+        connector: iroh_n0_connector_factory,
     }
 }
