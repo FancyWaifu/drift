@@ -11,7 +11,8 @@
 # Servers connect to their local bridge via udp (port from above).
 # Clients similarly.
 #
-# Federation links use h2s://127.0.0.1:<port>@<pubkey>.
+# Federation links use $FED_SCHEME://127.0.0.1:<port>@<pubkey>.
+# Default scheme is iroh:// — see "Wire selection" block below.
 #
 # Purpose: verify whether the 80-84% reliability ceiling we saw
 # with Docker Desktop on macOS is environmental. Running the same
@@ -21,18 +22,27 @@
 # noise. If similar, there's a real bug at K=17 worth chasing.
 #
 # Run as:
-#   bash run-native.sh             (default h2s)
-#   FED_WIRE=h2 bash run-native.sh
+#   bash run-native.sh             (default iroh — P2P-native QUIC)
+#   FED_WIRE=h2s bash run-native.sh
 
 set -eu
 
 # ─── Wire selection ──────────────────────────────────────────────
-case "${FED_WIRE:-h2s}" in
+# Default: iroh. After Tier 1-4 maturity work (deterministic listener
+# role, datagram MTU=1400, SHARED_ENDPOINT dedup, auto-bound identity,
+# sysctl pre-bind check, peer-addr dedup map, regression test suite,
+# long-soak harness) iroh is the recommended federation wire — P2P-
+# native pubkey addressing fits drift's identity model with no
+# external CA, no TLS cert ceremony, and built-in NAT punching.
+# h2s remains the recommended fallback when iroh can't tune the host
+# (net.core.rmem_max needs >= 4 MiB) or when crossing a UDP-blocking
+# middlebox.
+case "${FED_WIRE:-iroh}" in
+  iroh)         : "${FED_SCHEME:=iroh}";         : "${FED_PORT_BASE_OFFSET:=8}" ;;
   h2s)          : "${FED_SCHEME:=h2s}";          : "${FED_PORT_BASE_OFFSET:=7}" ;;
   h2)           : "${FED_SCHEME:=h2}";           : "${FED_PORT_BASE_OFFSET:=6}" ;;
   webtransport) : "${FED_SCHEME:=webtransport}"; : "${FED_PORT_BASE_OFFSET:=8}" ;;
-  iroh)         : "${FED_SCHEME:=iroh}";         : "${FED_PORT_BASE_OFFSET:=8}" ;;
-  *) echo "FED_WIRE must be h2s|h2|webtransport|iroh" >&2; exit 2 ;;
+  *) echo "FED_WIRE must be iroh|h2s|h2|webtransport" >&2; exit 2 ;;
 esac
 
 # Iroh needs a deterministic SecretKey per bridge so that

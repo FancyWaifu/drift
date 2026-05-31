@@ -114,9 +114,10 @@ materially better numbers.
 
 ```bash
 cd docker/federation-corporate
-bash run.sh                          # default h2s, 20s timeout
+bash run.sh                          # default iroh, 20s timeout
+FED_WIRE=h2s bash run.sh             # HTTP/2 over TLS (preferred fallback)
 FED_WIRE=h2 bash run.sh              # cleartext HTTP/2
-FED_WIRE=webtransport bash run.sh    # HTTP/3/QUIC
+FED_WIRE=webtransport bash run.sh    # HTTP/3 / QUIC
 KEEP_UP=1 bash run.sh                # preserve containers for inspection
 ```
 

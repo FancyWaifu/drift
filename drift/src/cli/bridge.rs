@@ -239,21 +239,30 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
             // now identical regardless of whether the target
             // is a homelab IP or a public WAN one.
             let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or(&url);
-            // `iroh://` is QUIC over UDP with its own ALPN-
-            // multiplexed bidirectional streams — the same shape
-            // as `webtransport://` (which is already preferred),
-            // so it gets the same green light. The K5 pentagon
-            // race that motivated HTTP.FED.STRICT was about
-            // mutual-init UDP datagram timing, not QUIC streams,
-            // so iroh shares webtransport's immunity.
-            let preferred = matches!(scheme, "h2" | "h2s" | "webtransport" | "iroh" | "iroh-n0");
+            // Wire allowlist for federation. Order communicates
+            // priority: iroh / iroh-n0 first because they are the
+            // recommended default after the Tier 1-4 maturity work
+            // (deterministic listener role, datagram MTU=1400,
+            // SHARED_ENDPOINT dedup, auto-bound identity, sysctl
+            // pre-bind check, peer-addr dedup map, regression test
+            // suite, long-soak harness). h2s / h2 / webtransport
+            // remain preferred fallbacks when iroh can't tune the
+            // host (net.core.rmem_max >= 4 MiB) or crosses a
+            // UDP-blocking middlebox.
+            //
+            // `iroh://` and `iroh-n0://` share the same shape as
+            // `webtransport://` (QUIC + ALPN multiplexing) so they
+            // sidestep the K5 pentagon race that motivated
+            // HTTP.FED.STRICT — that race was about mutual-init UDP
+            // datagram timing, not QUIC streams.
+            let preferred = matches!(scheme, "iroh" | "iroh-n0" | "h2s" | "h2" | "webtransport");
             if !preferred && !args.allow_legacy_federation {
                 bail!(
                     "refusing to federate over `{}://` — drift bridge \
-                     restricts federation to h2:// / h2s:// / \
-                     webtransport:// regardless of target network \
-                     (LAN, WAN, or loopback). Use one of those schemes \
-                     on the remote bridge, OR pass \
+                     restricts federation to iroh:// / iroh-n0:// / \
+                     h2s:// / h2:// / webtransport:// regardless of \
+                     target network (LAN, WAN, or loopback). Use one \
+                     of those schemes on the remote bridge, OR pass \
                      `--allow-legacy-federation` to opt into the \
                      pre-v0.18 legacy path (UDP/TCP federation; not \
                      recommended — see docker/federation-pentagon for \
