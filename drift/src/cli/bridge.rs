@@ -56,6 +56,47 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
     let local_pub = id.public_bytes();
     let pubkey_hex = hex::encode(local_pub);
 
+    // Auto-bind bridge identity to iroh identity if any iroh
+    // URL is in play AND the operator hasn't explicitly set
+    // `DRIFT_IROH_SECRET_HEX`. We seed iroh's `SecretKey` with
+    // the bridge's identity bytes so the iroh `EndpointId` is
+    // stable across restarts (no random key each boot, which
+    // would break preconfigured `iroh://<id>@...` federate URLs).
+    //
+    // NOTE: this does NOT make `iroh_endpoint_id == bridge_pub`.
+    // DRIFT identity uses X25519 (ECDH); iroh identity uses
+    // ed25519 (signatures). The same 32-byte secret feeds both
+    // curves but produces different pubkeys. Operators still
+    // share the iroh endpoint id explicitly (it's logged at
+    // bind time as `iroh listener bound — id=...`); the URL
+    // shape `iroh://<id>@<host>@<bridge_pub>` and
+    // `iroh-n0://<id>@<bridge_pub>` are unchanged. The win is
+    // that operators stop having to manage a separate
+    // `DRIFT_IROH_SECRET_HEX` env var — the bridge's persistent
+    // identity owns the iroh id.
+    //
+    // Operator override wins: if `DRIFT_IROH_SECRET_HEX` is
+    // already set (e.g. someone wants two separate keys for
+    // separation of concerns), we leave it alone.
+    let iroh_in_use = spec_list_uses_iroh(&listen_urls)
+        .or_else(|| spec_list_uses_iroh(&args.federates))
+        .unwrap_or(false);
+    let env_already_set = std::env::var("DRIFT_IROH_SECRET_HEX").is_ok();
+    if iroh_in_use && !env_already_set {
+        // SAFETY: set_var is safe at startup before any thread
+        // observes the env var. wire_iroh's `iroh_secret_from_env`
+        // is called lazily from the first iroh connect/listen
+        // which happens AFTER this set_var below.
+        unsafe {
+            std::env::set_var("DRIFT_IROH_SECRET_HEX", hex::encode(secret));
+        }
+        tracing::info!(
+            bridge_pubkey = %pubkey_hex,
+            "iroh identity auto-bound to bridge identity. iroh EndpointId will be logged at \
+             listener bind. Override the seed with DRIFT_IROH_SECRET_HEX."
+        );
+    }
+
     let config = TransportConfig {
         // Bridges are meeting points — anyone with the pubkey
         // can connect, like a public website. Peer authorization
@@ -481,6 +522,20 @@ fn parse_federate_spec(spec: &str) -> Result<(String, [u8; 32])> {
     let mut pubkey = [0u8; 32];
     pubkey.copy_from_slice(&pubkey_bytes);
     Ok((url.to_string(), pubkey))
+}
+
+/// True if any of the URL specs use an iroh scheme (either
+/// `iroh://` or `iroh-n0://`). Used to gate the bridge-identity
+/// → iroh-identity auto-binding.
+fn spec_list_uses_iroh(specs: &[String]) -> Option<bool> {
+    if specs.is_empty() {
+        return None;
+    }
+    Some(
+        specs
+            .iter()
+            .any(|s| s.starts_with("iroh://") || s.starts_with("iroh-n0://")),
+    )
 }
 
 /// Best-effort hostname detection. `$HOSTNAME` is set on most
