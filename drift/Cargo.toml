@@ -121,7 +121,42 @@ safelog = { version = "0.8", optional = true }
 # iroh — n0-computer's pubkey-addressed QUIC overlay. Optional
 # because it pulls in its own QUIC stack (~30 transitive crates).
 # Behind `--features iroh`.
-iroh = { version = "1.0.0-rc.1", optional = true, default-features = false, features = ["tls-ring"] }
+#
+# Pinned exactly. `=1.0.0-rc.1` (not `^1.0.0-rc.1`) so a
+# `cargo update` won't silently move us to a new rc / .0
+# release. The iroh wire adapter has paid for two real bugs in
+# two months — K=3 mutual-init dedup fragmentation (fixed by
+# SHARED_ENDPOINT) and K=17 datagram MTU rejection (fixed by
+# INITIAL_MTU=1400). Both required hours of investigation; a
+# quiet iroh upgrade could re-introduce them or surface a new
+# failure mode. The explicit pin makes upgrades a deliberate,
+# reviewed event.
+#
+# To upgrade iroh:
+#
+#  1. Read the iroh CHANGELOG since the pinned version
+#     (https://github.com/n0-computer/iroh/blob/main/CHANGELOG.md).
+#     Flag changes to: Endpoint construction, ALPN handling,
+#     datagram / max_datagram_size behavior, connection dedup,
+#     presets (Minimal / N0), PKARR DNS / relay discovery.
+#  2. Bump the version below. Keep the `=` prefix.
+#  3. `cargo update -p iroh` (lockfile refresh for this dep only).
+#  4. `cargo build --features iroh --tests`.
+#  5. Run the iroh regression tests:
+#       cargo test --features iroh --test wire_iroh_mtu_regression
+#       cargo test --features iroh --test wire_iroh_preset_mismatch
+#       cargo test --features iroh --test wire_iroh_shared_endpoint
+#  6. Run the K=17 corporate harness on OrbStack with iroh:
+#       FED_WIRE=iroh bash docker/federation-corporate/run-native.sh
+#     Compare pass-rate against the prior baseline (~85-89/96).
+#     Any drop > 5 dials is a regression worth investigating.
+#  7. (Recommended) Run drift-bench/scripts/k17-soak.sh for at
+#     least 1 hour to catch slow-leak behavior from the upgrade.
+#
+# No Renovate / Dependabot rule yet because we'd want to exclude
+# iroh from auto-bumps anyway. If those get added later, mark
+# iroh manual-review-only.
+iroh = { version = "=1.0.0-rc.1", optional = true, default-features = false, features = ["tls-ring"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
