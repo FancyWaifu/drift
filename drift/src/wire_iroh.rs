@@ -67,11 +67,13 @@
 
 use crate::io::{Listener, PacketIO, SchemeRegistration};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{Mutex, OnceCell};
 
 use iroh::endpoint::{presets, Connection, QuicTransportConfig};
@@ -203,33 +205,54 @@ const ALPN: &[u8] = b"drift/iroh/1";
 /// can't trick us into a giant allocation.
 const MAX_DATAGRAM: usize = 64 * 1024;
 
-/// SocketAddr for the iroh peer, derived deterministically
-/// from its `EndpointId`. The post-handshake `Connection` API
-/// doesn't expose the underlying socket addr (relay/direct/
-/// custom transport abstraction), so we synthesize a stable
-/// per-peer addr from the iroh endpoint id.
+/// SocketAddr for the iroh peer, derived from its `EndpointId`
+/// via a process-wide allocation map.
 ///
-/// **Why this matters for DRIFT federation**: other multi-
-/// shot wires (h2, ws, webtransport) return the real connecting
-/// peer's IP. DRIFT correlates sessions by src_addr; an earlier
-/// iroh build that returned `127.0.0.1:60000` from a process-
-/// wide counter made the federation handshake AEAD-auth-fail
-/// because session lookup picked the wrong peer. Deterministic
-/// per-id synthesis avoids that: same peer → same addr →
-/// session table correlates correctly.
+/// **Why this exists**: other multi-shot wires (h2, ws,
+/// webtransport) return the real connecting peer's IP from
+/// `recv_from`. DRIFT correlates sessions by src_addr; an
+/// earlier iroh build that returned `127.0.0.1:60000` from a
+/// process-wide counter made the federation handshake
+/// AEAD-auth-fail because session lookup picked the wrong peer.
+/// We need same-peer → same-addr **and** different-peer →
+/// different-addr, deterministically.
 ///
-/// Uses the 192.0.2.0/24 documentation range (RFC 5737) so the
-/// synthesized addrs are outside loopback and outside any
-/// real subnet anyone is likely to use.
+/// **Why a map instead of a hash**: the previous version
+/// SipHash-truncated the `EndpointId` into 8 bits of octet + 16
+/// bits of port, giving a birthday-collision window at ~4096
+/// endpoints. We're nowhere near that, but the map approach
+/// closes the door entirely — first-come-first-served slot
+/// allocation in the 192.0.2.0/24 documentation range (RFC 5737)
+/// means zero collisions until we exhaust ~16M slots
+/// (254 octets × ~64K ports), which is well beyond any
+/// realistic deployment.
+///
+/// **Slot policy**: 192.0.2.{1..254} on port 51820, then port
+/// 51821, and so on. The counter is process-lifetime; entries
+/// are never reclaimed because any active `Connection` keeps
+/// using the addr it was first assigned, and reclaiming a slot
+/// while a stale session entry still references it would
+/// reintroduce the AEAD-auth-fail failure mode.
+static PEER_ADDR_MAP: OnceLock<std::sync::Mutex<HashMap<EndpointId, SocketAddr>>> = OnceLock::new();
+static NEXT_PEER_INDEX: AtomicU32 = AtomicU32::new(0);
+
 fn peer_addr_for_connection(conn: &Connection) -> SocketAddr {
-    use std::hash::Hasher;
     let id = conn.remote_id();
-    let mut h = siphasher::sip::SipHasher24::new();
-    h.write(id.as_bytes());
-    let hash = h.finish();
-    let octet = ((hash >> 16) & 0xff) as u8;
-    let port = (hash as u16).max(1024);
-    SocketAddr::from(([192, 0, 2, octet], port))
+    let map_cell = PEER_ADDR_MAP.get_or_init(|| std::sync::Mutex::new(HashMap::with_capacity(64)));
+    let mut map = map_cell.lock().unwrap();
+    if let Some(&addr) = map.get(&id) {
+        return addr;
+    }
+    // Allocate the next sequential slot. Octet cycles 1..=254
+    // (skipping .0 and .255); port advances each time octet
+    // wraps. This gives ~16M deterministic, collision-free
+    // assignments.
+    let n = NEXT_PEER_INDEX.fetch_add(1, Ordering::Relaxed);
+    let octet = ((n % 254) + 1) as u8;
+    let port = 51820u16.wrapping_add((n / 254) as u16);
+    let addr = SocketAddr::from(([192, 0, 2, octet], port));
+    map.insert(id, addr);
+    addr
 }
 
 // ─── Per-connection PacketIO ─────────────────────────────────────
