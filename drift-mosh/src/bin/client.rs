@@ -283,8 +283,11 @@ async fn run() -> Result<()> {
         let target_bridge_hex = cli.target_bridge.as_deref().ok_or_else(|| {
             anyhow!("--bridge requires --target-bridge (the server's bridge pubkey)")
         })?;
+        // rsplit on LAST '@' so URLs that themselves contain '@'
+        // (iroh://<id>@<host:port>, iroh-n0://<id>) still parse —
+        // the trailing @<pubkey-hex> always lives at the end.
         let (bridge_url, bridge_pub_hex) = bridge_spec
-            .split_once('@')
+            .rsplit_once('@')
             .ok_or_else(|| anyhow!("--bridge expected <url>@<pubkey-hex>"))?;
         let bridge_pub = decode_hex32(bridge_pub_hex).context("--bridge pubkey")?;
         let target_bridge_pub =
