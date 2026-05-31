@@ -97,6 +97,17 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
         );
     }
 
+    // Sysctl precheck: the iroh wire is UDP/QUIC. Without a
+    // generously bumped kernel UDP receive buffer, K-large
+    // federation drops datagrams at the kernel and iroh's
+    // congestion control reads it as packet loss. We documented
+    // this in docs/BRIDGE_OPTIMIZATION.md item 10 after the K=17
+    // investigation. Bail loud here so operators can't deploy a
+    // misconfigured host and chase phantom protocol bugs.
+    if iroh_in_use {
+        check_iroh_rmem_max()?;
+    }
+
     let config = TransportConfig {
         // Bridges are meeting points — anyone with the pubkey
         // can connect, like a public website. Peer authorization
@@ -536,6 +547,96 @@ fn spec_list_uses_iroh(specs: &[String]) -> Option<bool> {
             .iter()
             .any(|s| s.starts_with("iroh://") || s.starts_with("iroh-n0://")),
     )
+}
+
+/// Minimum kernel UDP receive buffer (`net.core.rmem_max`) we
+/// need for iroh federation to behave. DRIFT requests
+/// `SO_RCVBUF = 4 MiB` per UDP socket; the kernel clamps to
+/// `rmem_max`. Below 4 MiB and we silently drop datagrams at
+/// the kernel under burst load.
+const IROH_MIN_RMEM: usize = 4 * 1024 * 1024;
+/// Documented production value for K-large federation
+/// (docs/BRIDGE_OPTIMIZATION.md item 10).
+const IROH_RECOMMENDED_RMEM: usize = 128 * 1024 * 1024;
+
+/// Pre-bind check that the kernel UDP buffer is large enough
+/// for iroh federation. Called only when an iroh URL is in
+/// use. Loud failure beats a confusing protocol-level
+/// investigation later. Linux-only; on other platforms (or
+/// unprivileged containers where `/proc/sys/net/core/` isn't
+/// exposed) we warn rather than fail, and rely on the runtime
+/// `SO_RCVBUF clamped` warning from drift::io as a fallback.
+fn check_iroh_rmem_max() -> Result<()> {
+    let path = "/proc/sys/net/core/rmem_max";
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            // Common case: unprivileged Proxmox/LXC where
+            // /proc/sys/net/core is masked by lxcfs. Nothing to
+            // check; warn loudly so operators know to verify
+            // host-side.
+            tracing::warn!(
+                error = %e,
+                path,
+                "could not read kernel UDP rmem_max — iroh federation may silently drop \
+                 datagrams under burst load. Verify the host's `net.core.rmem_max` is \
+                 >= 128 MiB (`sudo sysctl -w net.core.rmem_max=134217728`). See \
+                 docs/BRIDGE_OPTIMIZATION.md item 10."
+            );
+            return Ok(());
+        }
+    };
+    let rmem_max: usize = raw.trim().parse().with_context(|| {
+        format!(
+            "unparseable {} contents: {:?}",
+            path,
+            raw.trim().chars().take(20).collect::<String>()
+        )
+    })?;
+    if rmem_max < IROH_MIN_RMEM {
+        bail!(
+            "iroh federation requires net.core.rmem_max >= {} bytes ({} MiB); \
+             host currently has {} bytes ({} KiB). Apply on the host (not inside the \
+             container if running in one):\n\
+             \n  \
+             sudo sysctl -w net.core.rmem_max={}\n  \
+             sudo sysctl -w net.core.wmem_max={}\n  \
+             sudo tee /etc/sysctl.d/99-drift.conf <<'EOF'\n  \
+             net.core.rmem_max={}\n  \
+             net.core.wmem_max={}\n  \
+             EOF\n\
+             \n\
+             See docs/BRIDGE_OPTIMIZATION.md item 10. Use --federate over h2s:// instead \
+             if you can't tune the host (h2s rides TCP, whose buffers Linux auto-tunes).",
+            IROH_MIN_RMEM,
+            IROH_MIN_RMEM / 1024 / 1024,
+            rmem_max,
+            rmem_max / 1024,
+            IROH_RECOMMENDED_RMEM,
+            IROH_RECOMMENDED_RMEM,
+            IROH_RECOMMENDED_RMEM,
+            IROH_RECOMMENDED_RMEM,
+        );
+    }
+    if rmem_max < IROH_RECOMMENDED_RMEM {
+        tracing::warn!(
+            rmem_max,
+            recommended = IROH_RECOMMENDED_RMEM,
+            "kernel UDP rmem_max is above the {} byte minimum but below the {} byte \
+             recommended value for K-large iroh federation. Bursty deployments (17+ \
+             bridges) may see UDP buffer drops. Bump via `sudo sysctl -w \
+             net.core.rmem_max={}`. See docs/BRIDGE_OPTIMIZATION.md item 10.",
+            IROH_MIN_RMEM,
+            IROH_RECOMMENDED_RMEM,
+            IROH_RECOMMENDED_RMEM,
+        );
+    } else {
+        tracing::info!(
+            rmem_max,
+            "kernel UDP rmem_max sized for K-large iroh federation"
+        );
+    }
+    Ok(())
 }
 
 /// Best-effort hostname detection. `$HOSTNAME` is set on most
