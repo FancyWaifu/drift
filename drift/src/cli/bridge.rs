@@ -309,6 +309,34 @@ pub async fn run(args: &BridgeArgs, identity_path: &str) -> Result<()> {
                 Ok(handle) => {
                     outbound_handles.push(handle);
                     eprintln!("│   {} ({})", spec, &hex::encode(pubkey)[..16]);
+                    // Warmup byte triggers the DRIFT HELLO with
+                    // the federation peer. `connect_federate`
+                    // brings up the iroh / h2s / webtransport
+                    // wire, calls `add_peer(... Initiator)`, but
+                    // never sends anything — so the DRIFT-level
+                    // session sits in `Pending` until the first
+                    // outbound DATA. Without this, the
+                    // FederationDirectory announcer (which uses
+                    // `send_typed`, not `send_data`) starts
+                    // firing at +1 s and errors with `UnknownPeer`
+                    // because `send_typed` rejects non-Established
+                    // sessions. Two seconds later the 2-s
+                    // keep-alive ticker fires and DOES trigger
+                    // HELLO, but the first directory announce is
+                    // already dropped. Send the warmup byte
+                    // synchronously here so the session is
+                    // Established by the time the first announce
+                    // fires. Same pattern as `drift-mosh-server`'s
+                    // bridge connect.
+                    if let Err(e) = transport.send_data(&handle, b".", 0, 0).await {
+                        tracing::warn!(
+                            error = %e,
+                            peer = %&hex::encode(pubkey)[..16],
+                            "federation warmup send failed; \
+                             session will Establish on first \
+                             keep-alive tick instead"
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!(
