@@ -1347,9 +1347,31 @@ async fn disable_offloads_and_verify(iface: &str) {
 /// by the daemon's endpoint-probe path and by
 /// `doctor --probe`, so it's `pub(crate)`.
 pub(crate) async fn resolve_endpoint(url: &str) -> Result<SocketAddr> {
-    let (_scheme, addr) = url
+    let (scheme, mut addr) = url
         .split_once("://")
         .ok_or_else(|| anyhow!("endpoint URL needs scheme: {:?}", url))?;
+    // `iroh://` and `iroh-n0://` URLs have the shape
+    // `<endpoint_id>@<host:port>`. The `<endpoint_id>` is iroh
+    // routing metadata, not part of the SocketAddr we need to
+    // resolve. Strip it. `iroh-n0://` has no host:port at all —
+    // discovery happens at dial time — so resolve_endpoint can't
+    // meaningfully produce one; surface a clear error instead of
+    // tripping over the malformed input downstream.
+    if matches!(scheme, "iroh" | "iroh-n0") {
+        match addr.rsplit_once('@') {
+            Some((_id, host_port)) => addr = host_port,
+            None => {
+                if scheme == "iroh-n0" {
+                    return Err(anyhow!(
+                        "iroh-n0:// endpoint {:?} has no host:port — \
+                         discovery happens at dial time; \
+                         resolve_endpoint can't produce a SocketAddr",
+                        url
+                    ));
+                }
+            }
+        }
+    }
     // Numeric host:port? Skip DNS.
     if let Ok(sa) = addr.parse::<SocketAddr>() {
         return Ok(sa);
@@ -1859,5 +1881,53 @@ async fn supervise_all(
                 state.high_rtt_strikes = 0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_endpoint_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn udp_numeric_passes_through() {
+        let addr = resolve_endpoint("udp://127.0.0.1:51820").await.unwrap();
+        assert_eq!(addr.to_string(), "127.0.0.1:51820");
+    }
+
+    #[tokio::test]
+    async fn tcp_numeric_passes_through() {
+        let addr = resolve_endpoint("tcp://10.0.0.5:443").await.unwrap();
+        assert_eq!(addr.to_string(), "10.0.0.5:443");
+    }
+
+    #[tokio::test]
+    async fn iroh_strips_endpoint_id_and_resolves_host_port() {
+        // iroh://<endpoint_id>@<host:port> — the endpoint_id is
+        // iroh routing metadata; only host:port matters for the
+        // failover placeholder.
+        let addr = resolve_endpoint(
+            "iroh://a0cd8768f2c5f827b01bc2c391fb1e5783379ab023fe2bec0342e5be5a23cdb6@192.168.50.1:51829",
+        )
+        .await
+        .unwrap();
+        assert_eq!(addr.to_string(), "192.168.50.1:51829");
+    }
+
+    #[tokio::test]
+    async fn iroh_n0_without_host_port_errors_clearly() {
+        // iroh-n0:// URLs have no host:port — discovery happens
+        // at dial time. resolve_endpoint can't produce a SocketAddr;
+        // we want a clear bail rather than a misleading "no
+        // addresses resolved" from lookup_host.
+        let err = resolve_endpoint(
+            "iroh-n0://a0cd8768f2c5f827b01bc2c391fb1e5783379ab023fe2bec0342e5be5a23cdb6",
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no host:port"),
+            "expected 'no host:port' error, got: {msg}"
+        );
     }
 }
