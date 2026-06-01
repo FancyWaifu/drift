@@ -99,9 +99,48 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 /// deployed value stays high enough for DRIFT's 1300-byte packets.
 pub const INITIAL_MTU: u16 = 1400;
 
+/// Aggressive keep-alive interval for the QUIC connection AND
+/// each per-path keep-alive. iroh's defaults are 5s (both
+/// connection-wide and per-path); on a cross-host LAN deployment
+/// (router ↔ Drift-4) we observed the federation connection
+/// dying after ~30-180s. Diagnosis (2026-06-01):
+///
+///   1. iroh always negotiates QUIC Multipath + n0 NAT-traversal
+///      even on `presets::Minimal`. There's no public API to
+///      disable either in iroh-1.0-rc.1.
+///   2. After the direct path establishes (`path_id=0`), n0
+///      NAT-traversal opens an ephemeral hole-punched path
+///      (`path_id=1`) with a fractionally-lower RTT.
+///   3. iroh's biased_rtt_path_selector switches selection to
+///      `path_id=1`; `path_id=0` is demoted to `Backup`.
+///   4. Keep-alives appear to favor the selected path. After
+///      `PATH_MAX_IDLE_TIMEOUT = 15s` of no traffic on the
+///      Backup path, iroh abandons it.
+///   5. The ephemeral path eventually goes stale too (the
+///      hole-punched port isn't actually a listening socket on
+///      the peer). `LastOpenPath` fires, connection dies.
+///
+/// This Tier-A workaround sets per-path keep-alive to 500ms so
+/// the Backup path stays alive even when not the selected path.
+/// Also caps NAT-traversal address candidates at iroh's minimum
+/// allowed (8, down from default 32) to reduce the storm of
+/// ephemeral probe paths.
+///
+/// If this doesn't fully fix the failure mode, the durable fix
+/// is to fork iroh and remove the minimum-value enforcement in
+/// `max_concurrent_multipath_paths` / `max_remote_nat_traversal_addresses`
+/// — both of which silently reject low values at iroh's wrapper
+/// even though the underlying noq::TransportConfig supports
+/// 0 = disabled.
+const KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const MIN_NAT_TRAVERSAL_ADDRS: u8 = 8;
+
 fn drift_iroh_transport_config() -> QuicTransportConfig {
     QuicTransportConfig::builder()
         .initial_mtu(INITIAL_MTU)
+        .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+        .default_path_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+        .max_remote_nat_traversal_addresses(MIN_NAT_TRAVERSAL_ADDRS)
         .build()
 }
 
