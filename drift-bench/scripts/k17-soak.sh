@@ -40,16 +40,28 @@ WIRE="${2:-iroh}"
 SNAPSHOT_INTERVAL_SECS="${SNAPSHOT_INTERVAL_SECS:-300}"
 WORK="${WORK:-/tmp/drift-corp-test}"
 DURATION_SECS="${DURATION_SECS:-$((HOURS * 3600))}"
+# Minimum pid-file count expected under $WORK/pids before the
+# soak agrees to start. Default 17 matches the K=17 corporate
+# harness. Lower for single-bridge soaks (e.g. router bridge:
+# MIN_PIDS=2 covers the bridge + its mosh-server).
+MIN_PIDS="${MIN_PIDS:-17}"
 
 if [ ! -d "$WORK/pids" ]; then
     echo "no $WORK/pids — bring federation up first \
 (e.g. bash launch-iroh.sh, wait for [done] line)" >&2
     exit 2
 fi
-PID_COUNT=$(find "$WORK"/pids -maxdepth 1 -name '*.pid' 2>/dev/null | wc -l)
-if [ "$PID_COUNT" -lt 17 ]; then
-    echo "expected ≥17 pid files under $WORK/pids, found $PID_COUNT — \
-federation not fully up?" >&2
+# For-loop with -f filter, not `find -maxdepth`, so busybox shells
+# (e.g. stock ASUSWRT on the router-bridge) can run this script.
+# The -f check silently skips the literal `*.pid` non-match case.
+PID_COUNT=0
+for _f in "$WORK"/pids/*.pid; do
+    [ -f "$_f" ] && PID_COUNT=$((PID_COUNT + 1))
+done
+unset _f
+if [ "$PID_COUNT" -lt "$MIN_PIDS" ]; then
+    echo "expected ≥$MIN_PIDS pid files under $WORK/pids, found $PID_COUNT — \
+federation not fully up? (override the minimum with MIN_PIDS env)" >&2
     exit 2
 fi
 
@@ -105,7 +117,13 @@ snapshot_metrics() {
     #   lo: rx_bytes packets … tx_bytes packets …
     local lo_rx=0 lo_tx=0
     if [ -r /proc/net/dev ]; then
-        read lo_rx lo_tx < <(awk '/^[[:space:]]*lo:/ {print $2, $10; exit}' /proc/net/dev)
+        # Parameter-expansion split rather than `read < <(...)` so
+        # busybox bash (router) accepts this; process substitution
+        # is bash-only and busybox doesn't ship it.
+        local _lo
+        _lo=$(awk '/^[[:space:]]*lo:/ {print $2 " " $10; exit}' /proc/net/dev)
+        lo_rx="${_lo% *}"
+        lo_tx="${_lo#* }"
         : "${lo_rx:=0}" "${lo_tx:=0}"
     fi
 
