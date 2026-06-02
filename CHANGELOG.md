@@ -79,6 +79,17 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 4c: peer-layer migration in `rtt.rs`.** Migrates the 8
+  produce sites of `DriftError::UnknownPeer` in
+  `drift::transport::rtt` (RTT-probe Ping/Pong handling) to the
+  appropriate `PeerError` variants: 4 × `SessionNotReady`
+  (session-key lookup misses in `emit_pings`, `handle_ping` for
+  both rx and tx, `handle_pong`), 2 × `WrongDestination`
+  (Ping/Pong addressed to a different peer id), 2 ×
+  `NotRegistered` (incoming src_id absent from the peer table).
+  `From<PeerError>` preserves the umbrella mapping so the public
+  error surface is unchanged. The `DriftError::PacketTooShort`
+  site in `handle_ping` (codec-layer) remains untouched.
 - **Slice 4b: peer-layer migration in `mesh.rs`.** Migrates the 4
   produce sites of `DriftError::UnknownPeer` in `drift::transport::mesh`
   to the appropriate `PeerError` variants: BEACON emit's
