@@ -79,6 +79,17 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **`multipath::probe_path` no longer misuses `UnknownPeer`.**
+  When a path-probe deadline expired with no response,
+  `MultipathClient::probe_path` returned
+  `DriftError::UnknownPeer` — but the peer is perfectly well
+  known; the *path* timed out. Returns `DriftError::DeadlineExpired`
+  now, matching the actual condition. The only consumer
+  (`probe_all`'s `.is_ok()` check) is unaffected; direct callers
+  of `probe_path` who were matching on the variant were
+  observing a misnamed error and now see the correct one.
+  Flagged during the slice 4 peer-error sub-series as a real
+  misuse rather than a typed-error refactor.
 - **Slice 4f: peer-layer migration in `drift::transport::mod`.**
   Migrates the 65 produce sites of `DriftError::UnknownPeer` in
   the transport core module to the appropriate `PeerError`
