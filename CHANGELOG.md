@@ -77,6 +77,23 @@ crate. A change that touches multiple surfaces appears under each.
   expansion split instead of `read < <(...)` process substitution.
   (#15)
 
+### Error types
+
+- **Slice 1 of layered per-protocol-concern error types.** Introduces
+  `drift_core::error::CodecError` for wire-codec failures alongside
+  the existing flat `DriftError`. Pure-codec functions
+  (`PacketType::from_u8`, `Header::decode`, `decode_short`,
+  `RotationAnnounce::decode`) now return `Result<T, CodecError>`
+  instead of `Result<T, DriftError>`. `From<CodecError> for DriftError`
+  preserves backward compat: every transitive caller using `?`
+  works unchanged. Callers wanting layer-specific handling can
+  now match on `CodecError` variants directly instead of
+  reasoning about which `DriftError` variants a parser can produce.
+  Slice 2 (crypto layer / `CryptoError`), slice 3 (session
+  lifecycle / `SessionError`), slice 4 (peer + federation /
+  `PeerError`), and slice 5 (consolidate `DriftError` to umbrella-
+  only) ship as their own PRs.
+
 ### drift-vpn
 
 - **`resolve_endpoint` now parses iroh:// URLs.** Strips the leading

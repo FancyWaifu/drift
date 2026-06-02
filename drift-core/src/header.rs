@@ -1,4 +1,3 @@
-use crate::error::{DriftError, Result};
 
 pub const HEADER_LEN: usize = 36;
 pub const AUTH_TAG_LEN: usize = 16;
@@ -227,7 +226,7 @@ pub enum PacketType {
 }
 
 impl PacketType {
-    pub fn from_u8(v: u8) -> Result<Self> {
+    pub fn from_u8(v: u8) -> std::result::Result<Self, crate::error::CodecError> {
         match v {
             1 => Ok(Self::Hello),
             2 => Ok(Self::HelloAck),
@@ -251,7 +250,7 @@ impl PacketType {
             23 => Ok(Self::PeerHere),
             24 => Ok(Self::PeerGone),
             25 => Ok(Self::FindPeerHashed),
-            _ => Err(DriftError::UnknownType(v)),
+            _ => Err(crate::error::CodecError::UnknownType(v)),
         }
     }
 }
@@ -324,16 +323,16 @@ impl Header {
         out[32..36].copy_from_slice(&self.send_time_ms.to_be_bytes());
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
+    pub fn decode(bytes: &[u8]) -> std::result::Result<Self, crate::error::CodecError> {
         if bytes.len() < HEADER_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(crate::error::CodecError::PacketTooShort {
                 got: bytes.len(),
                 need: HEADER_LEN,
             });
         }
         let version = bytes[0] >> 4;
         if version != PROTOCOL_VERSION {
-            return Err(DriftError::UnsupportedVersion(version));
+            return Err(crate::error::CodecError::UnsupportedVersion(version));
         }
         let flags = bytes[0] & 0x0F;
         let packet_type = PacketType::from_u8(bytes[1])?;

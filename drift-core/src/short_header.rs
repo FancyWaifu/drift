@@ -54,7 +54,7 @@
 //! conditions and falls back to long header automatically.
 
 use crate::crypto::SessionKey;
-use crate::error::{DriftError, Result};
+use crate::error::Result;
 use crate::header::AUTH_TAG_LEN;
 use blake2::{digest::consts::U32, Blake2b, Digest};
 
@@ -116,9 +116,11 @@ pub fn is_short_header(data: &[u8]) -> bool {
 /// Decode a short-header packet's fixed fields. Does NOT
 /// decrypt — the caller needs to look up the CID first
 /// to find the session key. Returns `(cid, seq, ciphertext_with_tag)`.
-pub fn decode_short(data: &[u8]) -> Result<(u16, u32, &[u8])> {
+pub fn decode_short(
+    data: &[u8],
+) -> std::result::Result<(u16, u32, &[u8]), crate::error::CodecError> {
     if data.len() < SHORT_HEADER_LEN + AUTH_TAG_LEN {
-        return Err(DriftError::PacketTooShort {
+        return Err(crate::error::CodecError::PacketTooShort {
             got: data.len(),
             need: SHORT_HEADER_LEN + AUTH_TAG_LEN,
         });
