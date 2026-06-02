@@ -67,7 +67,11 @@ impl Inner {
                     if !matches!(p.handshake, HandshakeState::Established { .. }) {
                         return None;
                     }
-                    let seq = p.next_seq_checked()?;
+                    // Silently skip peers whose seq counter is at
+                    // the AEAD-nonce safety ceiling — they need a
+                    // rekey before any more packets can flow, and
+                    // emit_pings is best-effort.
+                    let seq = p.next_seq_checked().ok()?;
                     let mut nonce = [0u8; PING_NONCE_LEN];
                     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
                     // Remember when we sent it so the
@@ -163,9 +167,7 @@ impl Inner {
             nonce.copy_from_slice(&nonce_vec);
 
             // Build the Pong reply, sealing the same nonce.
-            let seq = peer
-                .next_seq_checked()
-                .ok_or(DriftError::SessionExhausted)?;
+            let seq = peer.next_seq_checked()?;
             let mut pong_header = peer.make_header(PacketType::Pong, seq, self.local_peer_id);
             pong_header.payload_len = (PING_NONCE_LEN + AUTH_TAG_LEN) as u16;
             let mut pong_hbuf = [0u8; HEADER_LEN];

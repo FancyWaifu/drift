@@ -316,9 +316,7 @@ impl Inner {
         let (wire, addr) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let seq = peer
-                .next_seq_checked()
-                .ok_or(DriftError::SessionExhausted)?;
+            let seq = peer.next_seq_checked()?;
             let mut header =
                 peer.make_header(PacketType::ResumptionTicket, seq, self.local_peer_id);
             header.payload_len = (TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN) as u16;
@@ -507,9 +505,7 @@ impl Inner {
                 pq: None,
             };
 
-            let seq = peer
-                .next_seq_checked()
-                .ok_or(DriftError::SessionExhausted)?;
+            let seq = peer.next_seq_checked()?;
             let mut header = peer.make_header(PacketType::ResumeHello, seq, self.local_peer_id);
             header.payload_len = RESUME_HELLO_BODY_LEN as u16;
             let mut hbuf = [0u8; HEADER_LEN];

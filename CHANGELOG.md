@@ -79,6 +79,23 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 3: session lifecycle.** Introduces
+  `drift_core::error::SessionError` with the three terminal
+  session states the flat `DriftError` covered separately:
+  `SessionExhausted` (seq counter at AEAD-nonce safety ceiling),
+  `HandshakeExhausted` (retry budget gone), `QueueFull` (pending-
+  send queue at capacity). `Peer::next_seq_checked` — the only
+  pure-session-lifecycle producer in drift-core — moves from
+  `Option<u32>` to `Result<u32, SessionError>` so the ~9 transport
+  call sites that previously did
+  `.next_seq_checked().ok_or(DriftError::SessionExhausted)?`
+  collapse to plain `.next_seq_checked()?`. `From<SessionError>
+  for DriftError` keeps every transitive caller working unchanged
+  — `cargo test` confirms `seq_ceiling.rs`'s
+  `matches!(err, DriftError::SessionExhausted)` assertion still
+  passes. `HandshakeExhausted` and `QueueFull` are still produced
+  inline inside cross-layer transport sends (`drift::transport`)
+  and stay on `DriftError` until later slices split those sends.
 - **Slice 1 of layered per-protocol-concern error types.** Introduces
   `drift_core::error::CodecError` for wire-codec failures alongside
   the existing flat `DriftError`. Pure-codec functions
