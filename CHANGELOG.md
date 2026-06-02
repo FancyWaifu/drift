@@ -93,6 +93,24 @@ crate. A change that touches multiple surfaces appears under each.
   lifecycle / `SessionError`), slice 4 (peer + federation /
   `PeerError`), and slice 5 (consolidate `DriftError` to umbrella-
   only) ship as their own PRs.
+- **Slice 2: crypto layer.** Introduces `drift_core::error::CryptoError`
+  with three distinct variants where the flat `DriftError` had two:
+  `AeadAuthFailed` and `SignatureInvalid` (both used to collapse
+  into `DriftError::AuthFailed`) plus `Replay { seq }` (previously
+  the tuple `DriftError::Replay(u32)`). Pure-crypto functions
+  (`xeddsa::verify`, `Session::check_and_update_replay`) now return
+  `Result<(), CryptoError>` instead of `Result<(), DriftError>`,
+  so the type signature documents that they can only fail with a
+  crypto-layer reason — not codec, not IO. Callers that handle
+  XEdDSA-signature failure and AEAD-tag-mismatch differently no
+  longer have to string-match on `Display` output. `From<CryptoError>
+  for DriftError` preserves the legacy umbrella mapping, so every
+  transitive caller using `?` keeps working unchanged. `SessionKey::open`
+  (which produces both a codec error and an AEAD-auth error from
+  the same call site) and `rotation::verify_against` (which mixes
+  identity-mismatch and signature-verify) intentionally stay on
+  `DriftError` until a later slice splits them into composable
+  single-concern primitives.
 
 ### drift-vpn
 

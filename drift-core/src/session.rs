@@ -1,5 +1,4 @@
 use crate::crypto::{Direction, PeerId, SessionKey};
-use crate::error::{DriftError, Result};
 use crate::header::{Header, PacketType};
 use crate::identity::{Identity, NONCE_LEN};
 use crate::time::{Duration, Instant};
@@ -435,9 +434,19 @@ impl Peer {
         self.replay_bitmap = 0;
     }
 
-    pub fn check_and_update_replay(&mut self, seq: u32) -> Result<()> {
+    /// Check whether `seq` is fresh against the replay window and
+    /// update the bitmap if so. Returns `Err(CryptoError::Replay
+    /// { seq })` if the packet is a duplicate, too old, or seq=0
+    /// (the reserved invalid value). Pure crypto-layer concern;
+    /// converts to `DriftError::Replay(seq)` via `?` for any
+    /// caller still on the umbrella error type.
+    pub fn check_and_update_replay(
+        &mut self,
+        seq: u32,
+    ) -> std::result::Result<(), crate::error::CryptoError> {
+        use crate::error::CryptoError;
         if seq == 0 {
-            return Err(DriftError::Replay(0));
+            return Err(CryptoError::Replay { seq: 0 });
         }
         if seq_newer(seq, self.highest_rx_seq) {
             let shift = seq.wrapping_sub(self.highest_rx_seq);
@@ -453,11 +462,11 @@ impl Peer {
         // seq is older than or equal to highest (in wrapping sense).
         let diff = self.highest_rx_seq.wrapping_sub(seq);
         if diff == 0 || diff >= REPLAY_WINDOW || diff >= 128 {
-            return Err(DriftError::Replay(seq));
+            return Err(CryptoError::Replay { seq });
         }
         let bit = 1u128 << diff;
         if self.replay_bitmap & bit != 0 {
-            return Err(DriftError::Replay(seq));
+            return Err(CryptoError::Replay { seq });
         }
         self.replay_bitmap |= bit;
         Ok(())
