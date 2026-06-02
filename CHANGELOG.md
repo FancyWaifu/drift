@@ -79,6 +79,17 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 4b: peer-layer migration in `mesh.rs`.** Migrates the 4
+  produce sites of `DriftError::UnknownPeer` in `drift::transport::mesh`
+  to the appropriate `PeerError` variants: BEACON emit's
+  `peer.handshake.session()` failure → `SessionNotReady`,
+  BEACON ingest's dst_id mismatch → `WrongDestination`,
+  BEACON ingest's peer-table lookup miss → `NotRegistered`,
+  BEACON ingest's session-key derive miss → `SessionNotReady`.
+  Each call site now declares which of the five semantic
+  conditions it represents instead of collapsing into the flat
+  `UnknownPeer`. Public behavior unchanged (`From<PeerError>`
+  preserves the umbrella mapping).
 - **Slice 4a: peer / federation (start of sub-series).** Introduces
   `drift_core::error::PeerError` to split what used to be the flat
   `DriftError::UnknownPeer` umbrella into five distinct semantic
