@@ -414,16 +414,22 @@ impl Peer {
         s
     }
 
-    /// Safety-checked variant of `next_seq`. Returns `None` once the
-    /// sender's seq counter would cross `SEQ_SEND_CEILING` — which
-    /// exists to prevent AEAD nonce reuse at u32 wraparound. The
-    /// ceiling is chosen far below `u32::MAX` so there is still
-    /// plenty of margin if the check is ever skipped.
-    pub fn next_seq_checked(&mut self) -> Option<u32> {
+    /// Safety-checked variant of `next_seq`. Returns
+    /// `Err(SessionError::SessionExhausted)` once the sender's seq
+    /// counter would cross `SEQ_SEND_CEILING` — which exists to
+    /// prevent AEAD nonce reuse at u32 wraparound. The ceiling is
+    /// chosen far below `u32::MAX` so there is still plenty of
+    /// margin if the check is ever skipped.
+    ///
+    /// Returns the session-layer error type rather than a bare
+    /// `Option` so the failure mode is named at the type level
+    /// and transport call sites simplify from
+    /// `.ok_or(DriftError::SessionExhausted)?` to plain `?`.
+    pub fn next_seq_checked(&mut self) -> std::result::Result<u32, crate::error::SessionError> {
         if self.next_tx_seq >= SEQ_SEND_CEILING {
-            return None;
+            return Err(crate::error::SessionError::SessionExhausted);
         }
-        Some(self.next_seq())
+        Ok(self.next_seq())
     }
 
     /// Reset tx seq counter when establishing a new session key — prevents

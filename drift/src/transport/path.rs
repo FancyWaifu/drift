@@ -45,9 +45,7 @@ pub(crate) fn build_path_challenge_packet(
     peer: &mut Peer,
     challenge: &[u8; PATH_CHALLENGE_LEN],
 ) -> Result<Vec<u8>> {
-    let seq = peer
-        .next_seq_checked()
-        .ok_or(DriftError::SessionExhausted)?;
+    let seq = peer.next_seq_checked()?;
     let mut header = peer.make_header(PacketType::PathChallenge, seq, local_peer_id);
     header.payload_len = (PATH_CHALLENGE_LEN + AUTH_TAG_LEN) as u16;
     let mut hbuf = [0u8; HEADER_LEN];
@@ -73,9 +71,7 @@ pub(crate) fn build_path_response_packet(
     peer: &mut Peer,
     challenge: &[u8; PATH_CHALLENGE_LEN],
 ) -> Result<Vec<u8>> {
-    let seq = peer
-        .next_seq_checked()
-        .ok_or(DriftError::SessionExhausted)?;
+    let seq = peer.next_seq_checked()?;
     let mut header = peer.make_header(PacketType::PathResponse, seq, local_peer_id);
     header.payload_len = (PATH_CHALLENGE_LEN + AUTH_TAG_LEN) as u16;
     let mut hbuf = [0u8; HEADER_LEN];

@@ -2821,9 +2821,7 @@ impl Inner {
 
             // 1. Build the RekeyRequest packet, sealed with the
             //    OLD tx key, body = 32 salt bytes.
-            let seq = peer
-                .next_seq_checked()
-                .ok_or(DriftError::SessionExhausted)?;
+            let seq = peer.next_seq_checked()?;
             let mut header = peer.make_header(PacketType::RekeyRequest, seq, self.local_peer_id);
             header.payload_len = (32 + AUTH_TAG_LEN) as u16;
             let mut hbuf = [0u8; HEADER_LEN];
@@ -2928,9 +2926,7 @@ impl Inner {
             };
 
             // Build the RekeyAck sealed with the NEW tx.
-            let ack_seq = peer
-                .next_seq_checked()
-                .ok_or(DriftError::SessionExhausted)?;
+            let ack_seq = peer.next_seq_checked()?;
             let mut ack_header =
                 peer.make_header(PacketType::RekeyAck, ack_seq, self.local_peer_id);
             ack_header.payload_len = AUTH_TAG_LEN as u16;
@@ -7186,9 +7182,7 @@ impl Inner {
 /// Build a `Close` wire packet: AEAD-sealed empty body, consuming
 /// one tx seq slot.
 fn build_close_packet(local_peer_id: PeerId, peer: &mut Peer) -> Result<Vec<u8>> {
-    let seq = peer
-        .next_seq_checked()
-        .ok_or(DriftError::SessionExhausted)?;
+    let seq = peer.next_seq_checked()?;
     let mut header = peer.make_header(PacketType::Close, seq, local_peer_id);
     header.payload_len = AUTH_TAG_LEN as u16;
     let mut hbuf = [0u8; HEADER_LEN];
@@ -7229,9 +7223,7 @@ fn build_data_packet_with_cid(
     mesh_next_hop: Option<SocketAddr>,
     out_cid: Option<u16>,
 ) -> Result<SendAction> {
-    let seq = peer
-        .next_seq_checked()
-        .ok_or(DriftError::SessionExhausted)?;
+    let seq = peer.next_seq_checked()?;
 
     // Short-header fast path: eligible when
     //   1. We have an outgoing CID for the peer
@@ -7286,9 +7278,7 @@ fn build_typed_packet(
     packet_type: PacketType,
     payload: &[u8],
 ) -> Result<SendAction> {
-    let seq = peer
-        .next_seq_checked()
-        .ok_or(DriftError::SessionExhausted)?;
+    let seq = peer.next_seq_checked()?;
     let send_time_ms = peer.send_time_ms();
     let mut header = Header::new(packet_type, seq, local_peer_id, peer.id);
     header.payload_len = payload.len() as u16;

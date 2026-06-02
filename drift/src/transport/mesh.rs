@@ -407,7 +407,10 @@ impl Inner {
                 .iter_mut()
                 .filter_map(|p| {
                     if matches!(p.handshake, HandshakeState::Established { .. }) && !p.via_mesh {
-                        p.next_seq_checked().map(|seq| (p.id, p.addr, seq))
+                        // Silently skip seq-exhausted peers — they
+                        // need a rekey before any more packets can
+                        // flow, and beacon emission is best-effort.
+                        p.next_seq_checked().ok().map(|seq| (p.id, p.addr, seq))
                     } else {
                         None
                     }

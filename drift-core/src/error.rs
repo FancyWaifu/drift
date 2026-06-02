@@ -36,7 +36,7 @@
 //!     return `Result<T, CodecError>`. `From<CodecError> for
 //!     DriftError` keeps every transitive caller working
 //!     unchanged.
-//!   * **Slice 2 (this PR):** crypto layer. `CryptoError` exists
+//!   * **Slice 2 (PR #22, merged):** crypto layer. `CryptoError`
 //!     with three distinct variants (`AeadAuthFailed`,
 //!     `SignatureInvalid`, `Replay { seq }`) that previously
 //!     collapsed into the flat `DriftError::AuthFailed` /
@@ -49,8 +49,18 @@
 //!     layers and intentionally remain on `DriftError` until a
 //!     later slice splits them into composable
 //!     single-concern primitives.
-//!   * **Slice 3 (future PR):** session lifecycle. `SessionError`
-//!     for `SessionExhausted`, `HandshakeExhausted`.
+//!   * **Slice 3 (this PR):** session lifecycle. `SessionError`
+//!     covers `SessionExhausted` (seq counter at the AEAD-nonce
+//!     safety ceiling), `HandshakeExhausted` (retry budget gone),
+//!     and `QueueFull` (pending-send queue at capacity). The only
+//!     pure-session-lifecycle producer in drift-core is
+//!     `Peer::next_seq_checked`; it moves from `Option<u32>` to
+//!     `Result<u32, SessionError>` so the ~9 transport call sites
+//!     that did `.ok_or(DriftError::SessionExhausted)?` collapse
+//!     into plain `?`. `HandshakeExhausted` and `QueueFull` are
+//!     still produced inline inside cross-layer transport sends
+//!     and stay on `DriftError` until later slices split those
+//!     sends.
 //!   * **Slice 4 (future PR):** peer / federation. `PeerError`
 //!     for `UnknownPeer` (the highest-count variant — split this
 //!     carefully: "app tried to send to unregistered peer" vs
@@ -174,6 +184,48 @@ pub mod crypto {
 
 pub use crypto::CryptoError;
 
+/// Session-lifecycle failures.
+///
+/// Produced by functions that maintain a peer's session-state
+/// machine — seq counter exhaustion, handshake retry exhaustion,
+/// pending-send queue at capacity. Distinct from `CryptoError`
+/// (which covers AEAD / signature failures on individual packets):
+/// session-lifecycle failures mean the session as a whole is in a
+/// terminal state and the app has to tear it down (re-handshake,
+/// drop the peer, back off).
+///
+/// Convert into [`DriftError`] via `?` thanks to the
+/// `From<SessionError> for DriftError` impl below.
+pub mod session {
+    use thiserror::Error;
+
+    #[derive(Debug, Error)]
+    pub enum SessionError {
+        /// The session's tx seq counter has reached
+        /// `SEQ_SEND_CEILING`. Continuing to send would reuse an
+        /// AEAD nonce under the same key, breaking the cipher's
+        /// security proof. The app must rekey or re-handshake
+        /// before any more packets can flow in this direction.
+        #[error("session seq ceiling reached — re-handshake required")]
+        SessionExhausted,
+
+        /// The handshake retry budget has been exhausted with no
+        /// HELLO_ACK arriving. The session is dead — the app has
+        /// to drop and re-`add_peer` to attempt a fresh handshake.
+        #[error("peer handshake exhausted all retries")]
+        HandshakeExhausted,
+
+        /// The peer's pre-handshake pending-send queue is full;
+        /// further `send` calls will be rejected until the
+        /// handshake completes and the queue drains. App should
+        /// back off and retry.
+        #[error("peer pending queue full")]
+        QueueFull,
+    }
+}
+
+pub use session::SessionError;
+
 #[derive(Debug, Error)]
 pub enum DriftError {
     #[error("packet too short: got {got} bytes, need at least {need}")]
@@ -275,6 +327,22 @@ impl From<CryptoError> for DriftError {
             CryptoError::AeadAuthFailed => DriftError::AuthFailed,
             CryptoError::SignatureInvalid => DriftError::AuthFailed,
             CryptoError::Replay { seq } => DriftError::Replay(seq),
+        }
+    }
+}
+
+/// Map a session-lifecycle failure into the legacy flat `DriftError`
+/// variants so transitive callers using `?` keep working unchanged
+/// during the layered-error migration. The mapping is 1:1 — every
+/// `SessionError` variant has a corresponding `DriftError` variant
+/// with the same name and meaning, and a later slice removes the
+/// flat variants once no returner is left.
+impl From<SessionError> for DriftError {
+    fn from(e: SessionError) -> Self {
+        match e {
+            SessionError::SessionExhausted => DriftError::SessionExhausted,
+            SessionError::HandshakeExhausted => DriftError::HandshakeExhausted,
+            SessionError::QueueFull => DriftError::QueueFull,
         }
     }
 }
