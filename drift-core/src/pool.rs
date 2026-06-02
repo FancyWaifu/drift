@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_bounded() {
+    fn wire_pool_drops_returns_past_per_thread_cap() {
         for _ in 0..(POOL_CAP_PER_THREAD * 4) {
             return_wire_buf(Vec::with_capacity(256));
         }

@@ -268,7 +268,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[test]
-    fn parse_ipv4() {
+    fn parses_src_and_dst_from_minimal_ipv4_header() {
         let mut pkt = vec![0x45]; // version 4, IHL 5
         pkt.resize(20, 0);
         pkt[12..16].copy_from_slice(&[10, 0, 0, 1]);
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_ipv6() {
+    fn parses_src_and_dst_from_minimal_ipv6_header() {
         let mut pkt = vec![0x60];
         pkt.resize(40, 0);
         pkt[8..24].copy_from_slice(&[0x20, 0x01, 0xdb, 0x8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);

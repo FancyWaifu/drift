@@ -173,7 +173,7 @@ async fn tampered_data_tag_rejected() {
 }
 
 #[tokio::test]
-async fn flood_survives() {
+async fn victim_processes_legitimate_packet_after_1000_garbage_packets() {
     // Spray the victim with 1000 garbage packets, verify it still processes
     // a legitimate packet afterwards.
     let (victim, addr, _) = setup_victim().await;

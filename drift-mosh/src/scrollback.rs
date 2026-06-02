@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn handles_empty() {
+    fn fresh_scrollback_is_empty_and_replays_no_bytes() {
         let s = Scrollback::new(4);
         assert!(s.is_empty());
         assert_eq!(s.replay(), b"");
