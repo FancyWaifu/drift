@@ -9,7 +9,7 @@
 
 use super::{Inner, HELLO_PAYLOAD_LEN};
 use crate::crypto::{cookie_mac, PeerId, COOKIE_MAC_LEN};
-use crate::error::{DriftError, Result};
+use crate::error::{DriftError, PeerError, Result};
 use crate::header::{Header, PacketType, HEADER_LEN};
 use crate::identity::{NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::HandshakeState;
@@ -248,7 +248,7 @@ impl Inner {
             });
         }
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let server_peer_id = header.src_id;
         let mut blob = [0u8; COOKIE_BLOB_LEN];
