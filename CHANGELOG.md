@@ -79,6 +79,33 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 4f: peer-layer migration in `drift::transport::mod`.**
+  Migrates the 65 produce sites of `DriftError::UnknownPeer` in
+  the transport core module to the appropriate `PeerError`
+  variants. Distribution:
+  32 × `NotRegistered` (peer-table lookups, bridge-pubkey
+  lookups, CID-map lookup, auto-register max_peers cap, and the
+  `!accept_any_peer` reject branch in `handle_hello`),
+  16 × `SessionNotReady` (`peer.handshake.session()` derive
+  misses across every recv/send path, plus the
+  `!is_ready_for_data()` guard in `close_peer`),
+  12 × `WrongDestination` (incoming dst_id mismatch in
+  `handle_*` for rekey, federated, federation_directory,
+  presence_ticket, find_peer, find_peer_hashed, peer_here,
+  peer_gone, hello, data, close),
+  3 × `SessionNotEstablished` (rekey's stricter
+  `HandshakeState::Established` match arms in `rekey` and
+  `handle_rekey_request`, plus the `send_typed` Established
+  check),
+  2 × `ResumptionTicketNotFound` (the `export_resumption_ticket`
+  store-miss and expired-ticket branches).
+  The single `DriftError::UnknownPeer` *consumer* (match arm in
+  `run_recv_loop_for` for the `unknown_peer_drops` metric) is
+  intentionally left alone — `From<PeerError>` preserves the
+  umbrella, so the metric still triggers correctly. Public
+  behavior unchanged. Concludes the per-file 4b–4f sub-series;
+  slice 5 can now collapse `DriftError::UnknownPeer` since no
+  returner is left.
 - **Slice 4e: peer-layer migration in `resumption.rs`.** Migrates
   the 13 produce sites of `DriftError::UnknownPeer` in
   `drift::transport::resumption` (1-RTT session resumption via

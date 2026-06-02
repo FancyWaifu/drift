@@ -1,5 +1,5 @@
 use crate::crypto::{derive_peer_id, Direction, PeerId, SessionKey};
-use crate::error::{DriftError, Result};
+use crate::error::{DriftError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::identity::{
     derive_session_key, random_nonce, rekey_derive, Identity, NONCE_LEN, STATIC_KEY_LEN,
@@ -2172,7 +2172,7 @@ impl Transport {
             peers
                 .get(via_bridge_peer)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let envelope = federated::build(
             &target_bridge_pub,
@@ -2447,7 +2447,7 @@ impl Transport {
             peers
                 .get(bridge)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2715,9 +2715,11 @@ impl Transport {
     /// this peer.
     pub async fn export_resumption_ticket(&self, peer: &PeerId) -> Result<Vec<u8>> {
         let tickets = self.inner.client_tickets.lock().await;
-        let ticket = tickets.get(peer).ok_or(DriftError::UnknownPeer)?;
+        let ticket = tickets
+            .get(peer)
+            .ok_or(PeerError::ResumptionTicketNotFound)?;
         if ticket.expiry <= std::time::SystemTime::now() {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::ResumptionTicketNotFound.into());
         }
         Ok(ticket.to_bytes())
     }
@@ -2811,12 +2813,12 @@ impl Inner {
         // old-key seal happens atomically with the state swap.
         let (wire, addr, new_key_bytes) = {
             let mut peers = self.peers.lock_for(dst).await;
-            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(dst).ok_or(PeerError::NotRegistered)?;
             let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
                 HandshakeState::Established {
                     tx, rx, key_bytes, ..
                 } => (tx.clone(), rx.clone(), key_bytes.clone()),
-                _ => return Err(DriftError::UnknownPeer),
+                _ => return Err(PeerError::SessionNotEstablished.into()),
             };
 
             // 1. Build the RekeyRequest packet, sealed with the
@@ -2876,18 +2878,18 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         let (ack_wire, ack_addr, new_key_bytes_rekey) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
             let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
                 HandshakeState::Established {
                     tx, rx, key_bytes, ..
                 } => (tx.clone(), rx.clone(), key_bytes.clone()),
-                _ => return Err(DriftError::UnknownPeer),
+                _ => return Err(PeerError::SessionNotEstablished.into()),
             };
 
             // Decrypt body with current rx.
@@ -2933,7 +2935,7 @@ impl Inner {
             let mut ack_hbuf = [0u8; HEADER_LEN];
             ack_header.encode(&mut ack_hbuf);
             let ack_aad = canonical_aad(&ack_hbuf);
-            let (tx_ref, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let (tx_ref, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut ack_wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
             ack_wire.extend_from_slice(&ack_hbuf);
             tx_ref.seal_into(
@@ -2972,11 +2974,11 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
         let mut peers = self.peers.lock_for(&peer_id).await;
-        let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+        let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
 
         let mut hbuf = [0u8; HEADER_LEN];
         hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
@@ -3005,9 +3007,9 @@ impl Inner {
         // block peer-table users.
         let (bytes, addr, removed) = {
             let mut peers = self.peers.lock_for(dst).await;
-            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(dst).ok_or(PeerError::NotRegistered)?;
             if !peer.handshake.is_ready_for_data() {
-                return Err(DriftError::UnknownPeer);
+                return Err(PeerError::SessionNotReady.into());
             }
             let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
             let wire = build_close_packet(self.local_peer_id, peer)?;
@@ -3059,7 +3061,7 @@ impl Inner {
         let was_awaiting_data;
         {
             let mut peers = self.peers.lock_for(dst).await;
-            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(dst).ok_or(PeerError::NotRegistered)?;
             was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
 
             let preserved_addr = peer.addr;
@@ -3169,7 +3171,7 @@ impl Inner {
                 peers
                     .get(&via_bridge)
                     .map(|p| p.peer_static_pub)
-                    .ok_or(DriftError::UnknownPeer)?
+                    .ok_or(PeerError::NotRegistered)?
             };
             let envelope = federated::build(
                 &target_bridge_pub,
@@ -3268,7 +3270,7 @@ impl Inner {
 
         let action = {
             let mut peers = self.peers.lock_for(dst).await;
-            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(dst).ok_or(PeerError::NotRegistered)?;
 
             // Mesh-routed peers always need hop_ttl and long
             // headers so intermediate nodes can forward. For
@@ -3558,9 +3560,9 @@ impl Inner {
         }
         let action = {
             let mut peers = self.peers.lock_for(dst).await;
-            let peer = peers.get_mut(dst).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(dst).ok_or(PeerError::NotRegistered)?;
             if !matches!(peer.handshake, HandshakeState::Established { .. }) {
-                return Err(DriftError::UnknownPeer);
+                return Err(PeerError::SessionNotEstablished.into());
             }
             build_typed_packet(self.local_peer_id, peer, packet_type, payload)?
         };
@@ -3591,15 +3593,15 @@ impl Inner {
         ecn_ce: bool,
     ) -> Result<Option<Received>> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         // Decrypt with the Federated type tag in AAD.
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -3635,7 +3637,7 @@ impl Inner {
                 peers
                     .get(&peer_id)
                     .map(|p| p.peer_static_pub)
-                    .ok_or(DriftError::UnknownPeer)?
+                    .ok_or(PeerError::NotRegistered)?
             };
             let sender_is_trusted_bridge = self
                 .federation_table
@@ -4234,15 +4236,15 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         // Decrypt with the FederationDirectory type tag in AAD.
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4267,7 +4269,7 @@ impl Inner {
             peers
                 .get(&peer_id)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let sender_is_bridge = self
             .federation_table
@@ -4459,15 +4461,15 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         // Decrypt with the PresenceTicket type tag in AAD.
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4479,7 +4481,7 @@ impl Inner {
             peers
                 .get(&peer_id)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
 
         let ticket = federated::decode_ticket(&payload_bytes)?;
@@ -4514,7 +4516,7 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         if matches!(
             self.config.effective_find_peer_mode(),
@@ -4527,8 +4529,8 @@ impl Inner {
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4540,7 +4542,7 @@ impl Inner {
             peers
                 .get(&peer_id)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let sender_is_bridge = self
             .federation_table
@@ -4730,7 +4732,7 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         if matches!(
             self.config.effective_find_peer_mode(),
@@ -4741,8 +4743,8 @@ impl Inner {
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4753,7 +4755,7 @@ impl Inner {
             peers
                 .get(&peer_id)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let sender_is_bridge = self
             .federation_table
@@ -4891,13 +4893,13 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -4909,7 +4911,7 @@ impl Inner {
             peers
                 .get(&peer_id)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let sender_is_bridge = self
             .federation_table
@@ -5133,13 +5135,13 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
         let payload_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
@@ -5150,7 +5152,7 @@ impl Inner {
             peers
                 .get(&peer_id)
                 .map(|p| p.peer_static_pub)
-                .ok_or(DriftError::UnknownPeer)?
+                .ok_or(PeerError::NotRegistered)?
         };
         let sender_is_bridge = self
             .federation_table
@@ -5678,13 +5680,13 @@ impl Inner {
 
         let peer_id = {
             let map = self.cid_map.lock().unwrap();
-            *map.get(&cid).ok_or(DriftError::UnknownPeer)?
+            *map.get(&cid).ok_or(PeerError::NotRegistered)?
         };
 
         let (payload, probe) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let aad = &data[..crate::short_header::SHORT_HEADER_LEN];
             let plaintext = match rx.open(seq, PacketType::Data as u8, aad, body) {
                 Ok(pt) => pt,
@@ -6115,7 +6117,7 @@ impl Inner {
             });
         }
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let mut client_static_pub = [0u8; STATIC_KEY_LEN];
         client_static_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
@@ -6272,7 +6274,7 @@ impl Inner {
                     // reaper catches up. Explicit app-registered
                     // peers are unaffected.
                     if peers.iter().filter(|p| p.auto_registered).count() >= self.config.max_peers {
-                        return Err(DriftError::UnknownPeer);
+                        return Err(PeerError::NotRegistered.into());
                     }
                     let mut new_peer =
                         Peer::new(client_peer_id, src, client_static_pub, Direction::Responder);
@@ -6285,13 +6287,13 @@ impl Inner {
                         client_peer_id, iface_idx
                     );
                 } else {
-                    return Err(DriftError::UnknownPeer);
+                    return Err(PeerError::NotRegistered.into());
                 }
             }
 
             let peer = peers
                 .get_mut(&client_peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
+                .ok_or(PeerError::NotRegistered)?;
 
             if peer.peer_static_pub != client_static_pub {
                 return Err(DriftError::AuthFailed);
@@ -6514,7 +6516,7 @@ impl Inner {
         let mesh_next_hop = self.routes.lock().unwrap().lookup(&peer_id);
         {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
 
             // Pattern match by value via std::mem::replace to consume the
             // ephemeral secret (it's not Copy).
@@ -6811,7 +6813,7 @@ impl Inner {
         ecn_ce: bool,
     ) -> Result<Option<Received>> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
@@ -6831,9 +6833,9 @@ impl Inner {
             Option<drift_core::Zeroizing<[u8; 32]>>,
         ) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
 
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
@@ -7070,7 +7072,7 @@ impl Inner {
     /// was in AwaitingData when the close arrived.
     async fn handle_close(&self, header: &Header, full_packet: &[u8], body: &[u8]) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
         // Block-scoped peer-table mutation so the !Send
@@ -7079,8 +7081,8 @@ impl Inner {
         // non-Send analysis — must close the lexical scope.
         let (disconnected_pub, was_awaiting_data, removed_addr) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
@@ -7188,7 +7190,7 @@ fn build_close_packet(local_peer_id: PeerId, peer: &mut Peer) -> Result<Vec<u8>>
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
-    let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
     let mut wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
     tx.seal_into(seq, PacketType::Close as u8, &aad, b"", &mut wire)?;
@@ -7233,7 +7235,7 @@ fn build_data_packet_with_cid(
     // vs the long header's 36 + 16 = 52 bytes.
     if let Some(cid) = out_cid {
         if mesh_next_hop.is_none() && deadline_ms == 0 && coalesce_group == 0 {
-            let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let wire = crate::short_header::encode_short(cid, seq, tx, payload)?;
             return Ok(SendAction::Data(wire, peer.addr, peer.interface_id));
         }
@@ -7256,7 +7258,7 @@ fn build_data_packet_with_cid(
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
 
-    let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
     let mut wire = drift_core::pool::take_wire_buf(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
@@ -7288,7 +7290,7 @@ fn build_typed_packet(
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
 
-    let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
     let mut wire = Vec::with_capacity(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
