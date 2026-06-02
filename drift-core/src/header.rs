@@ -1,4 +1,3 @@
-
 pub const HEADER_LEN: usize = 36;
 pub const AUTH_TAG_LEN: usize = 16;
 pub const PROTOCOL_VERSION: u8 = 1;
