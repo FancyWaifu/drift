@@ -15,7 +15,7 @@
 
 use super::Inner;
 use crate::crypto::PeerId;
-use crate::error::{DriftError, Result};
+use crate::error::{PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, HEADER_LEN};
 use crate::session::HandshakeState;
 use std::collections::HashMap;
@@ -430,7 +430,7 @@ impl Inner {
                 let mut hbuf = [0u8; HEADER_LEN];
                 header.encode(&mut hbuf);
                 let aad = canonical_aad(&hbuf);
-                let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+                let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
                 let sealed = tx.seal(seq, PacketType::Beacon as u8, &aad, &payload)?;
                 let mut wire = Vec::with_capacity(HEADER_LEN + sealed.len());
                 wire.extend_from_slice(&hbuf);
@@ -459,13 +459,13 @@ impl Inner {
         iface_idx: usize,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
         let plaintext = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
             let aad = canonical_aad(&hbuf);
