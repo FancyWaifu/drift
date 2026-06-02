@@ -48,6 +48,30 @@ Three real findings:
 
 Full matrix (handshake + RTT + throughput × 7 wires × 3 contexts × 3 trials), methodology, raw TSVs, and reproducer: [`drift-bench/RESULTS-2026-05-27.md`](drift-bench/RESULTS-2026-05-27.md).
 
+## When DRIFT is the right choice — and when it isn't
+
+**Reach for DRIFT when** you want pubkey-addressed connections that
+survive moving networks, when at least one of your peers is behind a
+NAT / firewall / corporate proxy / hostile middlebox that breaks
+WireGuard or plain UDP, when you want a single protocol that works
+end-to-end from a native CLI to a browser tab without a translation
+shim, or when post-quantum hybrid handshakes by default matter to your
+threat model.
+
+**Don't reach for DRIFT when** you want a managed-service mesh with
+a SaaS control plane (Tailscale fits better; DRIFT is bring-your-own-
+operations), when you only need browser↔browser P2P with no native
+peers (raw WebRTC + a signaling server is lighter), when your
+deployment is fully inside one trusted LAN (`udp://` direct or
+WireGuard are simpler and faster), or when LoRa / sub-GHz radio is
+the link layer (Reticulum is designed for that regime; DRIFT is not).
+
+**Maturity disclaimer.** DRIFT is one developer's protocol, shipped
+under semantic versioning since v0.1, with real deployments (the
+maintainer's home-router bridge, K=17 corporate-density federation
+tests) but no commercial support and no audit. Read the source
+before betting production traffic on it. PRs and issues welcome.
+
 ## What DRIFT actually is (one paragraph)
 
 A custom 36-byte long-header / 7-byte short-header wire format with X25519 + ChaCha20-Poly1305 (WireGuard primitives) and optional X25519+ML-KEM-768 hybrid for post-quantum. On top: reliable multiplexed streams with NewReno/BBR congestion control, deadline-aware delivery, semantic coalescing, 1-RTT PSK session resumption, RTT-weighted multi-hop mesh routing, federation with bridge-to-bridge directory announcements (XEdDSA-signed presence tickets), and a federation-discovery layer that supports differential-privacy-noised bloom filters + Poisson-timed cover traffic + signed hop attestations. Plus a `PacketIO` trait so any byte-shaped wire — UDP socket, TLS stream, h2 bidi stream, WebTransport datagram, Tor hidden service — can carry the protocol.

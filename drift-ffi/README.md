@@ -1,6 +1,10 @@
 # drift-ffi
 
+**Make DRIFT callable from anything that speaks the C ABI.**
+
 C ABI for DRIFT. Makes the transport callable from C, C++, Python (via ctypes / cffi), Go (via cgo), Swift, Kotlin, and anything else that speaks the C ABI.
+
+Reach for this when you want DRIFT in a non-Rust application — a Python ML pipeline that talks to a peer cluster, a Swift mobile app that needs the same wire as your backend, embedded C firmware. Don't reach for this if you're writing Rust — use the `drift` crate directly; you'll get type safety and better error handling.
 
 ## Build
 

@@ -1,6 +1,10 @@
 # drift-git
 
-Git over DRIFT. `git push drift://<peerhex>@<host>:<port>/<repo>` works against any DRIFT-addressed peer — no SSH keys, no DNS, no GitHub.
+**A self-hosted git remote where the auth surface is a pubkey, not an IP / DNS / CA.**
+
+`git push drift://<peerhex>@<host>:<port>/<repo>` works against any DRIFT-addressed peer — no SSH keys, no DNS, no GitHub.
+
+Reach for this when you want a tiny private git remote that survives moving networks, federates to other DRIFT peers, and needs no port forwarding or TLS cert. Don't reach for it as a GitHub replacement — there's no web UI, no PR flow, no issue tracker; just the pack-protocol transport.
 
 Two binaries:
 

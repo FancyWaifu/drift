@@ -14,7 +14,27 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
+/// Maximum size of a single DRIFT packet on the wire, in bytes.
+///
+/// 1400 was chosen to fit inside the path MTU that the public
+/// internet actually delivers reliably (1500 Ethernet MTU minus
+/// 20 B IPv4 header minus 8 B UDP header minus a 72-byte safety
+/// margin for IPv6, tunneled networks, MPLS, and PPPoE
+/// encapsulation). Smaller than that and we leave throughput on
+/// the table for the common case; larger and we start hitting
+/// PMTU black holes on real-world residential / cellular links
+/// that silently drop fragmented or oversized UDP.
+///
+/// Iroh's QUIC stack starts at the same 1400 because the same
+/// rationale applies (see `wire_iroh::INITIAL_MTU`); the
+/// initial-MTU probe walks upward when path MTU discovery
+/// confirms larger sizes work.
 pub const MAX_PACKET: usize = 1400;
+
+/// Maximum application-visible payload size in a single DRIFT
+/// packet, after subtracting the long-header frame and the AEAD
+/// auth tag. Apps that exceed this fragment at the stream layer,
+/// not the packet layer.
 pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER_LEN - AUTH_TAG_LEN;
 
 // HELLO payload: client_static_pub(32) + client_ephemeral_pub(32) + client_nonce(16) = 80
@@ -392,27 +412,102 @@ impl Default for TransportConfig {
         Self {
             // RFC 6298 §2.1 initial RTO. See the field doc.
             handshake_retry_base_ms: 1000,
+            // 10 attempts × exponential backoff from 1 s
+            // bottoms out around ~17 minutes of total
+            // retry budget — long enough that a transient
+            // network glitch doesn't strand the peer, short
+            // enough that a genuinely-dead peer surfaces a
+            // `HandshakeExhausted` error before users start
+            // wondering. Tune down for latency-sensitive
+            // clients, up for batch-style bridges.
             handshake_max_attempts: 10,
+            // The handshake-retry scanner wakes up at this
+            // cadence to look for peers whose retry deadline
+            // has elapsed. 25 ms is two orders of magnitude
+            // below typical RTT so retransmits fire within
+            // one drift::transport tick of their scheduled
+            // time without hammering the lock.
             handshake_scan_ms: 25,
+            // 2 s default matches WireGuard's keepalive
+            // cadence and gives federation directory
+            // announces (every 7 s) a reliable presence
+            // signal between announces. Bridges override
+            // this down to 500 ms — they're the route
+            // advertisers in the mesh, faster announces
+            // mean faster cross-bridge convergence.
             beacon_interval_ms: 2000,
+            // 1024 entries holds ~1 second of incoming
+            // DATA at the K=17 federation density without
+            // dropping. Slow consumers see backpressure
+            // (sender's `send_data` returns `QueueFull`)
+            // rather than packet loss.
             recv_channel_capacity: 1024,
             accept_any_peer: false,
             require_src_for_forward: false,
             cookie_always: false,
+            // Cookie issuance kicks in when more than 1000
+            // HELLOs/sec arrive — that's an order of
+            // magnitude above normal connect rates but
+            // small enough to catch a SYN-flood-style
+            // amplification attempt before it exhausts
+            // peer-table slots.
             cookie_threshold: 1000,
+            // Cookies stay valid for 60 s — long enough
+            // for a legitimate client to receive and replay
+            // one, short enough that a replayed cookie
+            // from an attacker's earlier capture won't
+            // survive past one rotation window.
             cookie_max_age_secs: 60,
+            // Server secret rotates every 30 s, with the
+            // previous secret kept for the
+            // `cookie_max_age_secs` grace window. A captured
+            // cookie is unforgeable past two rotations.
             cookie_rotate_secs: 30,
+            // After HELLO_ACK has been sent, we hold the
+            // half-open session for 30 s waiting for the
+            // first authenticated DATA. Below that window
+            // a legitimate client whose first DATA was lost
+            // can't recover; above it, half-open sessions
+            // accumulate during a HELLO flood.
             awaiting_data_timeout_secs: 30,
+            // 256 pre-handshake payloads per peer. An app
+            // that keeps `send_data`-ing on a peer stuck in
+            // Pending would otherwise leak memory without
+            // bound. 256 × 1400 bytes ≈ 350 KB per peer
+            // worst case.
             pending_queue_cap: 256,
+            // 8192 peer-table slots covers a public bridge
+            // serving a small federation; private bridges
+            // never come close. The auto-register cap in
+            // `handle_hello` enforces this; explicit
+            // app-registered peers are unaffected.
             max_peers: 8192,
             enable_ecn: false,
+            // RTT probe every 5 s. Drives bridge-fault
+            // detection and mesh-route quality scoring.
+            // Faster cadence costs unnecessary bandwidth
+            // on idle links; slower means slower failover
+            // when a bridge dies.
             rtt_probe_interval_ms: 5_000,
             qlog_path: None,
             find_peer_disabled: false,
             find_peer_mode: FindPeerMode::Open,
             bloom_announce_noise: None,
             cover_traffic_rate_hz: None,
+            // After 5 consecutive failed forwarding attempts
+            // through a federation peer, mark it bridge-faulty
+            // and skip it on subsequent route decisions until
+            // the decay timer expires. Matches the RFC 5681
+            // congestion-control style of treating repeated
+            // loss as a routing-quality signal, not a packet-
+            // loss signal.
             bridge_fault_skip_threshold: 5,
+            // 30-second hold on the bridge-faulty mark. Long
+            // enough that a flapping bridge can't reinsert
+            // itself into the routing table on its next
+            // beacon; short enough that a brief network
+            // glitch doesn't permanently demote a healthy
+            // bridge.
             bridge_fault_decay_secs: 30,
             // Phase G (FED_DISC): covers ~16-bridge linear
             // chain or any-size full mesh. See field doc for
