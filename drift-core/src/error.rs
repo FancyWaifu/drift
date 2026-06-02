@@ -30,15 +30,25 @@
 //!
 //! # Migration plan
 //!
-//!   * **Slice 1 (this PR):** codec layer. `CodecError` exists,
-//!     pure-codec functions (`PacketType::from_u8`,
+//!   * **Slice 1 (PR #21, merged):** codec layer. `CodecError`
+//!     exists, pure-codec functions (`PacketType::from_u8`,
 //!     `Header::decode`, `decode_short`, `RotationAnnounce::decode`)
 //!     return `Result<T, CodecError>`. `From<CodecError> for
 //!     DriftError` keeps every transitive caller working
 //!     unchanged.
-//!   * **Slice 2 (future PR):** crypto layer. `CryptoError` for
-//!     AEAD seal/open failures (`AuthFailed`, `Replay`). Migrate
-//!     `SessionKey::seal` / `open` and friends.
+//!   * **Slice 2 (this PR):** crypto layer. `CryptoError` exists
+//!     with three distinct variants (`AeadAuthFailed`,
+//!     `SignatureInvalid`, `Replay { seq }`) that previously
+//!     collapsed into the flat `DriftError::AuthFailed` /
+//!     `DriftError::Replay` umbrella. Pure-crypto functions
+//!     (`xeddsa::verify`, `Session::check_and_update_replay`)
+//!     return `Result<(), CryptoError>`. `From<CryptoError> for
+//!     DriftError` preserves the old umbrella mapping for
+//!     transitive callers. NOTE: `SessionKey::open` and
+//!     `verify_against` straddle codec / crypto / identity
+//!     layers and intentionally remain on `DriftError` until a
+//!     later slice splits them into composable
+//!     single-concern primitives.
 //!   * **Slice 3 (future PR):** session lifecycle. `SessionError`
 //!     for `SessionExhausted`, `HandshakeExhausted`.
 //!   * **Slice 4 (future PR):** peer / federation. `PeerError`
@@ -116,6 +126,53 @@ pub mod codec {
 }
 
 pub use codec::CodecError;
+
+/// Crypto-layer authentication failures.
+///
+/// Produced by functions that verify cryptographic constructions
+/// — AEAD decryption, XEdDSA signature verification, replay
+/// window enforcement. Each variant names a distinct failure
+/// mode rather than the flat `AuthFailed` umbrella, so callers
+/// can distinguish "the signature is invalid" from "we already
+/// saw this seq number" without string-matching on `Display`
+/// output.
+///
+/// Convert into [`DriftError`] via `?` thanks to the
+/// `From<CryptoError> for DriftError` impl below.
+pub mod crypto {
+    use thiserror::Error;
+
+    #[derive(Debug, Error)]
+    pub enum CryptoError {
+        /// AEAD decryption rejected the ciphertext — the
+        /// authentication tag didn't match. Means either the
+        /// receiver tried the wrong key, or an attacker
+        /// modified the ciphertext / forged the AAD in flight.
+        /// In session use this almost always means a stale
+        /// session entry vs. a peer that has re-handshook (see
+        /// `feedback_one_identity_one_process.md`).
+        #[error("AEAD authentication failed")]
+        AeadAuthFailed,
+
+        /// XEdDSA signature verification rejected the
+        /// signature. Either the signed message was tampered
+        /// with, the wrong pubkey was used to verify, or the
+        /// signature is forged. Distinct from `AeadAuthFailed`
+        /// even though both used to collapse into
+        /// `DriftError::AuthFailed`.
+        #[error("XEdDSA signature verification failed")]
+        SignatureInvalid,
+
+        /// The seq number in an incoming packet has already
+        /// been seen in this session's replay window, OR seq=0
+        /// (the reserved invalid value). The packet must be
+        /// dropped without further processing.
+        #[error("replay detected at seq {seq}")]
+        Replay { seq: u32 },
+    }
+}
+
+pub use crypto::CryptoError;
 
 #[derive(Debug, Error)]
 pub enum DriftError {
@@ -202,6 +259,22 @@ impl From<CodecError> for DriftError {
                 DriftError::LengthMismatch { header, actual }
             }
             CodecError::Malformed => DriftError::DecodeError,
+        }
+    }
+}
+
+/// Map a crypto-layer failure into the legacy flat `DriftError`
+/// variants so transitive callers using `?` keep working unchanged
+/// during the layered-error migration. Both `AeadAuthFailed` and
+/// `SignatureInvalid` collapse into the umbrella `AuthFailed`
+/// for back-compat — the distinction is preserved at the
+/// `CryptoError` level for callers that want it.
+impl From<CryptoError> for DriftError {
+    fn from(e: CryptoError) -> Self {
+        match e {
+            CryptoError::AeadAuthFailed => DriftError::AuthFailed,
+            CryptoError::SignatureInvalid => DriftError::AuthFailed,
+            CryptoError::Replay { seq } => DriftError::Replay(seq),
         }
     }
 }

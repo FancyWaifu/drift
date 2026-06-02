@@ -211,7 +211,10 @@ pub fn verify_ticket(
         return Err(DriftError::AuthFailed);
     }
     let msg = ticket_signed_msg(bridge_pub, ticket.expiry_ms, &ticket.nonce);
-    drift_core::xeddsa::verify(client_pub, &msg, &ticket.sig)
+    // `?` converts the crypto-layer `CryptoError::SignatureInvalid`
+    // into the umbrella `DriftError::AuthFailed`.
+    drift_core::xeddsa::verify(client_pub, &msg, &ticket.sig)?;
+    Ok(())
 }
 
 // ─── FederationDirectory codec (v2) ──────────────────────────────

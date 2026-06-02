@@ -134,7 +134,11 @@ pub fn verify(announce: &RotationAnnounce) -> Result<()> {
         announce.issued_at_ms,
         &announce.nonce,
     );
-    xeddsa_verify(&announce.old_pub, &body, &announce.sig)
+    // `?` converts the crypto-layer `CryptoError::SignatureInvalid`
+    // into the umbrella `DriftError::AuthFailed` for callers still
+    // on the flat error type.
+    xeddsa_verify(&announce.old_pub, &body, &announce.sig)?;
+    Ok(())
 }
 
 /// Verify a `RotationAnnounce` against an **expected** old pubkey.

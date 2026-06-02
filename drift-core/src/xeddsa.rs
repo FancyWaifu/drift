@@ -30,7 +30,7 @@
 //! Public key for verification: 32-byte Montgomery u-coordinate
 //! (the same bytes as our X25519 static pubkey).
 
-use crate::error::{DriftError, Result};
+use crate::error::CryptoError;
 use curve25519_dalek::constants::ED25519_BASEPOINT_TABLE;
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use curve25519_dalek::montgomery::MontgomeryPoint;
@@ -120,28 +120,35 @@ pub fn sign(secret_key: &[u8; 32], message: &[u8], nonce_extra: &[u8; 64]) -> [u
 /// public key (Montgomery u-coordinate — same bytes as our
 /// X25519 static pubkey).
 ///
-/// Returns Ok(()) on valid signature, Err(DriftError::AuthFailed)
+/// Returns `Ok(())` on valid signature, `Err(CryptoError::SignatureInvalid)`
 /// on any failure (bad pubkey encoding, malformed signature,
 /// signature does not verify). Constant-time relative to the
 /// signature contents.
+///
+/// The crypto-specific error type makes "the signature is
+/// invalid" distinguishable from AEAD-tag-mismatch and replay-
+/// detected at the type level, instead of collapsing every
+/// security failure into the flat `DriftError::AuthFailed`
+/// umbrella. Transitive callers using `?` still work because
+/// `From<CryptoError> for DriftError` preserves the old mapping.
 pub fn verify(
     public_key: &[u8; 32],
     message: &[u8],
     signature: &[u8; XEDDSA_SIG_LEN],
-) -> Result<()> {
+) -> std::result::Result<(), CryptoError> {
     // 1. Reconstruct the Edwards point from the Montgomery
     //    u-coordinate with sign=0 (matches the choice we made
     //    in `sign`).
     let big_a = MontgomeryPoint(*public_key)
         .to_edwards(0)
-        .ok_or(DriftError::AuthFailed)?;
+        .ok_or(CryptoError::SignatureInvalid)?;
     let a_bytes = big_a.compress().to_bytes();
 
     // 2. Reject points of small order or in the small-order
     //    cofactor. XEdDSA spec requires this for forgery
     //    resistance; curve25519-dalek exposes the check.
     if big_a.is_small_order() {
-        return Err(DriftError::AuthFailed);
+        return Err(CryptoError::SignatureInvalid);
     }
 
     // 3. Decompress R from the first 32 bytes of the signature.
@@ -151,9 +158,9 @@ pub fn verify(
     r_bytes.copy_from_slice(&signature[..32]);
     let big_r = CompressedEdwardsY(r_bytes)
         .decompress()
-        .ok_or(DriftError::AuthFailed)?;
+        .ok_or(CryptoError::SignatureInvalid)?;
     if big_r.is_small_order() {
-        return Err(DriftError::AuthFailed);
+        return Err(CryptoError::SignatureInvalid);
     }
 
     // 4. Parse s. Reject non-canonical scalars (s >= q).
@@ -163,7 +170,7 @@ pub fn verify(
     let s = if bool::from(s.is_some()) {
         s.unwrap()
     } else {
-        return Err(DriftError::AuthFailed);
+        return Err(CryptoError::SignatureInvalid);
     };
 
     // 5. h = SHA-512(R || A || M) mod q
@@ -182,7 +189,7 @@ pub fn verify(
     if left == right {
         Ok(())
     } else {
-        Err(DriftError::AuthFailed)
+        Err(CryptoError::SignatureInvalid)
     }
 }
 
