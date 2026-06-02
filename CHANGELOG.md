@@ -79,6 +79,26 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 4e: peer-layer migration in `resumption.rs`.** Migrates
+  the 13 produce sites of `DriftError::UnknownPeer` in
+  `drift::transport::resumption` (1-RTT session resumption via
+  PSK) to the appropriate `PeerError` variants:
+  6 × `NotRegistered` (peer-table lookups across
+  `issue_resumption_ticket`, `send_resume_hello`,
+  `handle_resume_hello`, `handle_resume_ack`),
+  2 × `SessionNotReady` (session-key derive misses in
+  `issue_resumption_ticket` tx side and `handle_resumption_ticket`
+  rx side),
+  2 × `WrongDestination` (incoming ResumptionTicket / ResumeHello
+  addressed to a different peer id),
+  2 × `ResumptionTicketNotFound` (client ticket store miss AND
+  expired-ticket-evicted in `send_resume_hello` — the first slice
+  4 sites to use this variant, which `PeerError` was designed
+  for in 4a),
+  1 × `SessionNotEstablished` (the stricter Established-state
+  guard in `issue_resumption_ticket` that needs `key_bytes`).
+  The 7 `DriftError::PacketTooShort` / `DriftError::AuthFailed`
+  sites (codec / crypto layer) stay on the umbrella.
 - **Slice 4d: peer-layer migration in `path.rs`.** Migrates the 10
   produce sites of `DriftError::UnknownPeer` in
   `drift::transport::path` (path-validation challenge/response for
