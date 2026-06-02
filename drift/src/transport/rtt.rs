@@ -37,7 +37,7 @@
 
 use super::Inner;
 use crate::crypto::PeerId;
-use crate::error::{DriftError, Result};
+use crate::error::{DriftError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::session::HandshakeState;
 use std::net::SocketAddr;
@@ -93,7 +93,7 @@ impl Inner {
                 let mut hbuf = [0u8; HEADER_LEN];
                 header.encode(&mut hbuf);
                 let aad = canonical_aad(&hbuf);
-                let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+                let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
                 let mut wire = Vec::with_capacity(HEADER_LEN + PING_NONCE_LEN + AUTH_TAG_LEN);
                 wire.extend_from_slice(&hbuf);
                 tx.seal_into(seq, PacketType::Ping as u8, &aad, &nonce, &mut wire)?;
@@ -143,14 +143,14 @@ impl Inner {
         src: SocketAddr,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         let pong_wire = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
             // Decrypt the Ping body to retrieve the nonce.
             let mut hbuf = [0u8; HEADER_LEN];
@@ -173,7 +173,7 @@ impl Inner {
             let mut pong_hbuf = [0u8; HEADER_LEN];
             pong_header.encode(&mut pong_hbuf);
             let pong_aad = canonical_aad(&pong_hbuf);
-            let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut wire = Vec::with_capacity(HEADER_LEN + PING_NONCE_LEN + AUTH_TAG_LEN);
             wire.extend_from_slice(&pong_hbuf);
             tx.seal_into(seq, PacketType::Pong as u8, &pong_aad, &nonce, &mut wire)?;
@@ -204,13 +204,13 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         let mut peers = self.peers.lock_for(&peer_id).await;
-        let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-        let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+        let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+        let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
         let mut hbuf = [0u8; HEADER_LEN];
         hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
