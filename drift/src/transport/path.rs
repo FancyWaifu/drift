@@ -12,7 +12,7 @@
 //! don't have.
 
 use super::{cookies::ct_eq, Inner};
-use crate::error::{DriftError, Result};
+use crate::error::{DriftError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::session::{HandshakeState, PathProbe, Peer};
 use crate::PeerId;
@@ -51,7 +51,7 @@ pub(crate) fn build_path_challenge_packet(
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
-    let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
     let mut wire = Vec::with_capacity(HEADER_LEN + PATH_CHALLENGE_LEN + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
     tx.seal_into(
@@ -77,7 +77,7 @@ pub(crate) fn build_path_response_packet(
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
     let aad = canonical_aad(&hbuf);
-    let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
     let mut wire = Vec::with_capacity(HEADER_LEN + PATH_CHALLENGE_LEN + AUTH_TAG_LEN);
     wire.extend_from_slice(&hbuf);
     tx.seal_into(
@@ -136,9 +136,9 @@ impl Inner {
     ) -> Result<()> {
         let wire = {
             let mut peers = self.peers.lock_for(peer_id).await;
-            let peer = peers.get_mut(peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(peer_id).ok_or(PeerError::NotRegistered)?;
             if !matches!(peer.handshake, HandshakeState::Established { .. }) {
-                return Err(DriftError::UnknownPeer);
+                return Err(PeerError::SessionNotEstablished.into());
             }
             // Don't clobber an in-flight probe to a different
             // candidate — wait for it to time out or succeed.
@@ -202,14 +202,14 @@ impl Inner {
         recv_iface: usize,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
         let response_bytes = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
@@ -250,7 +250,7 @@ impl Inner {
         recv_iface: usize,
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let peer_id = header.src_id;
 
@@ -261,8 +261,8 @@ impl Inner {
         // paths escape the block without setting migration.
         let migration: Option<(SocketAddr, SocketAddr)> = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
-            let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
 
             let mut hbuf = [0u8; HEADER_LEN];
             hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);

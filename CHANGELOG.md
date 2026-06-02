@@ -79,6 +79,26 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 4d: peer-layer migration in `path.rs`.** Migrates the 10
+  produce sites of `DriftError::UnknownPeer` in
+  `drift::transport::path` (path-validation challenge/response for
+  peer migration) to the appropriate `PeerError` variants:
+  4 × `SessionNotReady` (session-key lookups in
+  `build_path_challenge_packet`, `build_path_response_packet`,
+  `handle_path_challenge`, `handle_path_response`),
+  3 × `NotRegistered` (peer-table lookup misses in
+  `probe_candidate_path_via`, `handle_path_challenge`,
+  `handle_path_response`),
+  2 × `WrongDestination` (Challenge/Response addressed to a
+  different peer id),
+  1 × `SessionNotEstablished` (the stricter
+  `!matches!(peer.handshake, HandshakeState::Established { .. })`
+  guard in `probe_candidate_path_via` — first slice-4 site to use
+  this variant).
+  The `DriftError::QueueFull` site (probe to a different in-flight
+  candidate) and `DriftError::PacketTooShort` site (codec) stay
+  on the umbrella. `From<PeerError>` preserves the public error
+  surface.
 - **Slice 4c: peer-layer migration in `rtt.rs`.** Migrates the 8
   produce sites of `DriftError::UnknownPeer` in
   `drift::transport::rtt` (RTT-probe Ping/Pong handling) to the
