@@ -79,6 +79,24 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 4a: peer / federation (start of sub-series).** Introduces
+  `drift_core::error::PeerError` to split what used to be the flat
+  `DriftError::UnknownPeer` umbrella into five distinct semantic
+  conditions that produce sites in `drift::transport::*` were
+  silently conflating: `NotRegistered` (peer not in table),
+  `SessionNotReady` (peer in table, handshake hasn't derived
+  keys), `SessionNotEstablished` (keys derived but not fully
+  Established — stricter), `WrongDestination` (incoming packet's
+  dst_id isn't us — distinct from "unknown peer" because here
+  it's the *destination* that's wrong, not the source), and
+  `ResumptionTicketNotFound` (client ticket store miss / expired).
+  This PR establishes the type and migrates `cookies.rs` (1 site,
+  the `WrongDestination` case). There are ~102 produce sites
+  across 7 files in total; subsequent slices 4b–4f migrate the
+  remaining files one at a time (mesh.rs, rtt.rs, path.rs,
+  resumption.rs, mod.rs). `From<PeerError> for DriftError`
+  collapses every variant back to `DriftError::UnknownPeer` for
+  back-compat; slice 5 will eventually drop the flat variant.
 - **Slice 3: session lifecycle.** Introduces
   `drift_core::error::SessionError` with the three terminal
   session states the flat `DriftError` covered separately:

@@ -49,23 +49,38 @@
 //!     layers and intentionally remain on `DriftError` until a
 //!     later slice splits them into composable
 //!     single-concern primitives.
-//!   * **Slice 3 (this PR):** session lifecycle. `SessionError`
-//!     covers `SessionExhausted` (seq counter at the AEAD-nonce
-//!     safety ceiling), `HandshakeExhausted` (retry budget gone),
-//!     and `QueueFull` (pending-send queue at capacity). The only
-//!     pure-session-lifecycle producer in drift-core is
-//!     `Peer::next_seq_checked`; it moves from `Option<u32>` to
-//!     `Result<u32, SessionError>` so the ~9 transport call sites
-//!     that did `.ok_or(DriftError::SessionExhausted)?` collapse
-//!     into plain `?`. `HandshakeExhausted` and `QueueFull` are
-//!     still produced inline inside cross-layer transport sends
-//!     and stay on `DriftError` until later slices split those
-//!     sends.
-//!   * **Slice 4 (future PR):** peer / federation. `PeerError`
-//!     for `UnknownPeer` (the highest-count variant — split this
-//!     carefully: "app tried to send to unregistered peer" vs
-//!     "incoming packet's src_id is unknown" are distinct
-//!     conditions that share a variant today).
+//!   * **Slice 3 (PR #23, merged):** session lifecycle.
+//!     `SessionError` covers `SessionExhausted` (seq counter at
+//!     the AEAD-nonce safety ceiling), `HandshakeExhausted`
+//!     (retry budget gone), and `QueueFull` (pending-send queue
+//!     at capacity). The only pure-session-lifecycle producer in
+//!     drift-core is `Peer::next_seq_checked`; it moves from
+//!     `Option<u32>` to `Result<u32, SessionError>` so the ~9
+//!     transport call sites that did
+//!     `.ok_or(DriftError::SessionExhausted)?` collapse into
+//!     plain `?`. `HandshakeExhausted` and `QueueFull` are still
+//!     produced inline inside cross-layer transport sends and
+//!     stay on `DriftError` until later slices split those sends.
+//!   * **Slice 4 (this PR + follow-ups):** peer / federation.
+//!     `PeerError` splits the flat `DriftError::UnknownPeer`
+//!     into FIVE distinct semantic conditions that produce sites
+//!     in `drift::transport::*` were silently conflating: peer
+//!     not in the table, peer in table but session not ready,
+//!     peer in table with handshake-ready session but not fully
+//!     Established, incoming packet not addressed to us, and
+//!     client resumption-ticket store miss. There are ~102 produce
+//!     sites across 7 files; rather than doing them all at once,
+//!     this PR (**slice 4a**) establishes the type and migrates
+//!     `cookies.rs` (1 site, the `WrongDestination` case). The
+//!     sub-series continues per-file: 4b = `mesh.rs` (4 sites),
+//!     4c = `rtt.rs` (8), 4d = `path.rs` (10), 4e = `resumption.rs`
+//!     (13), 4f = `mod.rs` (69, which may further sub-split).
+//!     Note: `multipath.rs:probe_path` is a *misuse* of
+//!     `UnknownPeer` for a path-probe deadline; it should be
+//!     `DriftError::DeadlineExpired` and gets its own behavior-
+//!     fix PR rather than being folded into PeerError. Each
+//!     `PeerError` variant maps back to `DriftError::UnknownPeer`
+//!     until slice 5 collapses the flat variant.
 //!   * **Slice 5 (future PR):** consolidate `DriftError` to only
 //!     the cross-layer variants (`Io`, `QueueFull`,
 //!     `DeadlineExpired`, `PayloadTooLarge`) + sub-error wrappers.
@@ -226,6 +241,73 @@ pub mod session {
 
 pub use session::SessionError;
 
+/// Peer-table + session-state-machine failures.
+///
+/// Splits what used to be the flat `DriftError::UnknownPeer`
+/// umbrella into the distinct semantic conditions that produce
+/// sites in `drift::transport::*` were silently conflating.
+/// Five variants, all of which map back to
+/// `DriftError::UnknownPeer` via the `From` impl below for
+/// back-compat until slice 5 collapses the flat variant.
+///
+/// The split lets callers distinguish "the peer id is unknown
+/// to us" (recoverable — register and retry) from "the peer is
+/// known but its session isn't ready yet" (transient — retry
+/// after handshake) from "this packet wasn't even addressed to
+/// us" (almost certainly a routing bug or a misdirected probe).
+pub mod peer {
+    use thiserror::Error;
+
+    #[derive(Debug, Error)]
+    pub enum PeerError {
+        /// `peers.get(&id)` returned None — the peer id is not
+        /// in our peer table at all. App tried to send to a peer
+        /// it never registered, or an incoming packet's src_id
+        /// is one we have no entry for. The most common
+        /// production reason for `UnknownPeer` today.
+        #[error("peer is not registered in the peer table")]
+        NotRegistered,
+
+        /// The peer is in the table but `peer.handshake.session()`
+        /// returned None — the handshake hasn't completed far
+        /// enough to derive session keys. Transient; the caller
+        /// should retry once the handshake progresses past
+        /// `Pending` / `AwaitingAck`.
+        #[error("peer session keys are not yet derived")]
+        SessionNotReady,
+
+        /// The peer has a session (keys derived) but is in
+        /// `AwaitingData`, not fully `Established`. Stricter
+        /// than [`SessionNotReady`](Self::SessionNotReady); used
+        /// by paths that must not run before both sides have
+        /// authenticated a round-trip (e.g. rekey, path probes
+        /// after migration).
+        #[error("peer session is not fully established yet")]
+        SessionNotEstablished,
+
+        /// The packet's `dst_id` doesn't match the local peer
+        /// id — we are not the addressed recipient. Either an
+        /// upstream routing bug, a misdirected probe, or an
+        /// attacker trying to confuse us. Distinct from
+        /// [`NotRegistered`](Self::NotRegistered) because here
+        /// it's the *destination* that's wrong, not the source.
+        #[error("packet not addressed to this peer")]
+        WrongDestination,
+
+        /// The client-side resumption ticket store has no entry
+        /// for this peer id, OR the entry exists but has expired.
+        /// App must perform a full handshake instead of attempting
+        /// 1-RTT resumption. Distinct from
+        /// [`NotRegistered`](Self::NotRegistered) because the
+        /// *peer* may very well still be registered; only the
+        /// *ticket* is missing.
+        #[error("no valid resumption ticket for this peer")]
+        ResumptionTicketNotFound,
+    }
+}
+
+pub use peer::PeerError;
+
 #[derive(Debug, Error)]
 pub enum DriftError {
     #[error("packet too short: got {got} bytes, need at least {need}")]
@@ -344,6 +426,21 @@ impl From<SessionError> for DriftError {
             SessionError::HandshakeExhausted => DriftError::HandshakeExhausted,
             SessionError::QueueFull => DriftError::QueueFull,
         }
+    }
+}
+
+/// Map a peer-layer failure into the legacy flat `DriftError`
+/// variant so transitive callers using `?` keep working unchanged
+/// during the layered-error migration. Every `PeerError` variant
+/// collapses into `DriftError::UnknownPeer` — preserving today's
+/// behavior — but new code that wants to distinguish "peer not
+/// registered" from "session not ready" can match on `PeerError`
+/// directly instead of relying on context to disambiguate the
+/// umbrella `UnknownPeer`. Slice 5 will eventually drop the flat
+/// variant once no returner is left.
+impl From<PeerError> for DriftError {
+    fn from(_: PeerError) -> Self {
+        DriftError::UnknownPeer
     }
 }
 
