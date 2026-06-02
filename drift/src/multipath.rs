@@ -129,9 +129,17 @@ impl MultipathManager {
         loop {
             let now = Instant::now();
             if now >= deadline {
-                // Mark the path unhealthy.
+                // Path-probe deadline expired with no response
+                // from the candidate. Mark the path unhealthy and
+                // surface `DeadlineExpired` — NOT `UnknownPeer`,
+                // which we used to mis-emit here. The peer is
+                // perfectly well known; the *path* timed out.
+                // The only consumer is `probe_all`'s `.is_ok()`
+                // check so the variant change is observable
+                // only to direct callers of `probe_path`, who
+                // were already getting a wrong-named error.
                 self.mark_unhealthy(peer, addr).await;
-                return Err(crate::error::DriftError::UnknownPeer);
+                return Err(crate::error::DriftError::DeadlineExpired);
             }
             if self.transport.metrics().path_probes_succeeded > before {
                 let rtt = started.elapsed();
