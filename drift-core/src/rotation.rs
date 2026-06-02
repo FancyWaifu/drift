@@ -166,9 +166,9 @@ pub fn encode(a: &RotationAnnounce) -> [u8; ROTATION_ANNOUNCE_LEN] {
 /// Parse a 168-byte wire form into a `RotationAnnounce`. Does NOT
 /// verify the signature — call [`verify`] or [`verify_against`]
 /// afterwards.
-pub fn decode(bytes: &[u8]) -> Result<RotationAnnounce> {
+pub fn decode(bytes: &[u8]) -> std::result::Result<RotationAnnounce, crate::error::CodecError> {
     if bytes.len() != ROTATION_ANNOUNCE_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(crate::error::CodecError::Malformed);
     }
     let mut old_pub = [0u8; 32];
     old_pub.copy_from_slice(&bytes[0..32]);
