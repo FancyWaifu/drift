@@ -576,7 +576,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_basic() {
+    fn federated_envelope_round_trips_through_build_and_parse() {
         let tb = [0xAA; 32];
         let tc = [0xBB; 32];
         let sb = [0xDD; 32];
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_errors() {
+    fn parse_rejects_empty_short_and_truncated_envelope_bytes() {
         assert!(parse(&[]).is_err());
         assert!(parse(&[0u8; 10]).is_err());
         let mut short = build(&[0; 32], &[0; 32], &[0; 32], &[0; 32], b"hi");
@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_payload() {
+    fn envelope_with_empty_payload_round_trips() {
         let wire = build(&[1; 32], &[2; 32], &[4; 32], &[3; 32], b"");
         let env = parse(&wire).unwrap();
         assert!(env.payload.is_empty());
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_roundtrip() {
+    fn federation_directory_with_multiple_entries_round_trips() {
         let bridge_pub = [0xDD; 32];
         let entries = vec![
             fake_entry(&[0x01; 32], &bridge_pub, 9_999_999_999_999),
@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_empty() {
+    fn empty_federation_directory_encodes_and_parses_as_no_entries() {
         let wire = build_directory(&[]);
         let parsed = parse_directory(&wire).unwrap();
         assert!(parsed.is_empty());

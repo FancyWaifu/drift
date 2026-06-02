@@ -160,7 +160,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn register_roundtrip() {
+    fn register_message_round_trips_through_encode_decode() {
         let entry = PeerEntry {
             pubkey: [0xAB; 32],
             addr: "10.0.0.5:9000".to_string(),
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_roundtrip() {
+    fn listing_message_with_multiple_entries_round_trips_through_encode_decode() {
         let entries = vec![
             PeerEntry {
                 pubkey: [0x01; 32],

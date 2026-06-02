@@ -515,7 +515,7 @@ mod tests {
     ];
 
     #[test]
-    fn header_roundtrip() {
+    fn header_with_deadline_and_supersedes_round_trips_intact() {
         let h = Header::new(PacketType::Data, 42, [0xCD; 8], [0xAB; 8])
             .with_deadline(500)
             .with_supersedes(7);

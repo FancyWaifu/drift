@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn overhead_comparison() {
+    fn short_header_has_lower_per_packet_overhead_than_long_header() {
         let payload = b"hello-world"; // 11 bytes
         let key = [0x99u8; 32];
         let tx = SessionKey::new(&key, Direction::Initiator);

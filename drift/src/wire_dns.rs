@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn reassembly_basic() {
+    fn out_of_order_fragments_reassemble_into_original_message() {
         let mut map = ReassemblyMap::default();
         let src: SocketAddr = "127.0.0.1:9999".parse().unwrap();
         // total=3 fragments

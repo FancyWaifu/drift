@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_full_block() {
+    fn fec_recovers_one_missing_chunk_from_parity_of_four() {
         let mut enc = FecEncoder::new(4);
         let data = vec![
             b"alpha".to_vec(),
