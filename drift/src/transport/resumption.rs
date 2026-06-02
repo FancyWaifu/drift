@@ -33,7 +33,7 @@
 
 use super::Inner;
 use crate::crypto::{Direction, PeerId, SessionKey};
-use crate::error::{DriftError, Result};
+use crate::error::{DriftError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::identity::{Identity, NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::{HandshakeState, PendingResumption, PrevSession};
@@ -294,10 +294,10 @@ impl Inner {
         // peer guard across the await.
         let (session_key_bytes, client_static_pub) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
             let key = match &peer.handshake {
                 HandshakeState::Established { key_bytes, .. } => key_bytes.clone(),
-                _ => return Err(DriftError::UnknownPeer),
+                _ => return Err(PeerError::SessionNotEstablished.into()),
             };
             (key, peer.peer_static_pub)
         };
@@ -315,7 +315,7 @@ impl Inner {
         // outcome the original single-lock path would have had.
         let (wire, addr) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
             let seq = peer.next_seq_checked()?;
             let mut header =
                 peer.make_header(PacketType::ResumptionTicket, seq, self.local_peer_id);
@@ -328,7 +328,7 @@ impl Inner {
             plaintext[..TICKET_ID_LEN].copy_from_slice(&ticket_id);
             plaintext[TICKET_ID_LEN..].copy_from_slice(&expiry_ms.to_be_bytes());
 
-            let (tx, _) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+            let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
             let mut wire = Vec::with_capacity(HEADER_LEN + TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN);
             wire.extend_from_slice(&hbuf);
             tx.seal_into(
@@ -369,7 +369,7 @@ impl Inner {
         body: &[u8],
     ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
         let server_id = header.src_id;
         let (plaintext_opt, server_session_key, server_static_pub) = {
@@ -390,7 +390,7 @@ impl Inner {
             // try prev. Either failure path is silent — a
             // stale ticket is not an attack.
             let pt = {
-                let (_, rx) = peer.handshake.session().ok_or(DriftError::UnknownPeer)?;
+                let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
                 rx.open(header.seq, PacketType::ResumptionTicket as u8, &aad, body)
             };
             let pt = match pt {
@@ -464,9 +464,9 @@ impl Inner {
                 // Expired — drop and bail; caller will fall
                 // back to a normal HELLO.
                 self.client_tickets.lock().await.remove(&peer_id);
-                return Err(DriftError::UnknownPeer);
+                return Err(PeerError::ResumptionTicketNotFound.into());
             }
-            None => return Err(DriftError::UnknownPeer),
+            None => return Err(PeerError::ResumptionTicketNotFound.into()),
         };
 
         let ephemeral = Identity::generate();
@@ -476,7 +476,7 @@ impl Inner {
 
         let (wire, addr) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
-            let peer = peers.get_mut(&peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
 
             // Stash the ephemeral + PSK + ticket_id so the
             // matching ResumeAck handler can finish key
@@ -550,7 +550,7 @@ impl Inner {
             });
         }
         if header.dst_id != self.local_peer_id {
-            return Err(DriftError::UnknownPeer);
+            return Err(PeerError::WrongDestination.into());
         }
 
         let mut ticket_id = [0u8; TICKET_ID_LEN];
@@ -574,7 +574,7 @@ impl Inner {
         // so the client retries with a full HELLO.
         let client_static_pub = {
             let peers = self.peers.lock_for(&client_peer_id).await;
-            let peer = peers.get(&client_peer_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get(&client_peer_id).ok_or(PeerError::NotRegistered)?;
             peer.peer_static_pub
         };
 
@@ -617,7 +617,7 @@ impl Inner {
             let mut peers = self.peers.lock_for(&client_peer_id).await;
             let peer = peers
                 .get_mut(&client_peer_id)
-                .ok_or(DriftError::UnknownPeer)?;
+                .ok_or(PeerError::NotRegistered)?;
             // Capture old addr for SEC.FIX.1 addr_index update.
             // Resumption authenticates via PSK, so migrating
             // peer.addr to src is safe — the AEAD check on the
@@ -750,7 +750,7 @@ impl Inner {
         let pending_built: Vec<(Vec<u8>, SocketAddr, usize)>;
         {
             let mut peers = self.peers.lock_for(&server_id).await;
-            let peer = peers.get_mut(&server_id).ok_or(DriftError::UnknownPeer)?;
+            let peer = peers.get_mut(&server_id).ok_or(PeerError::NotRegistered)?;
 
             let resumption = match peer.pending_resumption.take() {
                 Some(r) => r,
