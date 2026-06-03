@@ -77,6 +77,30 @@ crate. A change that touches multiple surfaces appears under each.
   expansion split instead of `read < <(...)` process substitution.
   (#15)
 
+### Type-state
+
+- **Phase 2 of type-state arc: resumption-ticket lifecycle.**
+  Introduces `Transport::parse_resumption_ticket` returning
+  `UnvalidatedTicket`, `UnvalidatedTicket::validate` returning
+  `ValidatedTicket`, and changes `Transport::import_resumption_ticket`
+  to take a `ValidatedTicket` (and become infallible). The
+  previous monolithic
+  `import_resumption_ticket(peer, blob) -> Result<()>` is gone
+  — apps now follow the typed lifecycle parse → validate →
+  store, where each step can fail independently (codec layer
+  for parse, peer layer for validate) and the storage call is
+  by-type guaranteed to be operating on a verified ticket.
+  Removes one class of misuse (passing an unverified ticket
+  blob to storage) by making it unrepresentable. Phase 1 of
+  the type-state arc (SessionKey&lt;Direction&gt;) was skipped
+  per a re-scope (see updated note in
+  `docs/TYPESTATE_DESIGN.md`); the peer-table's
+  HashMap&lt;PeerId, Peer&gt; shape forces runtime dispatch back
+  no matter how the SessionKey type is parameterised, so the
+  compile-time guarantees evaporate at the table boundary —
+  exactly the constraint the memo's "what we should NOT do"
+  section warned about for `Peer` itself.
+
 ### API surface
 
 - **Phase 6 of public-API lock-down (FINAL): drift-vpn sweep

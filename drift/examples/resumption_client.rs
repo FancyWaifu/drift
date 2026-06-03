@@ -42,21 +42,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let had_ticket = if let Ok(blob) = fs::read(&ticket_path) {
-        match transport
-            .import_resumption_ticket(&server_peer, &blob)
-            .await
-        {
-            Ok(()) => {
-                println!(
-                    "client: imported ticket from {} ({} bytes)",
-                    ticket_path,
-                    blob.len()
-                );
-                true
-            }
+        // Type-state lifecycle: parse → validate → import. Any
+        // failure along the way prints, drops the on-disk file,
+        // and falls back to a fresh handshake.
+        let parsed = drift::Transport::parse_resumption_ticket(&blob);
+        match parsed {
+            Ok(unval) => match unval.validate(&server_peer, &transport).await {
+                Ok(val) => {
+                    transport.import_resumption_ticket(val).await;
+                    println!(
+                        "client: imported ticket from {} ({} bytes)",
+                        ticket_path,
+                        blob.len()
+                    );
+                    true
+                }
+                Err(e) => {
+                    eprintln!(
+                        "client: failed to validate ticket: {:?} (falling back to full handshake)",
+                        e
+                    );
+                    let _ = fs::remove_file(&ticket_path);
+                    false
+                }
+            },
             Err(e) => {
                 eprintln!(
-                    "client: failed to import ticket: {:?} (falling back to full handshake)",
+                    "client: failed to parse ticket: {:?} (falling back to full handshake)",
                     e
                 );
                 let _ = fs::remove_file(&ticket_path);

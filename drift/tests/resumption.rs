@@ -103,10 +103,9 @@ async fn happy_path_export_import_resume() {
         "peer ids are deterministic from pubkey"
     );
 
-    alice2
-        .import_resumption_ticket(&bob_peer2, &ticket_blob)
-        .await
-        .unwrap();
+    let unval = Transport::parse_resumption_ticket(&ticket_blob).unwrap();
+    let val = unval.validate(&bob_peer2, &alice2).await.unwrap();
+    alice2.import_resumption_ticket(val).await;
 
     // Trigger the resumption.
     alice2
@@ -195,15 +194,20 @@ async fn import_with_wrong_peer_id_rejected() {
     let blob = alice.export_resumption_ticket(&bob_peer).await.unwrap();
 
     // Make up a totally different peer id and try to install
-    // the ticket for it. Should be rejected.
+    // the ticket for it. Should be rejected at the `validate`
+    // step — the blob parses fine but the embedded server_id
+    // doesn't match `bogus_peer_id`.
     let bogus_peer_id = [0xFFu8; 8];
-    let err = alice
-        .import_resumption_ticket(&bogus_peer_id, &blob)
+    let unval =
+        Transport::parse_resumption_ticket(&blob).expect("blob is well-formed; parse must succeed");
+    let err = unval
+        .validate(&bogus_peer_id, &alice)
         .await
-        .expect_err("import with wrong peer id must fail");
-    // Slice 7 migrated the wrong-server-id reject from
-    // the flat `AuthFailed` to the typed
-    // `PeerError::ResumptionTicketNotFound`.
+        .expect_err("validate with wrong peer id must fail");
+    // Phase 2 of the type-state arc moved the wrong-server-id
+    // check from `import_resumption_ticket` into
+    // `UnvalidatedTicket::validate`. The error variant stays
+    // the same (`PeerError::ResumptionTicketNotFound`).
     assert!(
         matches!(
             err,
@@ -258,15 +262,12 @@ async fn import_with_corrupted_blob_rejected() {
     let mut blob = alice.export_resumption_ticket(&bob_peer).await.unwrap();
     // Truncate.
     blob.truncate(10);
-    let err = alice
-        .import_resumption_ticket(&bob_peer, &blob)
-        .await
-        .expect_err("truncated blob must be rejected");
-    // Slice 7 migrated the malformed-blob reject from
-    // the flat `AuthFailed` to `CodecError::Malformed`;
-    // slice 8 added the `Codec(CodecError)` wrapper and
-    // dropped the flat `DecodeError` variant, so the
-    // error now surfaces as `DriftError::Codec(_)`.
+    // Phase 2 of the type-state arc moved blob-parse failure
+    // into `Transport::parse_resumption_ticket` (the entry to
+    // the typed ticket lifecycle). The error variant is
+    // unchanged — `CodecError::Malformed` → `DriftError::Codec(_)`.
+    let err =
+        Transport::parse_resumption_ticket(&blob).expect_err("truncated blob must be rejected");
     assert!(matches!(
         err,
         DriftError::Codec(drift::error::CodecError::Malformed)

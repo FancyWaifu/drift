@@ -155,11 +155,52 @@ impl ResumptionStore {
     }
 }
 
+/// A resumption-ticket blob that has been **parsed** from bytes
+/// but has **not** yet been validated against a peer's stored
+/// identity. Created by
+/// [`Transport::parse_resumption_ticket`](super::Transport::parse_resumption_ticket).
+///
+/// You cannot store an `UnvalidatedTicket` — the type-state arc
+/// (phase 2, see `docs/TYPESTATE_DESIGN.md`) deliberately splits
+/// the parse / validate / store steps so the compiler can refuse
+/// "store-an-unverified-ticket" misuses. Pass this value to
+/// [`UnvalidatedTicket::validate`] (which checks the peer-id and
+/// identity binding, expiry, etc.) to obtain a [`ValidatedTicket`]
+/// suitable for
+/// [`Transport::import_resumption_ticket`](super::Transport::import_resumption_ticket).
+///
+/// The inner `ClientTicket` carries a PSK in cleartext (wrapped
+/// in `Zeroizing` so it scrubs on drop) — treat the value as
+/// equivalent to a private key when passing it across function
+/// boundaries.
+#[derive(Debug)]
+pub struct UnvalidatedTicket {
+    pub(crate) ticket: ClientTicket,
+}
+
+/// A resumption-ticket that has been parsed AND validated:
+///   * the blob deserialized cleanly,
+///   * the embedded `server_id` matches the expected peer,
+///   * the ticket has not expired,
+///   * the embedded `server_static_pub` matches the locally-
+///     stored static pubkey for the peer (if the peer is
+///     already registered).
+///
+/// Created by [`UnvalidatedTicket::validate`]. Pass to
+/// [`Transport::import_resumption_ticket`](super::Transport::import_resumption_ticket)
+/// for storage — that call is infallible because all the failure
+/// paths are represented by the absence of a `ValidatedTicket`
+/// value.
+#[derive(Debug)]
+pub struct ValidatedTicket {
+    pub(crate) ticket: ClientTicket,
+}
+
 /// Client-side persistent ticket: what the app exports/imports
 /// across restarts. The PSK is sensitive material — wrapped in
 /// `Zeroizing` so a dropped `ClientTicket` scrubs its key bytes
 /// from memory.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ClientTicket {
     pub ticket_id: [u8; TICKET_ID_LEN],
     pub psk: drift_core::Zeroizing<[u8; TICKET_PSK_LEN]>,
@@ -231,6 +272,62 @@ impl ClientTicket {
             server_id,
             server_static_pub,
         })
+    }
+}
+
+impl UnvalidatedTicket {
+    /// Wrap a successfully-parsed `ClientTicket`. Internal — apps
+    /// use [`Transport::parse_resumption_ticket`].
+    pub(crate) fn from_ticket(ticket: ClientTicket) -> Self {
+        Self { ticket }
+    }
+
+    /// Verify the parsed ticket against the expected peer and the
+    /// transport's peer table:
+    ///
+    ///   * `ticket.server_id` must equal `expected_peer`
+    ///   * `ticket.expiry` must be strictly in the future
+    ///   * if `expected_peer` is already in the peer table, its
+    ///     stored `peer_static_pub` must match
+    ///     `ticket.server_static_pub`
+    ///
+    /// On success returns a [`ValidatedTicket`] which can be
+    /// passed to
+    /// [`Transport::import_resumption_ticket`](super::Transport::import_resumption_ticket)
+    /// for storage. The validate / store split is part of the
+    /// type-state arc (phase 2 — see `docs/TYPESTATE_DESIGN.md`);
+    /// it makes "store-an-unvalidated-ticket" a compile error.
+    pub async fn validate(
+        self,
+        expected_peer: &PeerId,
+        transport: &super::Transport,
+    ) -> Result<ValidatedTicket> {
+        if self.ticket.server_id != *expected_peer {
+            return Err(PeerError::ResumptionTicketNotFound.into());
+        }
+        if self.ticket.expiry <= SystemTime::now() {
+            return Err(PeerError::TicketExpired.into());
+        }
+        {
+            let peers = transport.inner.peers.lock_for(expected_peer).await;
+            if let Some(p) = peers.get(expected_peer) {
+                if p.peer_static_pub != self.ticket.server_static_pub {
+                    return Err(PeerError::ResumptionTicketNotFound.into());
+                }
+            }
+        }
+        Ok(ValidatedTicket {
+            ticket: self.ticket,
+        })
+    }
+}
+
+impl ValidatedTicket {
+    /// Move the inner `ClientTicket` out, consuming the wrapper.
+    /// Used by `Transport::import_resumption_ticket` to install
+    /// the ticket into the client store.
+    pub(crate) fn into_ticket(self) -> ClientTicket {
+        self.ticket
     }
 }
 

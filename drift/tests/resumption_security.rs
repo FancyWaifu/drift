@@ -109,10 +109,12 @@ async fn cross_identity_ticket_rejected() {
         .await
         .unwrap();
     assert_eq!(bob_peer_on_mallory, bob_peer_on_alice);
-    mallory
-        .import_resumption_ticket(&bob_peer_on_mallory, &ticket_blob)
+    let unval = Transport::parse_resumption_ticket(&ticket_blob).unwrap();
+    let val = unval
+        .validate(&bob_peer_on_mallory, &mallory)
         .await
         .unwrap();
+    mallory.import_resumption_ticket(val).await;
 
     // Mallory attempts to resume. Her ResumeHello carries her
     // own src_id (Mallory's peer_id), the ticket_id (Alice's),
@@ -262,10 +264,9 @@ async fn resume_hello_single_use() {
         .add_peer(bob_pub, proxy_addr, Direction::Initiator)
         .await
         .unwrap();
-    alice2
-        .import_resumption_ticket(&bob_peer2, &ticket_blob)
-        .await
-        .unwrap();
+    let unval = Transport::parse_resumption_ticket(&ticket_blob).unwrap();
+    let val = unval.validate(&bob_peer2, &alice2).await.unwrap();
+    alice2.import_resumption_ticket(val).await;
     alice2
         .send_data(&bob_peer2, b"legit-resume", 0, 0)
         .await

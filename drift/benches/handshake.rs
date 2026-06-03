@@ -154,10 +154,11 @@ fn bench_resumption(c: &mut Criterion) {
                     .add_peer(bob_pub, bob_addr, Direction::Initiator)
                     .await
                     .unwrap();
-                alice
-                    .import_resumption_ticket(&bob_peer, &current_ticket)
-                    .await
-                    .ok();
+                if let Ok(unval) = Transport::parse_resumption_ticket(&current_ticket) {
+                    if let Ok(val) = unval.validate(&bob_peer, &alice).await {
+                        alice.import_resumption_ticket(val).await;
+                    }
+                }
 
                 let start = std::time::Instant::now();
                 alice.send_data(&bob_peer, b"go", 0, 0).await.unwrap();
