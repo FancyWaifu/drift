@@ -79,6 +79,25 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 5: umbrella collapse (first step).** Drops the flat
+  `DriftError::UnknownPeer` and `DriftError::Replay(u32)`
+  variants (zero direct producers remained after slices 2 and 4)
+  and replaces them with `Crypto(CryptoError)` and
+  `Peer(PeerError)` wrapper variants using `#[from]`. The
+  `?` conversion now produces the wrapper variant directly, so
+  matching on the inner enum (`DriftError::Peer(PeerError::NotRegistered)`
+  etc.) gives callers finer-grained handling than the old flat
+  umbrella. Public-API impact: three consumer match arms
+  updated in `transport::run_recv_loop_for` (the
+  `unknown_peer_drops` and `replays_caught` metric branches),
+  `drift-ffi::map_err` (the `DRIFT_ERR_UNKNOWN_PEER` mapping
+  now matches `Peer(_)`), and `tests/graceful_migration.rs`
+  (assertion updated to
+  `matches!(err, DriftError::Peer(PeerError::NotRegistered))`).
+  The flat `AuthFailed`, `HandshakeExhausted`, `QueueFull`,
+  and `DecodeError` variants still exist because 30+ unmigrated
+  direct producers still emit them; follow-up slices migrate
+  those producers and drop the last flat variants.
 - **`multipath::probe_path` no longer misuses `UnknownPeer`.**
   When a path-probe deadline expired with no response,
   `MultipathClient::probe_path` returned

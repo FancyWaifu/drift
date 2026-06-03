@@ -164,5 +164,12 @@ async fn graceful_probe_rejected_for_unknown_peer() {
         .probe_candidate_path(&bogus_peer, candidate)
         .await
         .expect_err("must reject probe for unknown peer");
-    assert!(matches!(err, drift::error::DriftError::UnknownPeer));
+    // bogus peer id isn't in the table — `probe_candidate_path_via`
+    // emits `PeerError::NotRegistered`, lifted through `?` into
+    // `DriftError::Peer(_)`. Pre-slice-5 this assertion was
+    // `DriftError::UnknownPeer`.
+    assert!(matches!(
+        err,
+        drift::error::DriftError::Peer(drift::error::PeerError::NotRegistered)
+    ));
 }

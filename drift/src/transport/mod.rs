@@ -5626,7 +5626,9 @@ impl Inner {
                     Ok(None) => {}
                     Err(e) => {
                         match &e {
-                            DriftError::Replay(_) => {
+                            DriftError::Crypto(drift_core::error::CryptoError::Replay {
+                                ..
+                            }) => {
                                 self.metrics.replays_caught.fetch_add(1, Ordering::Relaxed);
                             }
                             DriftError::AuthFailed => {
@@ -5637,7 +5639,7 @@ impl Inner {
                                     .deadline_dropped
                                     .fetch_add(1, Ordering::Relaxed);
                             }
-                            DriftError::UnknownPeer => {
+                            DriftError::Peer(_) => {
                                 self.metrics
                                     .unknown_peer_drops
                                     .fetch_add(1, Ordering::Relaxed);
