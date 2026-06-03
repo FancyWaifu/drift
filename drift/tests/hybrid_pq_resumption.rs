@@ -113,10 +113,9 @@ async fn pq_session_can_be_resumed() {
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
         .await
         .unwrap();
-    alice2
-        .import_resumption_ticket(&bob_peer2, &ticket_blob)
-        .await
-        .unwrap();
+    let unval = Transport::parse_resumption_ticket(&ticket_blob).unwrap();
+    let val = unval.validate(&bob_peer2, &alice2).await.unwrap();
+    alice2.import_resumption_ticket(val).await;
 
     alice2
         .send_data(&bob_peer2, b"resumed-pq-session", 0, 0)

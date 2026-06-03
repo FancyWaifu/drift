@@ -180,21 +180,40 @@ callers.
 
 ## Phased rollout
 
-  * **Phase 1 (1 PR, ~1 day):** `SessionKey<Initiator>` /
-    `SessionKey<Responder>` with phantom data. Pure refactor,
-    no behavior change. Validates the approach.
-  * **Phase 2 (1 PR, ~half day):** `UnvalidatedTicket` /
-    `ValidatedTicket` for resumption import. Tiny, well-bounded.
-  * **Phase 3 (2–3 PRs, ~1 week):** `PeerHandle` /
-    `EstablishedPeerHandle`. First PR adds the types alongside
-    the existing `PeerId` API (additive, no breakage). Second PR
-    migrates internal call sites. Third PR — optional —
-    deprecates the bare-`PeerId` send path.
+  * **Phase 1 (skipped):** `SessionKey<Initiator>` /
+    `SessionKey<Responder>` with phantom data. Originally
+    scoped as "1 day, mechanical refactor." On closer
+    inspection the peer-table boundary forces the same
+    runtime dispatch this memo warned about for `Peer` itself
+    — the `HashMap<PeerId, Peer>` lookup can't carry
+    type-state through, so a generic `Peer<Role, Remote>`
+    requires either trait objects (giving up the
+    monomorphisation win) or a sum-type wrapper (giving up
+    the type-state compile checks). Either way the practical
+    safety benefit evaporates. Skipped.
+  * **Phase 2 (DONE):** `UnvalidatedTicket` /
+    `ValidatedTicket` for resumption import. Adds
+    `Transport::parse_resumption_ticket` returning
+    `UnvalidatedTicket`, `UnvalidatedTicket::validate`
+    returning `ValidatedTicket`, and changes
+    `Transport::import_resumption_ticket` to take a
+    `ValidatedTicket` (infallible). Shipped as a small
+    independent PR; preserves all existing tests with
+    minimal call-site churn.
+  * **Phase 3 (deferred):** `PeerHandle` /
+    `EstablishedPeerHandle`. First PR would add the types
+    alongside the existing `PeerId` API (additive, no
+    breakage); second migrates internal call sites; third
+    (optional) deprecates the bare-`PeerId` send path.
+    Pending a clear-cut bug-class motivation that would
+    justify the API churn.
 
-Stop after phase 2 if phase 3 starts feeling like ceremony for
-its own sake. The win from phase 1 alone (no more mixed-
-direction `SessionKey` bugs possible) probably justifies the
-effort.
+The phase 2 win (validation step expressed in the type system)
+is the kind of low-risk clarity improvement type-state can
+deliver on. Phase 1 was a textbook-pattern fit on paper but
+not for this codebase's shape. Phase 3 is real architecture
+work and shouldn't ship until there's a concrete user-visible
+bug class that demands it.
 
 ## Open questions
 

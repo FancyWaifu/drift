@@ -92,6 +92,13 @@ use peer_shards::PeerShards;
 // `resumption.rs` for `transport::*` internal consumers, but
 // neither is imported into `mod.rs`'s scope.
 use resumption::{ClientTicket, ResumptionStore};
+// Phase 2 of the type-state arc: the resumption-ticket lifecycle
+// types. `UnvalidatedTicket` wraps a parsed-but-not-checked
+// ticket; `ValidatedTicket` wraps one whose identity binding,
+// expiry, and peer-id have been verified. Apps reach them via
+// `Transport::parse_resumption_ticket` → `unval.validate(peer,
+// transport).await` → `transport.import_resumption_ticket(val)`.
+pub use resumption::{UnvalidatedTicket, ValidatedTicket};
 use std::collections::HashMap as StdHashMap;
 use std::collections::HashSet as StdHashSet;
 
@@ -2732,39 +2739,37 @@ impl Transport {
         Ok(ticket.to_bytes())
     }
 
-    /// Install a previously exported resumption ticket for
-    /// `peer`. The next `send_data` to this peer will use a
-    /// `ResumeHello` instead of a full HELLO. Returns
-    /// `Err(AuthFailed)` if the blob is malformed or doesn't
-    /// match the peer's stored static pubkey.
-    pub async fn import_resumption_ticket(&self, peer: &PeerId, blob: &[u8]) -> Result<()> {
-        // Malformed blob is a codec-layer failure; identity
-        // mismatch / expiry are peer-layer failures.
+    /// Parse a previously exported resumption-ticket blob. Returns
+    /// an [`UnvalidatedTicket`] — call its `validate` method with
+    /// the expected peer id to obtain a [`ValidatedTicket`] that
+    /// [`Transport::import_resumption_ticket`] will accept.
+    ///
+    /// Splitting parse / validate / store into three steps is
+    /// part of the type-state arc (phase 2 — see
+    /// `docs/TYPESTATE_DESIGN.md`). The previous monolithic
+    /// `import_resumption_ticket(peer, blob)` could be misused
+    /// by callers who skipped the validation; the new
+    /// `ValidatedTicket` makes that mistake a compile error.
+    pub fn parse_resumption_ticket(blob: &[u8]) -> Result<UnvalidatedTicket> {
         let ticket = ClientTicket::from_bytes(blob).ok_or(CodecError::Malformed)?;
-        if ticket.server_id != *peer {
-            return Err(PeerError::ResumptionTicketNotFound.into());
-        }
-        if ticket.expiry <= std::time::SystemTime::now() {
-            return Err(PeerError::TicketExpired.into());
-        }
-        // Verify the ticket's bound server pubkey matches what
-        // we know about this peer (if we know about them at
-        // all). Allows importing tickets before add_peer; in
-        // that case the static_pub binding is checked later
-        // during the resumption attempt itself.
-        {
-            let peers = self.inner.peers.lock_for(peer).await;
-            if let Some(p) = peers.get(peer) {
-                if p.peer_static_pub != ticket.server_static_pub {
-                    return Err(PeerError::ResumptionTicketNotFound.into());
-                }
-            }
-        }
-        self.inner.client_tickets.lock().await.insert(*peer, ticket);
+        Ok(UnvalidatedTicket::from_ticket(ticket))
+    }
+
+    /// Install a previously validated resumption ticket. The
+    /// next `send_data` to the ticket's peer will use a
+    /// `ResumeHello` instead of a full HELLO. Infallible
+    /// because every failure path (malformed blob, identity
+    /// mismatch, expiry) is represented by the absence of a
+    /// `ValidatedTicket` value — see
+    /// [`Transport::parse_resumption_ticket`] for the entry
+    /// point that yields one.
+    pub async fn import_resumption_ticket(&self, ticket: ValidatedTicket) {
+        let ticket = ticket.into_ticket();
+        let peer = ticket.server_id;
+        self.inner.client_tickets.lock().await.insert(peer, ticket);
         self.inner
             .has_any_ticket
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
     }
 
     /// Await the next authenticated DATA packet. Returns None if the

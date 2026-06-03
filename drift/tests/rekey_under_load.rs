@@ -178,10 +178,9 @@ async fn rekey_on_resumed_session() {
         .add_peer(bob_pub, bob_addr, Direction::Initiator)
         .await
         .unwrap();
-    alice2
-        .import_resumption_ticket(&bob_peer2, &ticket)
-        .await
-        .unwrap();
+    let unval = Transport::parse_resumption_ticket(&ticket).unwrap();
+    let val = unval.validate(&bob_peer2, &alice2).await.unwrap();
+    alice2.import_resumption_ticket(val).await;
 
     alice2
         .send_data(&bob_peer2, b"resumed-1", 0, 0)
