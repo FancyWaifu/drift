@@ -10,7 +10,7 @@ use drift::identity::Identity;
 use rand::RngCore;
 use std::path::Path;
 
-pub async fn load(path: &Path) -> Result<Identity> {
+pub(crate) async fn load(path: &Path) -> Result<Identity> {
     let body = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("reading identity {}", path.display()))?;
@@ -32,7 +32,7 @@ pub async fn load(path: &Path) -> Result<Identity> {
 /// Generate a fresh keypair and write the secret to `path` as
 /// 64 hex chars. Returns the public key hex for the user to
 /// share with the other peer's config.
-pub async fn keygen(path: &Path) -> Result<String> {
+pub(crate) async fn keygen(path: &Path) -> Result<String> {
     let mut secret = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut secret);
     let id = Identity::from_secret_bytes(secret);

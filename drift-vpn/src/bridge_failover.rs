@@ -57,7 +57,7 @@ const RE_ELEVATE_INTERVAL: Duration = Duration::from_secs(2 * 60);
 /// One supervisor's state. Cheaply cloneable into the spawned
 /// task — bridge_handles is a small `HashMap` and bridge_specs
 /// is a small `Vec`.
-pub struct BridgeSupervisor {
+pub(crate) struct BridgeSupervisor {
     /// The federated peer this supervisor manages. We re-call
     /// `add_federated_peer(this_pubkey, new_bridge_handle, …)`
     /// to swap; the transport updates the existing entry in
@@ -91,7 +91,7 @@ pub struct BridgeSupervisor {
 /// caller can hold it for the daemon's lifetime (drift-vpn's
 /// pattern is to forget the handle — `tokio::spawn` keeps the
 /// task alive until the runtime shuts down).
-pub fn spawn(transport: Arc<Transport>, state: BridgeSupervisor) {
+pub(crate) fn spawn(transport: Arc<Transport>, state: BridgeSupervisor) {
     if !state.failover.enabled {
         debug!(
             peer = %hex::encode(state.federated_peer_pid),

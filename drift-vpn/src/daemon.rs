@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-pub async fn run(
+pub(crate) async fn run(
     cfg: Config,
     identity: Identity,
     status_socket: PathBuf,

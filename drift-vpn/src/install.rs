@@ -19,7 +19,7 @@ use tokio::process::Command;
 /// Inputs to the installer. The same struct serves Linux and
 /// macOS so the CLI surface is unified; per-platform code reads
 /// only the fields it needs.
-pub struct InstallOpts {
+pub(crate) struct InstallOpts {
     /// Path to the config file the service will read on startup.
     pub config: PathBuf,
     /// Path to the drift-vpn binary the service will exec.
@@ -37,7 +37,7 @@ pub struct InstallOpts {
     pub dry_run: bool,
 }
 
-pub struct UninstallOpts {
+pub(crate) struct UninstallOpts {
     pub service_name: String,
     /// Print the actions and exit; don't touch the filesystem or
     /// invoke systemctl/launchctl.
@@ -46,7 +46,7 @@ pub struct UninstallOpts {
 
 // ─── Public entry points ──────────────────────────────────────────
 
-pub async fn install(opts: InstallOpts) -> Result<()> {
+pub(crate) async fn install(opts: InstallOpts) -> Result<()> {
     if !opts.binary.exists() {
         bail!(
             "drift-vpn binary not found at {}. Pass --binary <path> if it lives \
@@ -78,7 +78,7 @@ pub async fn install(opts: InstallOpts) -> Result<()> {
     }
 }
 
-pub async fn uninstall(opts: UninstallOpts) -> Result<()> {
+pub(crate) async fn uninstall(opts: UninstallOpts) -> Result<()> {
     #[cfg(target_os = "linux")]
     return uninstall_linux(opts).await;
     #[cfg(target_os = "macos")]

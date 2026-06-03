@@ -43,7 +43,7 @@ use tracing::{debug, info, warn};
 /// or unestablished within `PROBE_DEADLINE`) sort last with
 /// `handshake_time = None`.
 #[derive(Debug, Clone)]
-pub struct AdapterMeasurement {
+pub(crate) struct AdapterMeasurement {
     /// Original spec string from `via_bridges_auto` expansion
     /// or `via_bridges`. Used as the key into `bridge_handles`
     /// and as the failover-supervisor's display string.
@@ -71,7 +71,7 @@ pub struct AdapterMeasurement {
 /// The supervisor re-probes during operation, so a wire that's
 /// slow to first-handshake but reliable later doesn't stay
 /// excluded forever.
-pub const PROBE_DEADLINE: Duration = Duration::from_secs(8);
+pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(8);
 
 /// Poll interval for `peer_is_established`. 50 ms gives ms-level
 /// precision in the measured handshake time without spinning
@@ -133,7 +133,7 @@ fn scheme_default_rank(spec: &str) -> u8 {
 /// measurement's `bridge_pid` and uses it as the
 /// `via_bridge` argument to `Transport::add_federated_peer`
 /// for the actual VPN peer.
-pub async fn register_and_probe(
+pub(crate) async fn register_and_probe(
     transport: Arc<Transport>,
     specs: Vec<String>,
 ) -> Vec<AdapterMeasurement> {

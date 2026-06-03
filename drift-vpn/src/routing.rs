@@ -29,12 +29,12 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 #[derive(Clone)]
-pub struct PeerRoute {
+pub(crate) struct PeerRoute {
     pub peer_id: PeerId,
     pub allowed_ips: Vec<IpNet>,
 }
 
-pub struct RouteTable {
+pub(crate) struct RouteTable {
     pub routes: Vec<PeerRoute>,
     /// peer_id → route index, for quick reverse lookups.
     by_peer_id: HashMap<PeerId, usize>,
@@ -130,7 +130,7 @@ impl RouteTable {
 /// Outcome of `RouteTable::src_status`. See `src_status` doc
 /// for the operational meaning of each variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SrcStatus {
+pub(crate) enum SrcStatus {
     Allowed,
     UnknownPeer,
     ConfigMismatch,
@@ -164,7 +164,7 @@ pub enum SrcStatus {
 /// All numbers are loose. The point is to give DRIFT *any*
 /// signal it can act on instead of the all-zeros that v0.5
 /// shipped with.
-pub fn classify_for_qos(pkt: &[u8]) -> (u16, u32) {
+pub(crate) fn classify_for_qos(pkt: &[u8]) -> (u16, u32) {
     if pkt.len() < 20 {
         return (0, 0);
     }
@@ -232,7 +232,7 @@ pub fn classify_for_qos(pkt: &[u8]) -> (u16, u32) {
 ///   bytes  0    : version<<4 | tc[7..4]
 ///   bytes  8..24: src
 ///   bytes 24..40: dst
-pub fn parse_endpoints(pkt: &[u8]) -> Result<(IpAddr, IpAddr)> {
+pub(crate) fn parse_endpoints(pkt: &[u8]) -> Result<(IpAddr, IpAddr)> {
     if pkt.is_empty() {
         return Err(anyhow!("empty packet"));
     }

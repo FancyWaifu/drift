@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// "rpfilter drops" can tell the difference between "I have a
 /// misconfigured peer" and "I'm being attacked."
 #[derive(Default)]
-pub struct RpFilterCounters {
+pub(crate) struct RpFilterCounters {
     /// `src_is_valid` returned false because the peer table
     /// has the peer but its `allowed_ips` doesn't cover the
     /// claimed source. This is almost always a config mismatch
@@ -37,7 +37,7 @@ pub struct RpFilterCounters {
 /// All daemon-level counters. Cheap to construct (no heap
 /// per field) and cheap to bump (relaxed atomics).
 #[derive(Default)]
-pub struct DaemonMetrics {
+pub(crate) struct DaemonMetrics {
     // --- TUN device path (drift → tun) ---
     /// Packets successfully written to the tun device.
     pub tun_writes: AtomicU64,
@@ -126,7 +126,7 @@ impl DaemonMetrics {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct MetricsSnapshot {
+pub(crate) struct MetricsSnapshot {
     pub tun_writes: u64,
     pub tun_bytes_written: u64,
     pub tun_write_errs: u64,
