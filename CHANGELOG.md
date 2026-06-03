@@ -79,6 +79,22 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 6: mechanical migration of session + codec flat
+  variant producers.** Migrates the 32 remaining straightforward
+  flat-variant produce sites: 28 × `DriftError::DecodeError` in
+  `find_peer.rs` / `federated.rs` / `mod.rs` → `CodecError::Malformed`
+  (wrapped into `DriftError::Codec(_)` via `?`), 3 × `DriftError::QueueFull`
+  in `path.rs` and `mod.rs` → `SessionError::QueueFull`, 1 ×
+  `DriftError::HandshakeExhausted` in `mod.rs` →
+  `SessionError::HandshakeExhausted`. Public behavior unchanged
+  because `From<CodecError>` and `From<SessionError>` still map
+  to the legacy flat variants — the migration is purely a
+  site-level annotation that each producer declares its protocol
+  layer. After this slice, the only remaining flat-variant
+  producer category is the 30 `DriftError::AuthFailed` sites,
+  which need per-site analysis (some are crypto-layer, some are
+  app-level federation authn, some are resumption-ticket
+  validation) and ship in a follow-up slice.
 - **Slice 5: umbrella collapse (first step).** Drops the flat
   `DriftError::UnknownPeer` and `DriftError::Replay(u32)`
   variants (zero direct producers remained after slices 2 and 4)

@@ -1,5 +1,5 @@
 use crate::crypto::{derive_peer_id, Direction, PeerId, SessionKey};
-use crate::error::{DriftError, PeerError, Result};
+use crate::error::{CodecError, DriftError, PeerError, Result, SessionError};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::identity::{
     derive_session_key, random_nonce, rekey_derive, Identity, NONCE_LEN, STATIC_KEY_LEN,
@@ -3250,7 +3250,7 @@ impl Inner {
                 let mut peers = self.peers.lock_for(dst).await;
                 if let Some(peer) = peers.get_mut(dst) {
                     if peer.pending.len() >= self.config.pending_queue_cap {
-                        return Err(DriftError::QueueFull);
+                        return Err(SessionError::QueueFull.into());
                     }
                     peer.pending.push(PendingSend {
                         payload: payload.to_vec(),
@@ -3303,14 +3303,14 @@ impl Inner {
                 // more data that will never be delivered.
                 if let HandshakeState::AwaitingAck { attempts, .. } = &peer.handshake {
                     if *attempts >= self.config.handshake_max_attempts {
-                        return Err(DriftError::HandshakeExhausted);
+                        return Err(SessionError::HandshakeExhausted.into());
                     }
                 }
                 // Bound the pre-handshake queue. An app that keeps
                 // calling send_data on a stuck peer would otherwise
                 // leak memory without bound.
                 if peer.pending.len() >= self.config.pending_queue_cap {
-                    return Err(DriftError::QueueFull);
+                    return Err(SessionError::QueueFull.into());
                 }
                 peer.pending.push(PendingSend {
                     payload: payload.to_vec(),
@@ -3556,7 +3556,7 @@ impl Inner {
                 | PacketType::PeerGone
                 | PacketType::FindPeerHashed
         ) {
-            return Err(DriftError::DecodeError);
+            return Err(CodecError::Malformed.into());
         }
         let action = {
             let mut peers = self.peers.lock_for(dst).await;
@@ -4928,7 +4928,7 @@ impl Inner {
 
         let reply = find_peer::parse_peer_here(&payload_bytes)?;
         if reply.path.is_empty() {
-            return Err(DriftError::DecodeError);
+            return Err(CodecError::Malformed.into());
         }
 
         // Verify the terminal-bridge ticket. The ticket in

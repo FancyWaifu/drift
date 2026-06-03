@@ -12,7 +12,7 @@
 //! don't have.
 
 use super::{cookies::ct_eq, Inner};
-use crate::error::{DriftError, PeerError, Result};
+use crate::error::{DriftError, PeerError, Result, SessionError};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::session::{HandshakeState, PathProbe, Peer};
 use crate::PeerId;
@@ -148,7 +148,7 @@ impl Inner {
                 if p.addr != candidate_addr
                     && Instant::now().duration_since(p.started) < PATH_PROBE_TIMEOUT
                 {
-                    return Err(DriftError::QueueFull);
+                    return Err(SessionError::QueueFull.into());
                 }
             }
             let mut challenge = [0u8; PATH_CHALLENGE_LEN];
