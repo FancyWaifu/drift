@@ -79,6 +79,19 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### API surface
 
+- **Phase 3 of public-API lock-down: 9 items removed from the
+  top-level `drift::*` re-export surface.** This phase audits
+  `drift/src/lib.rs` itself — the *intentional* public surface
+  — and trims items with zero external consumers through the
+  `drift::*` path. Removed: three module re-exports (`drift::fec`,
+  `drift::pq`, `drift::time`) and six top-level convenience
+  re-exports (`drift::KEY_LEN`, `drift::PEER_ID_LEN`,
+  `drift::STATIC_KEY_LEN`, `drift::Metrics`, `drift::Received`,
+  `drift::FindPeerMode`). Every removed item remains reachable
+  via its containing module's path (e.g. `drift::crypto::KEY_LEN`,
+  `drift::transport::Metrics`, `drift_core::time`). One internal
+  consumer of `drift::Received` (in `drift-ffi`) was updated to
+  use `drift::transport::Received` directly.
 - **Phase 2 of public-API lock-down: 21 items in
   `drift::{io, streams, wire_*}` demoted to `pub(crate)`.**
   Continues the lock-down work from PR #35. Audit method
