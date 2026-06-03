@@ -99,7 +99,7 @@ const FRAG_HEADER_LEN: usize = 4;
 /// 189 base32 chars → floor(189 × 5 / 8) = 118 raw bytes;
 /// minus the 4-byte fragment header = 114. Round to 113 for
 /// alignment safety.
-pub const MAX_FRAG_PAYLOAD: usize = 113;
+pub(crate) const MAX_FRAG_PAYLOAD: usize = 113;
 
 /// UDP receive buffer size. DNS over UDP is normally capped at
 /// 512 bytes (RFC 1035) or 4096 with EDNS0; our queries are
@@ -640,7 +640,7 @@ impl PacketIO for DnsPacketIO {
 // per-peer state lives inside `DnsPacketIO`'s reassembly map and
 // the Transport's own peer table.
 
-pub struct DnsListenerIO {
+pub(crate) struct DnsListenerIO {
     socket: Option<Arc<UdpSocket>>,
     addr: SocketAddr,
 }

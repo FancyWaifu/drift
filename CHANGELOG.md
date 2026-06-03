@@ -79,6 +79,34 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### API surface
 
+- **Phase 2 of public-API lock-down: 21 items in
+  `drift::{io, streams, wire_*}` demoted to `pub(crate)`.**
+  Continues the lock-down work from PR #35. Audit method
+  unchanged: grep workspace for cross-crate imports, keep
+  anything externally consumed (drift-git, drift-http,
+  drift-wormhole, drift-vpn, tests, examples, fuzz targets),
+  demote everything else. Items locked down:
+  `streams::StreamId` (only `Stream`+`StreamManager` are
+  externally consumed via drift-http/drift-git/drift-wormhole);
+  `io::{InterfaceSet, UdpListenerIO, TcpListenerIO, WsListenerIO,
+  TlsPacketIO, TlsListenerIO, ListenerFactory, ConnectorFactory,
+  SchemeRegistration, registered_schemes}` (10 items — apps use
+  `make_listener`/`make_connector` via URL strings, not the
+  concrete types);
+  `wire_dns::{MAX_FRAG_PAYLOAD, DnsListenerIO}` (the four
+  fragmentation helpers stayed `pub` for the `doh_smoke`
+  example);
+  `wire_h2::{H2StreamPacketIO, H2ListenerIO}`,
+  `wire_http::{HttpPacketIO, HttpListenerIO, HttpClientPacketIO}`,
+  `wire_onion::OnionPacketIO`,
+  `wire_webrtc::WebRtcListenerIO`,
+  `wire_webtransport::WebTransportListenerIO` (concrete adapter
+  types reachable through the scheme registry). Three
+  `InterfaceSet` helpers (`live_count`, `is_empty`,
+  `send_default`) and one `TcpListenerIO::set_per_ip_cap` are
+  marked `#[allow(dead_code)]` rather than removed — they're
+  polished internal-API surface that downstream code may want
+  to reach for.
 - **Phase 1 of public-API lock-down: `drift::transport::*`
   re-export shrunk by 37 items.** Following the design memo at
   `docs/API_LOCKDOWN_DESIGN.md`, this PR removes items from the

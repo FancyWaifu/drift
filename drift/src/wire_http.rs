@@ -125,7 +125,7 @@ type Registry = Arc<Mutex<HashMap<u64, ClientQueues>>>;
 
 // ─── HttpPacketIO ─────────────────────────────────────────────────
 
-pub struct HttpPacketIO {
+pub(crate) struct HttpPacketIO {
     inbound_rx: Mutex<mpsc::Receiver<Vec<u8>>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
     peer_addr: SocketAddr,
@@ -175,7 +175,7 @@ impl PacketIO for HttpPacketIO {
 
 // ─── Listener ─────────────────────────────────────────────────────
 
-pub struct HttpListenerIO {
+pub(crate) struct HttpListenerIO {
     addr: SocketAddr,
     new_clients_rx: Mutex<mpsc::Receiver<Arc<dyn PacketIO>>>,
     _accept_task: tokio::task::JoinHandle<()>,
@@ -597,7 +597,7 @@ fn find_event_boundary(buf: &[u8]) -> Option<EventBoundary> {
 
 /// PacketIO over native HTTP/SSE. Outbound packets become POSTs;
 /// inbound packets are SSE events pumped into an internal mpsc.
-pub struct HttpClientPacketIO {
+pub(crate) struct HttpClientPacketIO {
     client: reqwest::Client,
     send_url: String,
     addr: SocketAddr,

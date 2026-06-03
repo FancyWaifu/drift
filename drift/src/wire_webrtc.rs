@@ -71,7 +71,7 @@ struct SignalMsg {
 /// WebSocket signaling endpoint; once SDP exchange completes,
 /// the data plane moves to the WebRTC data channel (separate
 /// UDP/DTLS ports negotiated by ICE).
-pub struct WebRtcListenerIO {
+pub(crate) struct WebRtcListenerIO {
     tcp: TcpListener,
 }
 

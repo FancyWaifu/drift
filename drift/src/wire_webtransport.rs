@@ -34,7 +34,7 @@ use wtransport::{Endpoint, Identity, ServerConfig};
 /// in server mode; each `accept()` waits for the next inbound
 /// browser session, runs the WebTransport handshake, and yields
 /// a `WebTransportPacketIO` for the resulting connection.
-pub struct WebTransportListenerIO {
+pub(crate) struct WebTransportListenerIO {
     endpoint: Endpoint<Server>,
     local_addr: SocketAddr,
 }
