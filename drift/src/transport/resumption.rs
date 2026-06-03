@@ -33,7 +33,7 @@
 
 use super::Inner;
 use crate::crypto::{Direction, PeerId, SessionKey};
-use crate::error::{DriftError, PeerError, Result};
+use crate::error::{CryptoError, DriftError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::identity::{Identity, NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::{HandshakeState, PendingResumption, PrevSession};
@@ -563,7 +563,7 @@ impl Inner {
         // Reject low-order ephemerals up front.
         if client_eph_pub == [0u8; STATIC_KEY_LEN] {
             self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(DriftError::AuthFailed);
+            return Err(CryptoError::KeyExchangeFailed.into());
         }
 
         let client_peer_id = header.src_id;
@@ -587,7 +587,12 @@ impl Inner {
                     self.metrics
                         .resumption_rejects
                         .fetch_add(1, Ordering::Relaxed);
-                    return Err(DriftError::AuthFailed);
+                    // `take` returns None for either ticket-not-found
+                    // OR identity mismatch (ticket bound to a
+                    // different client static pub). Both surface as
+                    // `ResumptionTicketNotFound` since the recovery
+                    // is the same (fresh full handshake).
+                    return Err(PeerError::ResumptionTicketNotFound.into());
                 }
             }
         };
@@ -601,7 +606,7 @@ impl Inner {
 
         let ephemeral_dh = server_ephemeral
             .dh(&client_eph_pub)
-            .ok_or(DriftError::AuthFailed)?;
+            .ok_or(CryptoError::KeyExchangeFailed)?;
         drop(server_ephemeral);
 
         let new_session_key =
@@ -776,7 +781,7 @@ impl Inner {
 
             let ephemeral_dh = ephemeral
                 .dh(&server_eph_pub)
-                .ok_or(DriftError::AuthFailed)?;
+                .ok_or(CryptoError::KeyExchangeFailed)?;
             drop(ephemeral);
             let new_session_key =
                 derive_resumption_key(&resumption.psk, &ephemeral_dh, &client_nonce, &server_nonce);

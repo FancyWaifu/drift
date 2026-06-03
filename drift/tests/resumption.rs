@@ -201,9 +201,15 @@ async fn import_with_wrong_peer_id_rejected() {
         .import_resumption_ticket(&bogus_peer_id, &blob)
         .await
         .expect_err("import with wrong peer id must fail");
+    // Slice 7 migrated the wrong-server-id reject from
+    // the flat `AuthFailed` to the typed
+    // `PeerError::ResumptionTicketNotFound`.
     assert!(
-        matches!(err, DriftError::AuthFailed),
-        "expected AuthFailed, got {:?}",
+        matches!(
+            err,
+            DriftError::Peer(drift::error::PeerError::ResumptionTicketNotFound)
+        ),
+        "expected Peer(ResumptionTicketNotFound), got {:?}",
         err
     );
 }
@@ -256,5 +262,11 @@ async fn import_with_corrupted_blob_rejected() {
         .import_resumption_ticket(&bob_peer, &blob)
         .await
         .expect_err("truncated blob must be rejected");
-    assert!(matches!(err, DriftError::AuthFailed));
+    // Slice 7 migrated the malformed-blob reject from
+    // the flat `AuthFailed` to `CodecError::Malformed`,
+    // which under the current `From<CodecError>` impl
+    // surfaces as `DriftError::DecodeError`. A future
+    // slice that adds a `Codec(CodecError)` wrapper will
+    // change this assertion accordingly.
+    assert!(matches!(err, DriftError::DecodeError));
 }

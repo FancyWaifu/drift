@@ -50,7 +50,7 @@
 //!   [40..72]   bridge_pub          (emitting bridge — for cache eviction matching)
 //! ```
 
-use crate::error::{CodecError, DriftError, Result};
+use crate::error::{CodecError, PeerError, Result};
 use crate::transport::federated::{
     decode_ticket, encode_ticket, PresenceTicket, TICKET_LEN, TICKET_NONCE_LEN,
 };
@@ -132,10 +132,13 @@ pub fn verify_hop_attestation(
     now_ms: u64,
 ) -> Result<()> {
     if ticket.expiry_ms <= now_ms {
-        return Err(DriftError::AuthFailed);
+        return Err(PeerError::TicketExpired.into());
     }
     let msg = hop_attestation_signed_msg(bridge_pub, query_id, ticket.expiry_ms, &ticket.nonce);
-    drift_core::xeddsa::verify(bridge_pub, &msg, &ticket.sig).map_err(|_| DriftError::AuthFailed)
+    // `?` lifts `CryptoError::SignatureInvalid` from xeddsa::verify
+    // into `DriftError::Crypto(_)` without needing map_err.
+    drift_core::xeddsa::verify(bridge_pub, &msg, &ticket.sig)?;
+    Ok(())
 }
 
 // ─── Protocol constants ──────────────────────────────────────────

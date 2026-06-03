@@ -1,5 +1,5 @@
 use crate::crypto::{derive_peer_id, Direction, PeerId, SessionKey};
-use crate::error::{CodecError, DriftError, PeerError, Result, SessionError};
+use crate::error::{CodecError, CryptoError, DriftError, PeerError, Result, SessionError};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::identity::{
     derive_session_key, random_nonce, rekey_derive, Identity, NONCE_LEN, STATIC_KEY_LEN,
@@ -2730,12 +2730,14 @@ impl Transport {
     /// `Err(AuthFailed)` if the blob is malformed or doesn't
     /// match the peer's stored static pubkey.
     pub async fn import_resumption_ticket(&self, peer: &PeerId, blob: &[u8]) -> Result<()> {
-        let ticket = ClientTicket::from_bytes(blob).ok_or(DriftError::AuthFailed)?;
+        // Malformed blob is a codec-layer failure; identity
+        // mismatch / expiry are peer-layer failures.
+        let ticket = ClientTicket::from_bytes(blob).ok_or(CodecError::Malformed)?;
         if ticket.server_id != *peer {
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::ResumptionTicketNotFound.into());
         }
         if ticket.expiry <= std::time::SystemTime::now() {
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::TicketExpired.into());
         }
         // Verify the ticket's bound server pubkey matches what
         // we know about this peer (if we know about them at
@@ -2746,7 +2748,7 @@ impl Transport {
             let peers = self.inner.peers.lock_for(peer).await;
             if let Some(p) = peers.get(peer) {
                 if p.peer_static_pub != ticket.server_static_pub {
-                    return Err(DriftError::AuthFailed);
+                    return Err(PeerError::ResumptionTicketNotFound.into());
                 }
             }
         }
@@ -3660,7 +3662,10 @@ impl Inner {
                         claimed_bridge = ?env.source_bridge_pub,
                         "federated: dropped envelope with forged source fields"
                     );
-                    return Err(DriftError::AuthFailed);
+                    // Inner-claimed source pubs don't match the
+                    // AEAD-verified outer sender — identity-binding
+                    // failure, not just an unknown sender.
+                    return Err(CryptoError::SignatureInvalid.into());
                 }
             }
         }
@@ -4284,7 +4289,7 @@ impl Inner {
                 sender = ?sender_pub,
                 "directory: dropped announcement from non-bridge peer"
             );
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::SenderNotInFederationTable.into());
         }
 
         // Phase F: parse v4 (also accepts v3 and v2; v3/v2
@@ -4554,7 +4559,7 @@ impl Inner {
                 ?sender_pub,
                 "FindPeer: sender not in federation_table; dropping"
             );
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::SenderNotInFederationTable.into());
         }
 
         let query = find_peer::parse_find_peer(&payload_bytes)?;
@@ -4763,7 +4768,7 @@ impl Inner {
             .unwrap()
             .contains_key(&sender_pub);
         if !sender_is_bridge {
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::SenderNotInFederationTable.into());
         }
         let query = find_peer::parse_find_peer_hashed(&payload_bytes)?;
 
@@ -4923,7 +4928,7 @@ impl Inner {
                 ?sender_pub,
                 "PeerHere: sender not in federation_table; dropping"
             );
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::SenderNotInFederationTable.into());
         }
 
         let reply = find_peer::parse_peer_here(&payload_bytes)?;
@@ -4952,7 +4957,7 @@ impl Inner {
                 bridge = ?terminal.bridge_pub,
                 "PeerHere: terminal ticket failed verification; dropping"
             );
-            return Err(DriftError::AuthFailed);
+            return Err(CryptoError::SignatureInvalid.into());
         }
         // Verify each intermediate hop's self-signed attestation.
         // path[1..] entries are signed by their own bridge_pub
@@ -4974,7 +4979,7 @@ impl Inner {
                     bridge = ?hop.bridge_pub,
                     "PeerHere: intermediate hop attestation failed verification; dropping"
                 );
-                return Err(DriftError::AuthFailed);
+                return Err(CryptoError::SignatureInvalid.into());
             }
         }
 
@@ -5164,7 +5169,7 @@ impl Inner {
                 ?sender_pub,
                 "PeerGone: sender not in federation_table; dropping"
             );
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::SenderNotInFederationTable.into());
         }
         let gone = find_peer::parse_peer_gone(&payload_bytes)?;
         // Anti-spoof: PeerGone's bridge_pub must match the
@@ -5175,7 +5180,7 @@ impl Inner {
                 actual = ?sender_pub,
                 "PeerGone: spoofed bridge_pub; dropping"
             );
-            return Err(DriftError::AuthFailed);
+            return Err(PeerError::SenderNotInFederationTable.into());
         }
         // Evict only if our cached next-hop is the emitter.
         let evicted = {
@@ -5592,6 +5597,15 @@ impl Inner {
                         }
                         Ok(None) => {}
                         Err(e) => {
+                            // AEAD-tag-mismatch on the short-header
+                            // data path: SessionKey::open returns
+                            // `DriftError::AuthFailed`. Only this
+                            // flat variant bumps `auth_failures`
+                            // here — typed `Crypto(_)` producers
+                            // explicitly bump at the produce site,
+                            // and broadening this arm caused mid-
+                            // stream-rekey timing flakes on slow
+                            // CI runners.
                             if matches!(e, DriftError::AuthFailed) {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
@@ -5631,6 +5645,15 @@ impl Inner {
                             }) => {
                                 self.metrics.replays_caught.fetch_add(1, Ordering::Relaxed);
                             }
+                            // AEAD-tag-mismatch on the data path
+                            // (SessionKey::open returns
+                            // DriftError::AuthFailed). Producers
+                            // of typed `Crypto(_)` errors at non-
+                            // data-path sites (HELLO low-order,
+                            // sig-verify, etc.) explicitly bump
+                            // `auth_failures` at the produce site
+                            // before returning, so they don't
+                            // need an arm here.
                             DriftError::AuthFailed => {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
@@ -6141,7 +6164,7 @@ impl Inner {
             || client_ephemeral_pub == [0u8; STATIC_KEY_LEN]
         {
             self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(DriftError::AuthFailed);
+            return Err(CryptoError::KeyExchangeFailed.into());
         }
 
         // Phase PQ: extract the ML-KEM encap key when the
@@ -6165,7 +6188,7 @@ impl Inner {
             self.metrics
                 .hybrid_pq_handshakes_refused
                 .fetch_add(1, Ordering::Relaxed);
-            return Err(DriftError::AuthFailed);
+            return Err(CryptoError::KeyExchangeFailed.into());
         }
         let pq_client_ek: Option<Vec<u8>> = if pq_requested {
             if body.len() < HELLO_PAYLOAD_LEN + HELLO_PQ_TAIL_LEN {
@@ -6298,7 +6321,10 @@ impl Inner {
                 .ok_or(PeerError::NotRegistered)?;
 
             if peer.peer_static_pub != client_static_pub {
-                return Err(DriftError::AuthFailed);
+                // Identity-binding mismatch — the HELLO's
+                // claimed static pubkey doesn't match what we
+                // have for this peer.
+                return Err(CryptoError::SignatureInvalid.into());
             }
 
             // Dual-initiation tiebreaker: if we're in AwaitingAck (we sent
@@ -6564,7 +6590,7 @@ impl Inner {
                 self.metrics
                     .hybrid_pq_handshakes_refused
                     .fetch_add(1, Ordering::Relaxed);
-                return Err(DriftError::AuthFailed);
+                return Err(CryptoError::KeyExchangeFailed.into());
             }
 
             // Passive RTT sample: the time from when we sent
@@ -6582,10 +6608,10 @@ impl Inner {
             let static_dh = self
                 .identity
                 .dh(&peer.peer_static_pub)
-                .ok_or(DriftError::AuthFailed)?;
+                .ok_or(CryptoError::KeyExchangeFailed)?;
             let ephemeral_dh = ephemeral
                 .dh(&server_ephemeral_pub)
-                .ok_or(DriftError::AuthFailed)?;
+                .ok_or(CryptoError::KeyExchangeFailed)?;
             drop(ephemeral); // zeroize client ephemeral secret
 
             // Phase PQ: decapsulate the server's ML-KEM
@@ -6595,7 +6621,7 @@ impl Inner {
             // the whole handshake. The dk drops after this
             // block, zeroing itself.
             let session_key_bytes = if let (Some(dk), Some(ct)) = (pq_dk_opt, pq_ct) {
-                let mlkem_ss = dk.decapsulate(ct).ok_or(DriftError::AuthFailed)?;
+                let mlkem_ss = dk.decapsulate(ct).ok_or(CryptoError::KeyExchangeFailed)?;
                 let key = drift_core::pq::derive_hybrid_key(
                     &static_dh,
                     &ephemeral_dh,
@@ -7338,10 +7364,10 @@ fn regenerate_session(
     // predictable session key. Fail the handshake cleanly.
     let static_dh = identity
         .dh(&client_static_pub)
-        .ok_or(DriftError::AuthFailed)?;
+        .ok_or(CryptoError::KeyExchangeFailed)?;
     let ephemeral_dh = server_ephemeral
         .dh(&client_ephemeral_pub)
-        .ok_or(DriftError::AuthFailed)?;
+        .ok_or(CryptoError::KeyExchangeFailed)?;
 
     // Phase PQ: if the client supplied an ML-KEM-768 encap key,
     // encapsulate it and weave the resulting shared secret into
@@ -7352,7 +7378,7 @@ fn regenerate_session(
     // X25519 contribution.
     let (session_key_bytes, server_mlkem_ct) = if let Some(ek) = pq_client_ek {
         let (ct, mlkem_ss) =
-            drift_core::pq::server_encapsulate(ek).ok_or(DriftError::AuthFailed)?;
+            drift_core::pq::server_encapsulate(ek).ok_or(CryptoError::KeyExchangeFailed)?;
         let key = drift_core::pq::derive_hybrid_key(
             &static_dh,
             &ephemeral_dh,

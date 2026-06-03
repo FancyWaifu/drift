@@ -79,6 +79,29 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 7: AuthFailed migration to typed sub-error variants.**
+  Migrates the 31 remaining `DriftError::AuthFailed` produce
+  sites to typed sub-errors and introduces three new variants
+  to express semantics the existing types didn't cover:
+  `CryptoError::KeyExchangeFailed` (X25519 low-order pubkey,
+  ML-KEM encap/decap, PQ posture mismatch),
+  `PeerError::TicketExpired` (presence + resumption ticket TTL
+  exhaustion), and `PeerError::SenderNotInFederationTable`
+  (incoming federation packet from a non-allowlisted bridge).
+  Distribution: ~14 sites → `CryptoError` (KeyExchangeFailed
+  ×9, SignatureInvalid ×5), 1 site → `CryptoError::AeadAuthFailed`
+  via the bulk-replaced `.ok_or` chains, 11 sites → `PeerError`
+  (SenderNotInFederationTable ×6, TicketExpired ×3,
+  ResumptionTicketNotFound ×2), 1 site → `CodecError::Malformed`
+  (malformed ticket blob), plus the `rotation::verify_against`
+  identity-mismatch case → `CryptoError::SignatureInvalid`.
+  Two consumer match arms in `run_recv_loop_for` updated to
+  bump `auth_failures` on `DriftError::Crypto(_)` (covers all
+  crypto-layer failures: signature, AEAD, key exchange) instead
+  of the legacy flat `AuthFailed`. Two resumption tests updated
+  to assert on the new typed variants. The flat `DriftError::AuthFailed`
+  variant is now producerless and will be dropped in a final
+  slice along with the other dead flat variants.
 - **Slice 6: mechanical migration of session + codec flat
   variant producers.** Migrates the 32 remaining straightforward
   flat-variant produce sites: 28 × `DriftError::DecodeError` in
