@@ -684,7 +684,7 @@ impl PacketIO for WebTransportPacketIO {
 /// bridging — the mesh routing layer forwards between them
 /// automatically because both interfaces feed the same
 /// DRIFT transport.
-pub struct InterfaceSet {
+pub(crate) struct InterfaceSet {
     /// Slot is `Some(_)` while the underlying `PacketIO` is alive,
     /// `None` once `remove()` has been called for that index.
     /// Slots are never reused — index assignment is monotonic —
@@ -747,7 +747,8 @@ impl InterfaceSet {
     /// Number of live interfaces. Less than or equal to `len()`;
     /// the difference is the count of slots that `remove()` has
     /// nullified.
-    pub fn live_count(&self) -> usize {
+    #[allow(dead_code)]
+    pub(crate) fn live_count(&self) -> usize {
         self.interfaces
             .read()
             .unwrap()
@@ -757,7 +758,8 @@ impl InterfaceSet {
     }
 
     /// True when no interfaces have been registered at all.
-    pub fn is_empty(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.interfaces.read().unwrap().is_empty()
     }
 
@@ -790,7 +792,8 @@ impl InterfaceSet {
 
     /// Send via interface 0 (default). Convenience for code
     /// paths that don't (yet) track per-peer interfaces.
-    pub async fn send_default(&self, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
+    #[allow(dead_code)]
+    pub(crate) async fn send_default(&self, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
         self.send_via(0, buf, dest).await
     }
 
@@ -988,7 +991,7 @@ pub trait Listener: Send + Sync + 'static {
 /// with `NotFound`. The single socket handles all UDP peers via
 /// the connectionless model; per-peer state is the Transport's
 /// job, not the adapter's.
-pub struct UdpListenerIO {
+pub(crate) struct UdpListenerIO {
     /// Some until first accept, then None.
     socket: Option<Arc<UdpSocket>>,
     addr: SocketAddr,
@@ -1159,7 +1162,7 @@ impl Listener for UdpListenerIO {
 /// the accepted PacketIO; once that Arc drops (recv loop exits +
 /// `InterfaceSet::remove` clears it via the F1 fix), the guard
 /// releases the slot.
-pub struct TcpListenerIO {
+pub(crate) struct TcpListenerIO {
     listener: tokio::net::TcpListener,
     per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
     cap_per_ip: usize,
@@ -1241,7 +1244,8 @@ impl TcpListenerIO {
     /// bridges that may legitimately have a handful of clients
     /// from the same NAT but should never accept hundreds from
     /// a single IP. Set very high (e.g. usize::MAX) to disable.
-    pub fn set_per_ip_cap(&mut self, cap: usize) {
+    #[allow(dead_code)]
+    pub(crate) fn set_per_ip_cap(&mut self, cap: usize) {
         self.cap_per_ip = cap;
     }
 }
@@ -1303,7 +1307,7 @@ impl Listener for TcpListenerIO {
 /// block UDP and even raw TCP on non-HTTP ports. To clients in
 /// such environments, drift-http traffic is indistinguishable
 /// from a normal HTTPS WebSocket app.
-pub struct WsListenerIO {
+pub(crate) struct WsListenerIO {
     local_addr: SocketAddr,
     ready_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Arc<dyn PacketIO>>>,
     _accept_task: tokio::task::JoinHandle<()>,
@@ -1489,7 +1493,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
 /// into read/write halves before being type-erased into trait
 /// objects, so the same struct holds either server- or client-
 /// side TLS streams.
-pub struct TlsPacketIO {
+pub(crate) struct TlsPacketIO {
     reader: tokio::sync::Mutex<Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>>,
     writer: tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>>,
     peer_addr: SocketAddr,
@@ -1585,7 +1589,7 @@ impl PacketIO for TlsPacketIO {
 
 /// TLS listener — wraps a `tokio::net::TcpListener` and runs
 /// the TLS handshake on each accept with a self-signed cert.
-pub struct TlsListenerIO {
+pub(crate) struct TlsListenerIO {
     local_addr: SocketAddr,
     ready_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Arc<dyn PacketIO>>>,
     _accept_task: tokio::task::JoinHandle<()>,
@@ -1732,7 +1736,7 @@ pub(crate) fn install_default_crypto_provider() {
 /// `<base32>.onion:<port>` for Tor, BLE MAC, etc.). The pinned-Box
 /// return type is what lets us store these as plain `fn` pointers
 /// (and therefore as values inside an `inventory::submit!` block).
-pub type ListenerFactory =
+pub(crate) type ListenerFactory =
     fn(String) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn Listener>>> + Send>>;
 
 /// Async factory for a client-side connector. Returns the
@@ -1740,16 +1744,16 @@ pub type ListenerFactory =
 /// `Transport::add_peer`. Non-IP transports (Tor, BLE, …)
 /// synthesize a unique loopback `SocketAddr` for the peer-table
 /// key — the actual destination is held inside the `PacketIO`.
-pub type ConnectorFactory =
+pub(crate) type ConnectorFactory =
     fn(String) -> Pin<Box<dyn Future<Output = io::Result<(Arc<dyn PacketIO>, SocketAddr)>> + Send>>;
 
 /// One adapter's registration in the URL dispatcher. Each
 /// adapter submits exactly one of these; the `scheme` field
 /// must be unique across all submissions.
-pub struct SchemeRegistration {
-    pub scheme: &'static str,
-    pub listener: ListenerFactory,
-    pub connector: ConnectorFactory,
+pub(crate) struct SchemeRegistration {
+    pub(crate) scheme: &'static str,
+    pub(crate) listener: ListenerFactory,
+    pub(crate) connector: ConnectorFactory,
 }
 
 inventory::collect!(SchemeRegistration);
@@ -1870,7 +1874,7 @@ pub(crate) async fn parse_ip_addr(addr_str: &str) -> io::Result<SocketAddr> {
 
 /// All schemes currently registered. Useful for diagnostics
 /// (printed in the error when an unknown scheme arrives).
-pub fn registered_schemes() -> Vec<&'static str> {
+pub(crate) fn registered_schemes() -> Vec<&'static str> {
     inventory::iter::<SchemeRegistration>
         .into_iter()
         .map(|r| r.scheme)

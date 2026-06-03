@@ -86,7 +86,7 @@ fn synthesize_peer_addr() -> SocketAddr {
 // per packet so DRIFT packets can be carved out of the byte
 // stream.
 
-pub struct OnionPacketIO {
+pub(crate) struct OnionPacketIO {
     reader: tokio::sync::Mutex<Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>>,
     writer: tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send + Sync + 'static>>,
     peer_addr: SocketAddr,

@@ -146,7 +146,7 @@ type RespBody = BoxBody<Bytes, io::Error>;
 /// capacity dips below what the next packet needs.
 const SEND_ARENA_CHUNK: usize = 64 * 1024;
 
-pub struct H2StreamPacketIO {
+pub(crate) struct H2StreamPacketIO {
     /// Caller's outbound bytes flow into this channel; the
     /// `body_pump` task drains it and writes framed packets
     /// into the HTTP/2 body stream. Each item is paired with
@@ -347,7 +347,7 @@ async fn drain_h2_body_into_packets(mut body: Incoming, tx: mpsc::Sender<Bytes>)
 /// socket. Each accepted POST /drift-fed becomes one
 /// `H2StreamPacketIO` handed back through the `Listener::accept`
 /// channel.
-pub struct H2ListenerIO {
+pub(crate) struct H2ListenerIO {
     local_addr: SocketAddr,
     ready_rx: Mutex<mpsc::Receiver<Arc<dyn PacketIO>>>,
     _accept_task: tokio::task::JoinHandle<()>,

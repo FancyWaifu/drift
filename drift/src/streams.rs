@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, Notify};
 
-pub type StreamId = u32;
+pub(crate) type StreamId = u32;
 
 const TAG_OPEN: u8 = 0x10;
 const TAG_DATA: u8 = 0x11;
