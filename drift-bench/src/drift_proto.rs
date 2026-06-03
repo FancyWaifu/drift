@@ -59,7 +59,7 @@ async fn resolve_url(url: &str) -> Result<String> {
 // iteration where the workload demands it (`Workload::Handshake`).
 const SERVER_SEED: [u8; 32] = [0xAA; 32];
 
-pub async fn server(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn server(cli: &Cli) -> Result<Option<Report>> {
     let server_id = Identity::from_secret_bytes(SERVER_SEED);
     let listen_url = ensure_scheme(&cli.listen);
     // `accept_any_peer = true` so each fresh client identity
@@ -116,7 +116,7 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     Ok(None)
 }
 
-pub async fn client(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn client(cli: &Cli) -> Result<Option<Report>> {
     let server_pub = Identity::from_secret_bytes(SERVER_SEED).public_bytes();
     let target_url = resolve_url(&ensure_scheme(&cli.target)).await?;
 

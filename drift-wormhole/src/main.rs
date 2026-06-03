@@ -57,7 +57,7 @@ enum Cmd {
 }
 
 #[derive(Args)]
-pub struct SendArgs {
+pub(crate) struct SendArgs {
     /// File to send.
     pub file: PathBuf,
 
@@ -74,7 +74,7 @@ pub struct SendArgs {
 }
 
 #[derive(Args)]
-pub struct RecvArgs {
+pub(crate) struct RecvArgs {
     /// Sender peer in `PUBHEX@HOST:PORT` form. Bare `host:port`
     /// → udp://; explicit scheme prefix (`udp://`, `tcp://`,
     /// `ws://`) selects the wire.
@@ -122,7 +122,7 @@ fn init_logging() {
         .init();
 }
 
-pub fn load_identity(path: Option<PathBuf>) -> Result<drift::identity::Identity> {
+pub(crate) fn load_identity(path: Option<PathBuf>) -> Result<drift::identity::Identity> {
     let p = match path {
         Some(p) => p,
         None => identity::default_path()?,

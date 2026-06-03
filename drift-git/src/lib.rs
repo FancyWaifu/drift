@@ -123,7 +123,7 @@ impl DriftGitUrl {
 // client's bytes flow back into the server's stdin. End-of-stream
 // (`recv()` returns None) signals EOF in either direction.
 
-pub const PROTO_TAG: &str = "drift-git/1";
+pub(crate) const PROTO_TAG: &str = "drift-git/1";
 
 /// Service the helper wants the server to expose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,8 +227,8 @@ pub fn build_ok_reply() -> Vec<u8> {
 // flow as raw bytes on the freshly-opened stream. Framing kicks
 // in immediately after the handshake terminator.
 
-pub const FRAME_DATA: u8 = 0x00;
-pub const FRAME_EOD: u8 = 0x01;
+pub(crate) const FRAME_DATA: u8 = 0x00;
+pub(crate) const FRAME_EOD: u8 = 0x01;
 
 /// Wrap a payload in a DATA frame ready for `Stream::send`.
 pub fn frame_data(payload: &[u8]) -> Vec<u8> {

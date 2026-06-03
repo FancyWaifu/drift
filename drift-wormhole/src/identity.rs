@@ -8,17 +8,17 @@ use rand::RngCore;
 use std::fs;
 use std::path::PathBuf;
 
-pub fn config_dir() -> Result<PathBuf> {
+pub(crate) fn config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
         .context("could not locate the user config directory")?
         .join("drift"))
 }
 
-pub fn default_path() -> Result<PathBuf> {
+pub(crate) fn default_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("identity.key"))
 }
 
-pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
+pub(crate) fn load_or_create(path: &PathBuf) -> Result<Identity> {
     if path.exists() {
         let hex_str =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;

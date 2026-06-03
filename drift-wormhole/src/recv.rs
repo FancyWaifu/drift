@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-pub async fn run(args: RecvArgs) -> Result<()> {
+pub(crate) async fn run(args: RecvArgs) -> Result<()> {
     // The peer arg can be either:
     //   1. A petname registered in the local contacts file
     //      (e.g. `bob-laptop`) — resolves to pubkey + addr.
