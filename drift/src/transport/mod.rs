@@ -54,21 +54,21 @@ mod cookies;
 pub mod dp_bloom;
 mod federated;
 mod find_peer;
+// Public re-exports from `federated`: minimized in phase 1 of the
+// API lock-down to only the items actually consumed by tests,
+// examples, and fuzz targets outside the drift crate (see
+// `docs/API_LOCKDOWN_DESIGN.md`). All other items remain
+// reachable internally via `federated::Foo` paths but no longer
+// surface through `drift::transport::*`.
 pub use federated::{
-    build as build_federated, build_directory, build_directory_v3, build_directory_v4,
-    build_ticket, decode_ticket, encode_ticket, parse as parse_federated, parse_directory,
-    parse_directory_v3, parse_directory_v4, ticket_signed_msg, verify_ticket, FederatedEnvelope,
-    PresenceTicket, FED_HEADER_LEN, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_ENTRIES_V4, TICKET_LEN,
-    UNKNOWN_BRIDGE_PUB,
+    build as build_federated, build_directory, build_directory_v4, build_ticket, encode_ticket,
+    parse as parse_federated, parse_directory, PresenceTicket, FED_HEADER_LEN,
+    MAX_DIRECTORY_ENTRIES, UNKNOWN_BRIDGE_PUB,
 };
-pub use find_peer::{
-    build_find_peer, build_find_peer_hashed, build_peer_gone, build_peer_here, hash_target_pub,
-    parse_find_peer, parse_find_peer_hashed, parse_peer_gone, parse_peer_here, FindPeer,
-    FindPeerHashed, PathEntry, PeerGone, PeerHere, FIND_PEER_HASHED_DIGEST_LEN,
-    FIND_PEER_HASHED_LEN, FIND_PEER_HASHED_SALT_LEN, FIND_PEER_LEN, MAX_FIND_DEADLINE_MS,
-    MAX_FIND_TTL, NEG_CACHE_TTL_MS, PATH_ENTRY_LEN, PEER_GONE_LEN, PEER_HERE_HEADER_LEN,
-    QUERY_DEDUP_TTL_MS,
-};
+// `find_peer` items are entirely internal to `drift::transport`
+// — no external consumer needs them. Phase 1 dropped the
+// previous re-export block. Sibling modules in `transport` reach
+// them via `find_peer::Foo` paths directly.
 #[cfg(unix)]
 mod ecn;
 pub(crate) mod mesh;
@@ -78,12 +78,20 @@ mod qlog;
 mod resumption;
 mod rtt;
 use cookies::{CookieSecrets, COOKIE_BLOB_LEN, HELLO_WITH_COOKIE_LEN};
-pub use mesh::{RouteEntry, RoutingTable, MAX_ROUTES};
+// `RouteEntry` is internal to the mesh subsystem; `RoutingTable`
+// + `MAX_ROUTES` are exposed for the attack-surface test sweep.
+pub use mesh::{RoutingTable, MAX_ROUTES};
 use mesh::{DEFAULT_MESH_TTL, MAX_INCOMING_HOP_TTL};
 use path::{build_path_challenge_packet, PATH_CHALLENGE_LEN, PATH_PROBE_RETRY};
 use peer_shards::PeerShards;
-use resumption::ResumptionStore;
-pub use resumption::{ClientTicket, EXPORT_BLOB_LEN, TICKET_DEFAULT_TTL};
+// `resumption::ClientTicket` is reachable inside the `transport`
+// module via this private `use`. The app-facing API uses
+// `Transport::{export,import}_resumption_ticket` which take and
+// return raw `Vec<u8>` blobs — apps never need the struct.
+// `EXPORT_BLOB_LEN` + `TICKET_DEFAULT_TTL` are also pub in
+// `resumption.rs` for `transport::*` internal consumers, but
+// neither is imported into `mod.rs`'s scope.
+use resumption::{ClientTicket, ResumptionStore};
 use std::collections::HashMap as StdHashMap;
 use std::collections::HashSet as StdHashSet;
 

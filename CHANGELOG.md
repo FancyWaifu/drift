@@ -77,6 +77,27 @@ crate. A change that touches multiple surfaces appears under each.
   expansion split instead of `read < <(...)` process substitution.
   (#15)
 
+### API surface
+
+- **Phase 1 of public-API lock-down: `drift::transport::*`
+  re-export shrunk by 37 items.** Following the design memo at
+  `docs/API_LOCKDOWN_DESIGN.md`, this PR removes items from the
+  `drift::transport::*` public surface that no external consumer
+  (tests, examples, fuzz, app crates) actually uses. Items
+  remain reachable from sibling modules inside the
+  `transport` module via direct paths (`federated::Foo`,
+  `find_peer::Foo`, etc.); they just no longer leak through the
+  crate boundary. Removed: 9 federated items
+  (`build_directory_v3`, `decode_ticket`, `parse_directory_v3`,
+  `parse_directory_v4`, `ticket_signed_msg`, `verify_ticket`,
+  `FederatedEnvelope`, `MAX_DIRECTORY_ENTRIES_V4`, `TICKET_LEN`),
+  all 24 `find_peer` items (none had external consumers),
+  `mesh::RouteEntry`, and 3 resumption items (`ClientTicket`,
+  `EXPORT_BLOB_LEN`, `TICKET_DEFAULT_TTL` — apps use
+  `Transport::{export,import}_resumption_ticket` which take raw
+  `Vec<u8>` blobs). No behavior change; downstream apps using
+  the documented `drift::Transport` API are unaffected.
+
 ### Error types
 
 - **Slice 8: final umbrella collapse.** Completes the structured-
