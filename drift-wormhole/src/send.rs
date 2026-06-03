@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-pub async fn run(args: SendArgs) -> Result<()> {
+pub(crate) async fn run(args: SendArgs) -> Result<()> {
     if !args.file.exists() {
         return Err(anyhow!("file not found: {}", args.file.display()));
     }

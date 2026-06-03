@@ -19,7 +19,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Default config directory for shared DRIFT state.
-pub fn config_dir() -> Result<PathBuf> {
+pub(crate) fn config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
         .context("could not locate the user config directory")?
         .join("drift"))
@@ -58,7 +58,8 @@ pub fn load_or_create(path: &PathBuf) -> Result<Identity> {
 }
 
 /// Convenience: load (or create) at the default path.
-pub fn load_default() -> Result<Identity> {
+#[allow(dead_code)]
+pub(crate) fn load_default() -> Result<Identity> {
     load_or_create(&default_path()?)
 }
 

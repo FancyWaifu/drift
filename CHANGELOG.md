@@ -79,6 +79,20 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### API surface
 
+- **Phase 5 of public-API lock-down: small crates bundle (33
+  items).** drift-bench, drift-wormhole, drift-mosh, drift-http,
+  drift-git audited. The five small crates have zero
+  cross-workspace consumers (nothing depends on them as a lib),
+  so every `pub` item that isn't used by the crate's own bins
+  is a dead leak. Bin-only crates (drift-bench, drift-wormhole)
+  had every top-level `pub` fn/struct/enum/const demoted to
+  `pub(crate)` — 16 + 12 = 28 items. lib+bin crates
+  (drift-mosh, drift-http, drift-git) only got items their own
+  bins don't import demoted: drift-mosh = 0 (every pub item is
+  consumed by drift-mosh-server/client/drift_mosh bins),
+  drift-http = 2 (`identity::config_dir`, `identity::load_default`),
+  drift-git = 3 (`PROTO_TAG`, `FRAME_DATA`, `FRAME_EOD` —
+  unused frame-type constants).
 - **Phase 4 of public-API lock-down: drift-core sweep.** Three
   changes: (1) the `fec` module — Reed-Solomon-over-XOR forward
   error correction that had been dead code in the workspace

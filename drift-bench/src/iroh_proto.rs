@@ -89,7 +89,7 @@ async fn load_server_addr() -> Result<EndpointAddr> {
     Ok(addr)
 }
 
-pub async fn server(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn server(cli: &Cli) -> Result<Option<Report>> {
     let endpoint = build_server_endpoint().await?;
     publish_server_addr(&endpoint).await?;
 
@@ -161,7 +161,7 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     Ok(None)
 }
 
-pub async fn client(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn client(cli: &Cli) -> Result<Option<Report>> {
     match cli.workload {
         Workload::Handshake => run_handshake(cli).await,
         Workload::Rtt => run_rtt(cli).await,

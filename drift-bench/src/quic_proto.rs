@@ -43,7 +43,7 @@ fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-pub async fn server(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn server(cli: &Cli) -> Result<Option<Report>> {
     ensure_crypto_provider();
 
     use rcgen::{CertificateParams, KeyPair};
@@ -183,7 +183,7 @@ async fn build_client() -> Result<Endpoint> {
     Ok(endpoint)
 }
 
-pub async fn client(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn client(cli: &Cli) -> Result<Option<Report>> {
     let target: SocketAddr = crate::resolve_target(&cli.target).await?;
     let endpoint = build_client().await?;
 

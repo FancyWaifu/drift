@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 #[derive(Serialize, Debug, Default)]
-pub struct Report {
+pub(crate) struct Report {
     pub protocol: String,
     pub workload: String,
 
@@ -45,7 +45,7 @@ impl Report {
 
 /// Summarize a set of RTT samples into min/p50/p95/p99/max (µs).
 /// `samples` is mutated (sorted) for the quantile lookups.
-pub fn summarize_rtts(samples: &mut [u128], report: &mut Report) {
+pub(crate) fn summarize_rtts(samples: &mut [u128], report: &mut Report) {
     if samples.is_empty() {
         return;
     }
@@ -60,7 +60,7 @@ pub fn summarize_rtts(samples: &mut [u128], report: &mut Report) {
 }
 
 /// Like `summarize_rtts` but for cold-handshake samples.
-pub fn summarize_handshakes(samples: &mut [u128], report: &mut Report) {
+pub(crate) fn summarize_handshakes(samples: &mut [u128], report: &mut Report) {
     if samples.is_empty() {
         return;
     }

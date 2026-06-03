@@ -25,14 +25,14 @@ mod wg_proto;
 /// embedded DNS resolves compose/network-alias names via the
 /// OS resolver, which `tokio::net::lookup_host` calls through.
 /// Returns the first A/AAAA answer.
-pub async fn resolve_target(s: &str) -> anyhow::Result<std::net::SocketAddr> {
+pub(crate) async fn resolve_target(s: &str) -> anyhow::Result<std::net::SocketAddr> {
     let mut iter = tokio::net::lookup_host(s).await?;
     iter.next()
         .ok_or_else(|| anyhow::anyhow!("no addresses resolved for {}", s))
 }
 
 #[derive(Parser, Clone)]
-pub struct Cli {
+pub(crate) struct Cli {
     #[clap(long, value_enum)]
     pub protocol: Protocol,
     #[clap(long, value_enum)]
@@ -68,7 +68,7 @@ pub struct Cli {
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
-pub enum Protocol {
+pub(crate) enum Protocol {
     Drift,
     Quic,
     // Two accepted spellings: the short `wg` for CLI ergonomics
@@ -80,7 +80,8 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn name(&self) -> &'static str {
+    #[allow(dead_code)]
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Protocol::Drift => "drift",
             Protocol::Quic => "quic",
@@ -91,20 +92,21 @@ impl Protocol {
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
-pub enum Mode {
+pub(crate) enum Mode {
     Server,
     Client,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
-pub enum Workload {
+pub(crate) enum Workload {
     Handshake,
     Rtt,
     Throughput,
 }
 
 impl Workload {
-    pub fn name(&self) -> &'static str {
+    #[allow(dead_code)]
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Workload::Handshake => "handshake",
             Workload::Rtt => "rtt",

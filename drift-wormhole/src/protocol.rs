@@ -25,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Header {
+pub(crate) struct Header {
     /// File name as the sender would like it saved. Recipient
     /// is free to override with `--out` but defaults to this.
     pub name: String,
@@ -43,7 +43,7 @@ pub struct Header {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Ack {
+pub(crate) enum Ack {
     Ok {
         /// Recipient's self-advertised petname. Sender records
         /// this in their contacts file so they can refer to
@@ -59,9 +59,9 @@ pub enum Ack {
 /// Max framed-message size — bincode messages are tiny in
 /// practice (filename + 40 bytes), but keeping a sanity cap
 /// prevents a hostile peer from claiming a 4 GB filename.
-pub const MAX_HEADER_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 /// Streaming chunk size for the sender's read-loop. Doesn't
 /// affect the wire format (DRIFT chunks segments internally),
 /// just how often we update the progress bar.
-pub const CHUNK_SIZE: usize = 64 * 1024;
+pub(crate) const CHUNK_SIZE: usize = 64 * 1024;

@@ -107,7 +107,7 @@ async fn send_out(
     }
 }
 
-pub async fn server(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn server(cli: &Cli) -> Result<Option<Report>> {
     let client_pk = PublicKey::from(&StaticSecret::from(CLIENT_SEED));
 
     let listen: SocketAddr = cli.listen.parse()?;
@@ -188,7 +188,7 @@ pub async fn server(cli: &Cli) -> Result<Option<Report>> {
     Ok(None)
 }
 
-pub async fn client(cli: &Cli) -> Result<Option<Report>> {
+pub(crate) async fn client(cli: &Cli) -> Result<Option<Report>> {
     let server_pk = PublicKey::from(&StaticSecret::from(SERVER_SEED));
     let peer_addr: SocketAddr = crate::resolve_target(&cli.target).await?;
 
