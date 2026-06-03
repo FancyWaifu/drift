@@ -21,7 +21,7 @@
 //!   [130..]    payload (payload_len bytes)
 //! ```
 
-use crate::error::DriftError;
+use crate::error::{CodecError, DriftError};
 
 /// Fixed header length (everything before the variable payload).
 pub const FED_HEADER_LEN: usize = 32 + 32 + 32 + 32 + 2;
@@ -57,10 +57,11 @@ pub fn build(
 }
 
 /// Borrow-parse a federated envelope. Returns
-/// `DriftError::DecodeError` on truncation or length-tag mismatch.
+/// `CodecError::Malformed` (wrapped into `DriftError::Codec(_)`)
+/// on truncation or length-tag mismatch.
 pub fn parse(bytes: &[u8]) -> Result<FederatedEnvelope<'_>, DriftError> {
     if bytes.len() < FED_HEADER_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut target_bridge_pub = [0u8; 32];
     target_bridge_pub.copy_from_slice(&bytes[0..32]);
@@ -72,7 +73,7 @@ pub fn parse(bytes: &[u8]) -> Result<FederatedEnvelope<'_>, DriftError> {
     source_client_pub.copy_from_slice(&bytes[96..128]);
     let payload_len = u16::from_be_bytes([bytes[128], bytes[129]]) as usize;
     if bytes.len() != FED_HEADER_LEN + payload_len {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     Ok(FederatedEnvelope {
         target_bridge_pub,
@@ -181,7 +182,7 @@ pub fn encode_ticket(t: &PresenceTicket) -> [u8; TICKET_LEN] {
 /// Parse a 96-byte on-wire ticket.
 pub fn decode_ticket(bytes: &[u8]) -> Result<PresenceTicket, DriftError> {
     if bytes.len() != TICKET_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let expiry_ms = u64::from_be_bytes(bytes[..8].try_into().unwrap());
     let mut nonce = [0u8; TICKET_NONCE_LEN];
@@ -347,21 +348,21 @@ pub fn build_directory_v3(entries: &[([u8; 32], PresenceTicket, u8)]) -> Vec<u8>
 /// over the legacy v2-only `parse_directory`.
 pub fn parse_directory_v3(bytes: &[u8]) -> Result<Vec<([u8; 32], PresenceTicket, u8)>, DriftError> {
     if bytes.len() < DIRECTORY_HEADER_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let version = bytes[0];
     let entry_len = match version {
         DIRECTORY_VERSION_V2 => DIRECTORY_ENTRY_LEN,
         DIRECTORY_VERSION_V3 => DIRECTORY_ENTRY_V3_LEN,
-        _ => return Err(DriftError::DecodeError),
+        _ => return Err(CodecError::Malformed.into()),
     };
     if bytes[1] != 0 {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
     let expected_len = DIRECTORY_HEADER_LEN + count * entry_len;
     if bytes.len() != expected_len {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
@@ -462,11 +463,11 @@ pub fn parse_directory_v4(
     bytes: &[u8],
 ) -> Result<(Vec<([u8; 32], PresenceTicket, u8)>, Option<DpBloomFilter>), DriftError> {
     if bytes.len() < DIRECTORY_HEADER_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let version = bytes[0];
     if bytes[1] != 0 {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
     match version {
@@ -478,7 +479,7 @@ pub fn parse_directory_v4(
         DIRECTORY_VERSION_V4 => {
             let entries_end = DIRECTORY_HEADER_LEN + count * DIRECTORY_ENTRY_V3_LEN;
             if bytes.len() < entries_end + 2 {
-                return Err(DriftError::DecodeError);
+                return Err(CodecError::Malformed.into());
             }
             let mut entries = Vec::with_capacity(count);
             for i in 0..count {
@@ -493,13 +494,13 @@ pub fn parse_directory_v4(
                 u16::from_be_bytes([bytes[entries_end], bytes[entries_end + 1]]) as usize;
             if filter_bytes_len == 0 {
                 if bytes.len() != entries_end + 2 {
-                    return Err(DriftError::DecodeError);
+                    return Err(CodecError::Malformed.into());
                 }
                 return Ok((entries, None));
             }
             let expected = entries_end + 2 + filter_bytes_len + 1 + BLOOM_SALT_LEN;
             if bytes.len() != expected {
-                return Err(DriftError::DecodeError);
+                return Err(CodecError::Malformed.into());
             }
             let bits_start = entries_end + 2;
             let bits = bytes[bits_start..bits_start + filter_bytes_len].to_vec();
@@ -513,7 +514,7 @@ pub fn parse_directory_v4(
             let m_bytes = filter_bytes_len;
             let m_bits = (m_bytes * 8) as u16;
             if m_bits == 0 || k == 0 {
-                return Err(DriftError::DecodeError);
+                return Err(CodecError::Malformed.into());
             }
             Ok((
                 entries,
@@ -525,7 +526,7 @@ pub fn parse_directory_v4(
                 }),
             ))
         }
-        _ => Err(DriftError::DecodeError),
+        _ => Err(CodecError::Malformed.into()),
     }
 }
 
@@ -539,22 +540,22 @@ pub fn parse_directory_v4(
 /// and can apply per-entry metrics).
 pub fn parse_directory(bytes: &[u8]) -> Result<Vec<([u8; 32], PresenceTicket)>, DriftError> {
     if bytes.len() < DIRECTORY_HEADER_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     if bytes[0] != DIRECTORY_VERSION {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     // Reserved byte must be 0 — any other value is non-conforming
     // and reserved for future protocol extensions. Reject rather
     // than silently accept so build∘parse stays an identity and
     // future-version peers get a clean version bump signal.
     if bytes[1] != 0 {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
     let expected_len = DIRECTORY_HEADER_LEN + count * DIRECTORY_ENTRY_LEN;
     if bytes.len() != expected_len {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut out = Vec::with_capacity(count);
     for i in 0..count {

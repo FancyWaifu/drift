@@ -50,7 +50,7 @@
 //!   [40..72]   bridge_pub          (emitting bridge — for cache eviction matching)
 //! ```
 
-use crate::error::{DriftError, Result};
+use crate::error::{CodecError, DriftError, Result};
 use crate::transport::federated::{
     decode_ticket, encode_ticket, PresenceTicket, TICKET_LEN, TICKET_NONCE_LEN,
 };
@@ -190,14 +190,14 @@ pub fn build_find_peer(q: &FindPeer) -> Vec<u8> {
 /// on the wire).
 pub fn parse_find_peer(bytes: &[u8]) -> Result<FindPeer> {
     if bytes.len() != FIND_PEER_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut target_client_pub = [0u8; 32];
     target_client_pub.copy_from_slice(&bytes[0..32]);
     let query_id = u64::from_be_bytes(bytes[32..40].try_into().unwrap());
     let ttl = bytes[40];
     if ttl == 0 {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut originator_bridge = [0u8; 32];
     originator_bridge.copy_from_slice(&bytes[41..73]);
@@ -278,7 +278,7 @@ pub fn build_find_peer_hashed(q: &FindPeerHashed) -> Vec<u8> {
 /// and `ttl == 0`.
 pub fn parse_find_peer_hashed(bytes: &[u8]) -> Result<FindPeerHashed> {
     if bytes.len() != FIND_PEER_HASHED_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut salt = [0u8; FIND_PEER_HASHED_SALT_LEN];
     salt.copy_from_slice(&bytes[0..16]);
@@ -287,7 +287,7 @@ pub fn parse_find_peer_hashed(bytes: &[u8]) -> Result<FindPeerHashed> {
     let query_id = u64::from_be_bytes(bytes[48..56].try_into().unwrap());
     let ttl = bytes[56];
     if ttl == 0 {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut originator_bridge = [0u8; 32];
     originator_bridge.copy_from_slice(&bytes[57..89]);
@@ -354,18 +354,18 @@ pub fn build_peer_here(reply: &PeerHere) -> Vec<u8> {
 /// outside `1..=MAX_FIND_TTL`, and any extra trailing bytes.
 pub fn parse_peer_here(bytes: &[u8]) -> Result<PeerHere> {
     if bytes.len() < PEER_HERE_HEADER_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut target_client_pub = [0u8; 32];
     target_client_pub.copy_from_slice(&bytes[0..32]);
     let query_id = u64::from_be_bytes(bytes[32..40].try_into().unwrap());
     let path_len = bytes[40] as usize;
     if path_len == 0 || path_len > MAX_FIND_TTL as usize {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let expected = PEER_HERE_HEADER_LEN + path_len * PATH_ENTRY_LEN;
     if bytes.len() != expected {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut path = Vec::with_capacity(path_len);
     for i in 0..path_len {
@@ -409,7 +409,7 @@ pub fn build_peer_gone(p: &PeerGone) -> Vec<u8> {
 /// Parse a `PeerGone` payload. Rejects non-canonical lengths.
 pub fn parse_peer_gone(bytes: &[u8]) -> Result<PeerGone> {
     if bytes.len() != PEER_GONE_LEN {
-        return Err(DriftError::DecodeError);
+        return Err(CodecError::Malformed.into());
     }
     let mut client_pub = [0u8; 32];
     client_pub.copy_from_slice(&bytes[0..32]);
