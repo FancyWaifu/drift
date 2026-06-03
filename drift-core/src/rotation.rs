@@ -42,7 +42,7 @@
 //! bytes. The XEdDSA construction signs this body with OLD's
 //! secret; verification recovers it using OLD's public key.
 
-use crate::error::{DriftError, Result};
+use crate::error::Result;
 use crate::xeddsa::{sign as xeddsa_sign, verify as xeddsa_verify, XEDDSA_SIG_LEN};
 
 /// Reasonable upper bound on how stale a freshly-issued
@@ -149,9 +149,11 @@ pub fn verify(announce: &RotationAnnounce) -> Result<()> {
 /// against a different key.
 pub fn verify_against(announce: &RotationAnnounce, expected_old_pub: &[u8; 32]) -> Result<()> {
     if &announce.old_pub != expected_old_pub {
-        // Same semantic as XEdDSA returning `AuthFailed`: the
-        // announce doesn't match the identity the caller expected.
-        return Err(DriftError::AuthFailed);
+        // The announce's embedded old_pub doesn't match what
+        // the caller expected — same semantic as a signature
+        // verification failure: the message isn't from who
+        // we wanted to hear from.
+        return Err(crate::error::CryptoError::SignatureInvalid.into());
     }
     verify(announce)
 }

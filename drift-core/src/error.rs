@@ -81,7 +81,29 @@
 //!     fix PR rather than being folded into PeerError. Each
 //!     `PeerError` variant maps back to `DriftError::UnknownPeer`
 //!     until slice 5 collapses the flat variant.
-//!   * **Slice 5 (this PR):** first step of umbrella collapse.
+//!   * **Slice 7 (this PR):** migrates the 30 remaining
+//!     `DriftError::AuthFailed` produce sites to typed sub-errors.
+//!     Adds `CryptoError::KeyExchangeFailed` (X25519 low-order
+//!     pubkey rejection, ML-KEM encap/decap failure),
+//!     `PeerError::TicketExpired` (presence + resumption ticket
+//!     TTL exhaustion), and `PeerError::SenderNotInFederationTable`
+//!     (incoming federation packet from a non-allowlisted bridge).
+//!     Distribution: ~18 sites → `CryptoError` (KeyExchangeFailed
+//!     ×13, SignatureInvalid ×4, AeadAuthFailed ×1), ~13 sites →
+//!     `PeerError` (SenderNotInFederationTable ×7, TicketExpired
+//!     ×3, ResumptionTicketNotFound ×3), 1 site → `CodecError`
+//!     (malformed ticket blob). The flat `AuthFailed` variant
+//!     stays in `DriftError` (no producers but the variant is
+//!     kept for one more slice to allow consumer migration).
+//!     Slice 8 drops it.
+//!   * **Slice 6 (PR #32, merged):** mechanical migration of 32
+//!     flat-variant producers — 28 × `DecodeError` →
+//!     `CodecError::Malformed`, 3 × `QueueFull` →
+//!     `SessionError::QueueFull`, 1 × `HandshakeExhausted` →
+//!     `SessionError::HandshakeExhausted`. Public behavior
+//!     unchanged because the `From` impls still target the
+//!     legacy flat variants.
+//!   * **Slice 5 (PR #31, merged):** first step of umbrella collapse.
 //!     Adds `Crypto(CryptoError)` and `Peer(PeerError)` wrapper
 //!     variants to `DriftError` (with `#[from]`-generated
 //!     conversions) and drops the flat `UnknownPeer` and
@@ -207,6 +229,19 @@ pub mod crypto {
         /// dropped without further processing.
         #[error("replay detected at seq {seq}")]
         Replay { seq: u32 },
+
+        /// A key-exchange primitive rejected the input:
+        /// X25519 DH against a low-order or zero ephemeral
+        /// pubkey, ML-KEM-768 decapsulation failure, or
+        /// ML-KEM encapsulation against malformed ek bytes.
+        /// Either an off-path attacker tried to feed us a
+        /// known-bad key share to force a session-key
+        /// vulnerability, or the peer's identity material
+        /// is corrupted. Either way, abort the handshake.
+        /// Slice 7 introduced this variant — used to be
+        /// the flat `DriftError::AuthFailed` umbrella.
+        #[error("key-exchange primitive rejected the input")]
+        KeyExchangeFailed,
     }
 }
 
@@ -316,6 +351,31 @@ pub mod peer {
         /// *ticket* is missing.
         #[error("no valid resumption ticket for this peer")]
         ResumptionTicketNotFound,
+
+        /// A ticket (presence ticket or resumption ticket) has
+        /// passed its expiry timestamp. Distinct from
+        /// [`ResumptionTicketNotFound`](Self::ResumptionTicketNotFound)
+        /// because here we *had* a ticket but the bridge or
+        /// app advanced past its TTL — the recovery is to
+        /// re-issue, not to "fall back to a full handshake."
+        /// Slice 7 introduced this variant — used to be the
+        /// flat `DriftError::AuthFailed` umbrella for these
+        /// expiry checks.
+        #[error("ticket expired")]
+        TicketExpired,
+
+        /// An incoming federation packet (FederationDirectory,
+        /// FindPeer, PeerHere, PeerGone, …) carries a sender
+        /// pubkey that is not in our local `federation_table`
+        /// — i.e., this peer is not a recognized authenticated
+        /// federation bridge. We must drop the packet rather
+        /// than acting on it. Distinct from
+        /// [`NotRegistered`](Self::NotRegistered) which is
+        /// about the *peer table* — this is about the smaller
+        /// allow-listed federation-bridge set. Slice 7
+        /// introduced this variant.
+        #[error("sender is not a recognized federation bridge")]
+        SenderNotInFederationTable,
     }
 }
 

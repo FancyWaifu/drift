@@ -21,7 +21,7 @@
 //!   [130..]    payload (payload_len bytes)
 //! ```
 
-use crate::error::{CodecError, DriftError};
+use crate::error::{CodecError, DriftError, PeerError};
 
 /// Fixed header length (everything before the variable payload).
 pub const FED_HEADER_LEN: usize = 32 + 32 + 32 + 32 + 2;
@@ -209,11 +209,11 @@ pub fn verify_ticket(
     now_ms: u64,
 ) -> Result<(), DriftError> {
     if ticket.expiry_ms <= now_ms {
-        return Err(DriftError::AuthFailed);
+        return Err(PeerError::TicketExpired.into());
     }
     let msg = ticket_signed_msg(bridge_pub, ticket.expiry_ms, &ticket.nonce);
-    // `?` converts the crypto-layer `CryptoError::SignatureInvalid`
-    // into the umbrella `DriftError::AuthFailed`.
+    // `?` lifts `CryptoError::SignatureInvalid` from xeddsa::verify
+    // into `DriftError::Crypto(_)`.
     drift_core::xeddsa::verify(client_pub, &msg, &ticket.sig)?;
     Ok(())
 }
