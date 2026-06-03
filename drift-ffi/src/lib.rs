@@ -33,7 +33,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 use drift::identity::Identity;
-use drift::{Direction, Received, Transport};
+use drift::transport::Received;
+use drift::{Direction, Transport};
 use once_cell::sync::Lazy;
 use std::ffi::CStr;
 use std::net::SocketAddr;

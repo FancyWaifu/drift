@@ -11,17 +11,19 @@
 // allow crate-wide for now.
 #![allow(clippy::type_complexity)]
 
-// Re-export platform-independent core modules.
+// Re-export platform-independent core modules. Phase 3 of the
+// API lock-down dropped `fec`, `pq`, and `time` from the public
+// re-export surface — none had any external consumer through
+// the `drift::*` path. They remain accessible via
+// `drift_core::*` directly for anything that legitimately needs
+// them.
 pub use drift_core::crypto;
 pub use drift_core::directory;
 pub use drift_core::error;
-pub use drift_core::fec;
 pub use drift_core::header;
 pub use drift_core::identity;
-pub use drift_core::pq;
 pub use drift_core::session;
 pub use drift_core::short_header;
-pub use drift_core::time;
 
 // Platform-specific modules (tokio).
 pub mod contacts;
@@ -50,9 +52,14 @@ pub mod wire_onion;
 #[cfg(feature = "iroh")]
 pub mod wire_iroh;
 
-// Convenience re-exports.
-pub use drift_core::{derive_peer_id, Direction, PeerId, SessionKey, KEY_LEN, PEER_ID_LEN};
+// Convenience re-exports. Phase 3 of the API lock-down trimmed
+// the top-level surface to items with actual external uses
+// through the `drift::*` path. Items still reachable but no
+// longer at the top level can be imported from their containing
+// module (e.g. `drift::crypto::KEY_LEN`,
+// `drift::transport::Metrics`).
+pub use drift_core::Identity;
+pub use drift_core::{derive_peer_id, Direction, PeerId, SessionKey};
 pub use drift_core::{DriftError, Result};
 pub use drift_core::{Header, PacketType, HEADER_LEN};
-pub use drift_core::{Identity, STATIC_KEY_LEN};
-pub use transport::{FindPeerMode, Metrics, Received, Transport, TransportConfig, MAX_PAYLOAD};
+pub use transport::{Transport, TransportConfig, MAX_PAYLOAD};
