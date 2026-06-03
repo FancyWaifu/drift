@@ -263,10 +263,12 @@ async fn import_with_corrupted_blob_rejected() {
         .await
         .expect_err("truncated blob must be rejected");
     // Slice 7 migrated the malformed-blob reject from
-    // the flat `AuthFailed` to `CodecError::Malformed`,
-    // which under the current `From<CodecError>` impl
-    // surfaces as `DriftError::DecodeError`. A future
-    // slice that adds a `Codec(CodecError)` wrapper will
-    // change this assertion accordingly.
-    assert!(matches!(err, DriftError::DecodeError));
+    // the flat `AuthFailed` to `CodecError::Malformed`;
+    // slice 8 added the `Codec(CodecError)` wrapper and
+    // dropped the flat `DecodeError` variant, so the
+    // error now surfaces as `DriftError::Codec(_)`.
+    assert!(matches!(
+        err,
+        DriftError::Codec(drift::error::CodecError::Malformed)
+    ));
 }

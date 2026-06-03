@@ -33,7 +33,7 @@
 
 use super::Inner;
 use crate::crypto::{Direction, PeerId, SessionKey};
-use crate::error::{CryptoError, DriftError, PeerError, Result};
+use crate::error::{CodecError, CryptoError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::identity::{Identity, NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::{HandshakeState, PendingResumption, PrevSession};
@@ -412,10 +412,11 @@ impl Inner {
         };
 
         if plaintext.len() != TICKET_PLAINTEXT_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: plaintext.len(),
                 need: TICKET_PLAINTEXT_LEN,
-            });
+            }
+            .into());
         }
         let mut ticket_id = [0u8; TICKET_ID_LEN];
         ticket_id.copy_from_slice(&plaintext[..TICKET_ID_LEN]);
@@ -544,10 +545,11 @@ impl Inner {
         src: SocketAddr,
     ) -> Result<()> {
         if body.len() < RESUME_HELLO_BODY_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: body.len(),
                 need: RESUME_HELLO_BODY_LEN,
-            });
+            }
+            .into());
         }
         if header.dst_id != self.local_peer_id {
             return Err(PeerError::WrongDestination.into());
@@ -739,10 +741,11 @@ impl Inner {
     /// previously authenticated.
     pub(crate) async fn handle_resume_ack(&self, header: &Header, body: &[u8]) -> Result<()> {
         if body.len() < RESUME_ACK_BODY_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: body.len(),
                 need: RESUME_ACK_BODY_LEN,
-            });
+            }
+            .into());
         }
         let mut server_eph_pub = [0u8; STATIC_KEY_LEN];
         server_eph_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);

@@ -2900,10 +2900,11 @@ impl Inner {
             let aad = canonical_aad(&hbuf);
             let salt_bytes = old_rx.open(header.seq, PacketType::RekeyRequest as u8, &aad, body)?;
             if salt_bytes.len() != 32 {
-                return Err(DriftError::PacketTooShort {
+                return Err(CodecError::PacketTooShort {
                     got: salt_bytes.len(),
                     need: 32,
-                });
+                }
+                .into());
             }
             let mut salt = [0u8; 32];
             salt.copy_from_slice(&salt_bytes);
@@ -3122,10 +3123,11 @@ impl Inner {
         coalesce_group: u32,
     ) -> Result<()> {
         if payload.len() > MAX_PAYLOAD {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: MAX_PAYLOAD,
                 need: payload.len(),
-            });
+            }
+            .into());
         }
 
         // Federated-peer short-circuit: if this peer was added
@@ -5598,15 +5600,19 @@ impl Inner {
                         Ok(None) => {}
                         Err(e) => {
                             // AEAD-tag-mismatch on the short-header
-                            // data path: SessionKey::open returns
-                            // `DriftError::AuthFailed`. Only this
-                            // flat variant bumps `auth_failures`
-                            // here — typed `Crypto(_)` producers
-                            // explicitly bump at the produce site,
-                            // and broadening this arm caused mid-
+                            // data path: `SessionKey::open` returns
+                            // `CryptoError::AeadAuthFailed` (slice 8
+                            // dropped the flat `AuthFailed` variant
+                            // and `SessionKey::open` was migrated to
+                            // the typed form). Only this specific
+                            // variant bumps `auth_failures` —
+                            // broadening to `Crypto(_)` caused mid-
                             // stream-rekey timing flakes on slow
-                            // CI runners.
-                            if matches!(e, DriftError::AuthFailed) {
+                            // CI runners (see slice 7 history).
+                            if matches!(
+                                e,
+                                DriftError::Crypto(drift_core::error::CryptoError::AeadAuthFailed,),
+                            ) {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
                             if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
@@ -5647,14 +5653,14 @@ impl Inner {
                             }
                             // AEAD-tag-mismatch on the data path
                             // (SessionKey::open returns
-                            // DriftError::AuthFailed). Producers
-                            // of typed `Crypto(_)` errors at non-
-                            // data-path sites (HELLO low-order,
-                            // sig-verify, etc.) explicitly bump
-                            // `auth_failures` at the produce site
-                            // before returning, so they don't
-                            // need an arm here.
-                            DriftError::AuthFailed => {
+                            // CryptoError::AeadAuthFailed since
+                            // slice 8). Producers of typed
+                            // `Crypto(_)` errors at non-data-path
+                            // sites (HELLO low-order, sig-verify,
+                            // etc.) explicitly bump `auth_failures`
+                            // at the produce site before returning,
+                            // so they don't need an arm here.
+                            DriftError::Crypto(drift_core::error::CryptoError::AeadAuthFailed) => {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
                             DriftError::DeadlineExpired => {
@@ -5865,10 +5871,11 @@ impl Inner {
         iface_idx: usize,
     ) -> Result<Option<Received>> {
         if data.len() < HEADER_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: data.len(),
                 need: HEADER_LEN,
-            });
+            }
+            .into());
         }
         let header = Header::decode(&data[..HEADER_LEN])?;
         let body = &data[HEADER_LEN..];
@@ -6136,10 +6143,11 @@ impl Inner {
         iface_idx: usize,
     ) -> Result<()> {
         if body.len() < HELLO_PAYLOAD_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: body.len(),
                 need: HELLO_PAYLOAD_LEN,
-            });
+            }
+            .into());
         }
         if header.dst_id != self.local_peer_id {
             return Err(PeerError::WrongDestination.into());
@@ -6192,10 +6200,11 @@ impl Inner {
         }
         let pq_client_ek: Option<Vec<u8>> = if pq_requested {
             if body.len() < HELLO_PAYLOAD_LEN + HELLO_PQ_TAIL_LEN {
-                return Err(DriftError::PacketTooShort {
+                return Err(CodecError::PacketTooShort {
                     got: body.len(),
                     need: HELLO_PAYLOAD_LEN + HELLO_PQ_TAIL_LEN,
-                });
+                }
+                .into());
             }
             let ek_start = body.len() - HELLO_PQ_TAIL_LEN;
             Some(body[ek_start..].to_vec())
@@ -6494,10 +6503,11 @@ impl Inner {
 
     async fn handle_hello_ack(&self, header: &Header, body: &[u8]) -> Result<()> {
         if body.len() < HELLO_ACK_PAYLOAD_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: body.len(),
                 need: HELLO_ACK_PAYLOAD_LEN,
-            });
+            }
+            .into());
         }
         // Phase PQ: if the server signaled `FLAG_PQ_HYBRID`,
         // the body has an ML-KEM-768 ciphertext appended after
@@ -6508,10 +6518,11 @@ impl Inner {
         let pq_ct: Option<&[u8]> = if server_pq {
             let need = HELLO_ACK_PAYLOAD_LEN + HELLO_ACK_PQ_TAIL_LEN;
             if body.len() < need {
-                return Err(DriftError::PacketTooShort {
+                return Err(CodecError::PacketTooShort {
                     got: body.len(),
                     need,
-                });
+                }
+                .into());
             }
             let ct_start = HELLO_ACK_PAYLOAD_LEN;
             Some(&body[ct_start..ct_start + HELLO_ACK_PQ_TAIL_LEN])

@@ -74,19 +74,25 @@ pub enum DriftResultCode {
 }
 
 fn map_err(e: drift::error::DriftError) -> DriftResultCode {
-    use drift::error::DriftError as E;
+    use drift::error::{DriftError as E, SessionError};
     use DriftResultCode::*;
     match e {
         // Slice 5 dropped the flat `UnknownPeer` variant in favor of
-        // the `Peer(PeerError)` wrapper. The FFI result code stays
-        // the same regardless of which `PeerError` variant fired,
-        // so we collapse them all to `DRIFT_ERR_UNKNOWN_PEER` here.
+        // the `Peer(PeerError)` wrapper. Slice 8 finished the
+        // collapse by replacing the remaining flat variants with
+        // sub-error wrappers. The FFI result codes collapse each
+        // wrapper's variants to a single code since C callers
+        // don't distinguish at this level.
         E::Peer(_) => DRIFT_ERR_UNKNOWN_PEER,
-        E::AuthFailed => DRIFT_ERR_AUTH_FAILED,
-        E::PacketTooShort { .. } => DRIFT_ERR_PACKET_TOO_SHORT,
-        E::SessionExhausted => DRIFT_ERR_SESSION_EXHAUSTED,
-        E::HandshakeExhausted => DRIFT_ERR_HANDSHAKE_EXHAUSTED,
-        E::QueueFull => DRIFT_ERR_QUEUE_FULL,
+        E::Crypto(_) => DRIFT_ERR_AUTH_FAILED,
+        // Both `PacketTooShort` and other codec failures
+        // (Malformed, UnknownType, …) collapse to the same FFI
+        // code — `DRIFT_ERR_PACKET_TOO_SHORT` is historical
+        // naming for "codec/framing problem."
+        E::Codec(_) => DRIFT_ERR_PACKET_TOO_SHORT,
+        E::Session(SessionError::SessionExhausted) => DRIFT_ERR_SESSION_EXHAUSTED,
+        E::Session(SessionError::HandshakeExhausted) => DRIFT_ERR_HANDSHAKE_EXHAUSTED,
+        E::Session(SessionError::QueueFull) => DRIFT_ERR_QUEUE_FULL,
         E::Io(_) => DRIFT_ERR_IO,
         _ => DRIFT_ERR_INTERNAL,
     }

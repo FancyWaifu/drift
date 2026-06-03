@@ -77,8 +77,11 @@ async fn seq_ceiling_refuses_send_before_wraparound() {
         .await
         .expect_err("should refuse to send past seq ceiling");
     assert!(
-        matches!(err, DriftError::SessionExhausted),
-        "expected SessionExhausted, got {:?}",
+        matches!(
+            err,
+            DriftError::Session(drift::error::SessionError::SessionExhausted)
+        ),
+        "expected Session(SessionExhausted), got {:?}",
         err
     );
 }

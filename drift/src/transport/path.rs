@@ -12,7 +12,7 @@
 //! don't have.
 
 use super::{cookies::ct_eq, Inner};
-use crate::error::{DriftError, PeerError, Result, SessionError};
+use crate::error::{CodecError, PeerError, Result, SessionError};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::session::{HandshakeState, PathProbe, Peer};
 use crate::PeerId;
@@ -216,10 +216,11 @@ impl Inner {
             let aad = canonical_aad(&hbuf);
             let challenge = rx.open(header.seq, PacketType::PathChallenge as u8, &aad, body)?;
             if challenge.len() != PATH_CHALLENGE_LEN {
-                return Err(DriftError::PacketTooShort {
+                return Err(CodecError::PacketTooShort {
                     got: challenge.len(),
                     need: PATH_CHALLENGE_LEN,
-                });
+                }
+                .into());
             }
             let mut challenge_bytes = [0u8; PATH_CHALLENGE_LEN];
             challenge_bytes.copy_from_slice(&challenge);

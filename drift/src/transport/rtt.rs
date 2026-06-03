@@ -37,7 +37,7 @@
 
 use super::Inner;
 use crate::crypto::PeerId;
-use crate::error::{DriftError, PeerError, Result};
+use crate::error::{CodecError, PeerError, Result};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use crate::session::HandshakeState;
 use std::net::SocketAddr;
@@ -158,10 +158,11 @@ impl Inner {
             let aad = canonical_aad(&hbuf);
             let nonce_vec = rx.open(header.seq, PacketType::Ping as u8, &aad, body)?;
             if nonce_vec.len() != PING_NONCE_LEN {
-                return Err(DriftError::PacketTooShort {
+                return Err(CodecError::PacketTooShort {
                     got: nonce_vec.len(),
                     need: PING_NONCE_LEN,
-                });
+                }
+                .into());
             }
             let mut nonce = [0u8; PING_NONCE_LEN];
             nonce.copy_from_slice(&nonce_vec);
