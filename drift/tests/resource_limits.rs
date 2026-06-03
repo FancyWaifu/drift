@@ -95,8 +95,14 @@ async fn pending_queue_flood_bounded() {
 
     let err = terminal_err.expect("expected send_data to error out eventually");
     assert!(
-        matches!(err, DriftError::QueueFull | DriftError::HandshakeExhausted),
-        "expected QueueFull or HandshakeExhausted, got {:?}",
+        matches!(
+            err,
+            DriftError::Session(
+                drift::error::SessionError::QueueFull
+                    | drift::error::SessionError::HandshakeExhausted,
+            )
+        ),
+        "expected Session(QueueFull) or Session(HandshakeExhausted), got {:?}",
         err
     );
     assert!(

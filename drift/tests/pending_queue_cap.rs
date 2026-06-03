@@ -52,8 +52,11 @@ async fn pending_queue_full_stops_memory_growth() {
     }
     let (attempt, err) = last_err.expect("expected an error eventually");
     assert!(
-        matches!(err, DriftError::QueueFull),
-        "expected QueueFull, got {:?} at attempt {}",
+        matches!(
+            err,
+            DriftError::Session(drift::error::SessionError::QueueFull)
+        ),
+        "expected Session(QueueFull), got {:?} at attempt {}",
         err,
         attempt
     );
@@ -109,8 +112,11 @@ async fn handshake_exhausted_returns_fast_error() {
         .await
         .expect_err("expected error");
     assert!(
-        matches!(err, DriftError::HandshakeExhausted),
-        "expected HandshakeExhausted, got {:?}",
+        matches!(
+            err,
+            DriftError::Session(drift::error::SessionError::HandshakeExhausted)
+        ),
+        "expected Session(HandshakeExhausted), got {:?}",
         err
     );
 }

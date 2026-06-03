@@ -1,4 +1,4 @@
-use crate::error::{DriftError, Result};
+use crate::error::{CodecError, CryptoError, Result};
 use crate::header::AUTH_TAG_LEN;
 use blake2::{digest::consts::U8, Blake2b, Digest};
 use siphasher::sip128::{Hasher128, SipHasher24};
@@ -163,7 +163,7 @@ impl SessionKey {
         let tag = self
             .key
             .seal_in_place_separate_tag(nonce, RingAad::from(aad), &mut out)
-            .map_err(|_| DriftError::AuthFailed)?;
+            .map_err(|_| CryptoError::AeadAuthFailed)?;
         out.extend_from_slice(tag.as_ref());
         Ok(out)
     }
@@ -186,7 +186,7 @@ impl SessionKey {
         let tag = self
             .key
             .seal_in_place_separate_tag(nonce, RingAad::from(aad), &mut out[start..])
-            .map_err(|_| DriftError::AuthFailed)?;
+            .map_err(|_| CryptoError::AeadAuthFailed)?;
         out.extend_from_slice(tag.as_ref());
         Ok(())
     }
@@ -200,10 +200,11 @@ impl SessionKey {
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
         if ciphertext.len() < AUTH_TAG_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: ciphertext.len(),
                 need: AUTH_TAG_LEN,
-            });
+            }
+            .into());
         }
         // Ring opens in-place and returns a slice of the plaintext
         // portion of the buffer. Copy in, open, truncate to the
@@ -213,7 +214,7 @@ impl SessionKey {
         let pt_len = self
             .key
             .open_in_place(nonce, RingAad::from(aad), &mut buf)
-            .map_err(|_| DriftError::AuthFailed)?
+            .map_err(|_| CryptoError::AeadAuthFailed)?
             .len();
         buf.truncate(pt_len);
         Ok(buf)
@@ -250,7 +251,7 @@ impl SessionKey {
                     aad,
                 },
             )
-            .map_err(|_| DriftError::AuthFailed)
+            .map_err(|_| CryptoError::AeadAuthFailed.into())
     }
 
     pub fn seal_into(
@@ -267,7 +268,7 @@ impl SessionKey {
         let tag = self
             .cipher
             .encrypt_in_place_detached(&nonce, aad, &mut out[start..])
-            .map_err(|_| DriftError::AuthFailed)?;
+            .map_err(|_| CryptoError::AeadAuthFailed)?;
         out.extend_from_slice(&tag);
         Ok(())
     }
@@ -280,10 +281,11 @@ impl SessionKey {
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
         if ciphertext.len() < AUTH_TAG_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: ciphertext.len(),
                 need: AUTH_TAG_LEN,
-            });
+            }
+            .into());
         }
         let nonce = self.nonce_for(seq, packet_type);
         self.cipher
@@ -294,7 +296,7 @@ impl SessionKey {
                     aad,
                 },
             )
-            .map_err(|_| DriftError::AuthFailed)
+            .map_err(|_| CryptoError::AeadAuthFailed.into())
     }
 }
 

@@ -81,7 +81,24 @@
 //!     fix PR rather than being folded into PeerError. Each
 //!     `PeerError` variant maps back to `DriftError::UnknownPeer`
 //!     until slice 5 collapses the flat variant.
-//!   * **Slice 7 (this PR):** migrates the 30 remaining
+//!   * **Slice 8 (this PR):** final umbrella collapse. Adds
+//!     `Codec(CodecError)` and `Session(SessionError)` wrapper
+//!     variants to `DriftError` via `#[from]`. Migrates the 15
+//!     remaining `DriftError::PacketTooShort` produce sites to
+//!     `CodecError::PacketTooShort`. Drops the flat
+//!     `PacketTooShort`, `UnknownType`, `UnsupportedVersion`,
+//!     `LengthMismatch`, `DecodeError`, `AuthFailed`, `QueueFull`,
+//!     `HandshakeExhausted`, and `SessionExhausted` variants —
+//!     every one had zero producers after slices 5–7. After this
+//!     slice `DriftError` consists of exactly four sub-error
+//!     wrappers (`Codec`, `Crypto`, `Session`, `Peer`) plus four
+//!     cross-layer leaves (`Io`, `DeadlineExpired`,
+//!     `PeerIdCollision`, `PayloadTooLarge`). Consumers that
+//!     matched on the flat variants have been updated to
+//!     destructure the wrapper: `DriftError::HandshakeExhausted`
+//!     → `DriftError::Session(SessionError::HandshakeExhausted)`,
+//!     etc.
+//!   * **Slice 7 (PR #33, merged):** migrates the 30 remaining
 //!     `DriftError::AuthFailed` produce sites to typed sub-errors.
 //!     Adds `CryptoError::KeyExchangeFailed` (X25519 low-order
 //!     pubkey rejection, ML-KEM encap/decap failure),
@@ -383,38 +400,32 @@ pub use peer::PeerError;
 
 #[derive(Debug, Error)]
 pub enum DriftError {
-    #[error("packet too short: got {got} bytes, need at least {need}")]
-    PacketTooShort { got: usize, need: usize },
+    /// Wrapper for codec-layer parse / framing failures. Slice 8
+    /// collapsed the flat `PacketTooShort`, `UnknownType`,
+    /// `UnsupportedVersion`, `LengthMismatch`, and `DecodeError`
+    /// variants into this wrapper — all producers across the
+    /// workspace now return `CodecError`, which `?` lifts into
+    /// `Codec(CodecError)`.
+    #[error(transparent)]
+    Codec(#[from] CodecError),
 
-    #[error("unknown packet type: {0}")]
-    UnknownType(u8),
-
-    #[error("unsupported protocol version: {0}")]
-    UnsupportedVersion(u8),
-
-    #[error("payload length mismatch: header says {header}, actual {actual}")]
-    LengthMismatch { header: usize, actual: usize },
-
-    #[error("authentication failed")]
-    AuthFailed,
-
-    #[error("deadline expired")]
-    DeadlineExpired,
-
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// Wrapper for crypto-layer failures. Slice 5 collapsed the
-    /// flat `AuthFailed` umbrella's `CryptoError`-sourced cases
-    /// into this wrapper: `xeddsa::verify` and
-    /// `check_and_update_replay` now produce `Crypto(CryptoError)`
-    /// via `?` instead of `AuthFailed` / `Replay`. The flat
-    /// `AuthFailed` variant still exists for the 30+ unmigrated
-    /// non-CryptoError producers (resumption ticket validation,
-    /// find_peer authn checks, etc.); later slices will migrate
-    /// those and drop the flat variant.
+    /// Wrapper for crypto-layer failures. Slice 5 introduced this
+    /// wrapper and slice 7 finished the migration: `xeddsa::verify`,
+    /// `check_and_update_replay`, AEAD opens, key-exchange ops,
+    /// and signature verifications all produce `CryptoError`,
+    /// which `?` lifts into `Crypto(CryptoError)`. The previously
+    /// flat `AuthFailed` and `Replay(u32)` variants are gone.
     #[error(transparent)]
     Crypto(#[from] CryptoError),
+
+    /// Wrapper for session-lifecycle failures. Slice 8 collapsed
+    /// the flat `QueueFull`, `HandshakeExhausted`, and
+    /// `SessionExhausted` variants into this wrapper —
+    /// `Peer::next_seq_checked`, pending-queue overflow, and
+    /// handshake retry exhaustion all produce `SessionError`,
+    /// which `?` lifts into `Session(SessionError)`.
+    #[error(transparent)]
+    Session(#[from] SessionError),
 
     /// Wrapper for peer-layer failures. Slice 5 collapsed the
     /// flat `UnknownPeer` umbrella into this wrapper — all 102
@@ -426,23 +437,17 @@ pub enum DriftError {
     #[error(transparent)]
     Peer(#[from] PeerError),
 
-    /// The peer's pending-send queue is at capacity and no more
-    /// packets can be buffered until the handshake completes. The app
-    /// should back off and retry.
-    #[error("peer pending queue full")]
-    QueueFull,
+    /// Packet arrived after its `deadline_ms` window expired.
+    /// Cross-layer: the deadline check is enforced both at send
+    /// time (drop pre-emit) and on receive (drop after AEAD).
+    /// Not associated with any single protocol layer.
+    #[error("deadline expired")]
+    DeadlineExpired,
 
-    /// The peer's handshake has failed after exhausting all retries
-    /// and the session is dead. The app must reset the peer (e.g.
-    /// `add_peer` again) to attempt a fresh handshake.
-    #[error("peer handshake exhausted all retries")]
-    HandshakeExhausted,
-
-    /// The session's seq counter has reached the safety ceiling that
-    /// guards against AEAD nonce reuse. The app must tear down and
-    /// re-handshake before sending more data.
-    #[error("session seq ceiling reached — re-handshake required")]
-    SessionExhausted,
+    /// IO failure on a transport socket or file descriptor.
+    /// Cross-layer leaf; never wrapped into a sub-error.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 
     /// A `try_add_peer` call found an existing peer with the same
     /// 64-bit peer id but a different static public key. Peer ids
@@ -458,61 +463,12 @@ pub enum DriftError {
     /// expect — kept for back-compat with earlier call sites).
     #[error("payload too large: {cap} > allowed {got}")]
     PayloadTooLarge { got: usize, cap: usize },
-
-    /// Generic codec-layer parse failure. Used for the federated
-    /// envelope codec when the bytes don't match the expected
-    /// `[32][32][32][2][payload]` layout, and for `send_typed`
-    /// when called with an unsupported packet type.
-    #[error("decode error")]
-    DecodeError,
 }
 
-/// Map a codec-layer failure into the legacy flat `DriftError`
-/// variants so transitive callers using `?` keep working
-/// unchanged during the layered-error migration. New code that
-/// wants layer-specific handling should match on `CodecError`
-/// directly instead of relying on this conversion.
-impl From<CodecError> for DriftError {
-    fn from(e: CodecError) -> Self {
-        match e {
-            CodecError::PacketTooShort { got, need } => DriftError::PacketTooShort { got, need },
-            CodecError::UnknownType(v) => DriftError::UnknownType(v),
-            CodecError::UnsupportedVersion(v) => DriftError::UnsupportedVersion(v),
-            CodecError::LengthMismatch { header, actual } => {
-                DriftError::LengthMismatch { header, actual }
-            }
-            CodecError::Malformed => DriftError::DecodeError,
-        }
-    }
-}
-
-// `From<CryptoError> for DriftError` is generated by `#[from]` on
-// the `Crypto` wrapper variant — slice 5 collapsed the explicit
-// AeadAuthFailed → AuthFailed and Replay { seq } → Replay(seq)
-// mappings (the latter dropped from DriftError entirely since it
-// had no remaining direct producers).
-
-/// Map a session-lifecycle failure into the legacy flat `DriftError`
-/// variants so transitive callers using `?` keep working unchanged
-/// during the layered-error migration. The mapping is 1:1 — every
-/// `SessionError` variant has a corresponding `DriftError` variant
-/// with the same name and meaning, and a later slice removes the
-/// flat variants once no returner is left.
-impl From<SessionError> for DriftError {
-    fn from(e: SessionError) -> Self {
-        match e {
-            SessionError::SessionExhausted => DriftError::SessionExhausted,
-            SessionError::HandshakeExhausted => DriftError::HandshakeExhausted,
-            SessionError::QueueFull => DriftError::QueueFull,
-        }
-    }
-}
-
-// `From<PeerError> for DriftError` is generated by `#[from]` on
-// the `Peer` wrapper variant — slice 5 collapsed the flat
-// `UnknownPeer` variant entirely (all 102 producers migrated to
-// PeerError through slices 4a–4f). Consumers that used to match
-// on `DriftError::UnknownPeer` now match on `DriftError::Peer(_)`
-// (or destructure for finer-grained handling).
+// `From<{Codec,Crypto,Session,Peer}Error> for DriftError` are
+// all generated by `#[from]` on the respective wrapper variants.
+// Slice 8 dropped every flat variant whose semantics now live
+// inside a sub-error type, completing the umbrella collapse
+// started in slice 5.
 
 pub type Result<T> = std::result::Result<T, DriftError>;

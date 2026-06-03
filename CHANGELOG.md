@@ -79,6 +79,32 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Error types
 
+- **Slice 8: final umbrella collapse.** Completes the structured-
+  error-types arc started in slice 1. Adds `Codec(CodecError)`
+  and `Session(SessionError)` wrapper variants to `DriftError`
+  via `#[from]`, migrates the 15 remaining
+  `DriftError::PacketTooShort` produce sites and 2 `AuthFailed`
+  sites in `drift-core::crypto` (`SessionKey::open` and friends)
+  to typed sub-error variants. Drops 9 dead flat variants:
+  `PacketTooShort`, `UnknownType`, `UnsupportedVersion`,
+  `LengthMismatch`, `DecodeError` (all → `Codec(_)`), `AuthFailed`
+  (→ `Crypto(_)`), `QueueFull`, `HandshakeExhausted`,
+  `SessionExhausted` (all → `Session(_)`). After this slice
+  `DriftError` consists of exactly four sub-error wrappers
+  (`Codec`, `Crypto`, `Session`, `Peer`) plus four cross-layer
+  leaves (`Io`, `DeadlineExpired`, `PeerIdCollision`,
+  `PayloadTooLarge`). Five test assertions across
+  `pending_queue_cap.rs`, `resource_limits.rs`, `seq_ceiling.rs`,
+  `resumption.rs` updated from flat-variant matches to wrapper
+  destructuring (`DriftError::Session(SessionError::QueueFull)`,
+  `DriftError::Codec(CodecError::Malformed)`, etc.). The two
+  recv-loop metric arms in `run_recv_loop_for` migrated to match
+  `DriftError::Crypto(CryptoError::AeadAuthFailed)` instead of
+  the now-gone flat `AuthFailed`. `drift-ffi::map_err` updated
+  to destructure the wrappers. Public API impact: any external
+  consumer matching on the flat variants must switch to
+  wrapper-destructuring; the result codes from `drift-ffi` are
+  unchanged.
 - **Slice 7: AuthFailed migration to typed sub-error variants.**
   Migrates the 31 remaining `DriftError::AuthFailed` produce
   sites to typed sub-errors and introduces three new variants

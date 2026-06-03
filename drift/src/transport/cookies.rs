@@ -9,7 +9,7 @@
 
 use super::{Inner, HELLO_PAYLOAD_LEN};
 use crate::crypto::{cookie_mac, PeerId, COOKIE_MAC_LEN};
-use crate::error::{DriftError, PeerError, Result};
+use crate::error::{CodecError, PeerError, Result};
 use crate::header::{Header, PacketType, HEADER_LEN};
 use crate::identity::{NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::HandshakeState;
@@ -242,10 +242,11 @@ impl Inner {
     /// this as a retry of the same handshake.
     pub(crate) async fn handle_challenge(&self, header: &Header, body: &[u8]) -> Result<()> {
         if body.len() < COOKIE_BLOB_LEN {
-            return Err(DriftError::PacketTooShort {
+            return Err(CodecError::PacketTooShort {
                 got: body.len(),
                 need: COOKIE_BLOB_LEN,
-            });
+            }
+            .into());
         }
         if header.dst_id != self.local_peer_id {
             return Err(PeerError::WrongDestination.into());
