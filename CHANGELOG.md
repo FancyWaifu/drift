@@ -79,6 +79,21 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### API surface
 
+- **Phase 4 of public-API lock-down: drift-core sweep.** Three
+  changes: (1) the `fec` module — Reed-Solomon-over-XOR forward
+  error correction that had been dead code in the workspace
+  since before slice 1 — is removed entirely (no consumer
+  anywhere); (2) the `time` module is demoted to `pub(crate)`
+  with its `SystemTime` + `UNIX_EPOCH` exports dropped (only
+  `Duration` and `Instant` are used inside drift-core); (3) the
+  top-level convenience re-exports in `drift-core/src/lib.rs`
+  are trimmed from 13 items to 4 (`derive_peer_id`, `PeerId`,
+  `Identity`, `Zeroizing`) — `Direction`, `SessionKey`,
+  `KEY_LEN`, `PEER_ID_LEN`, `DriftError`, `Result`, `Header`,
+  `PacketType`, `HEADER_LEN`, `STATIC_KEY_LEN` had zero external
+  consumers through `drift_core::*` and remain reachable via
+  their module paths. The drift crate's `lib.rs` was updated to
+  re-export those from module paths instead.
 - **Phase 3 of public-API lock-down: 9 items removed from the
   top-level `drift::*` re-export surface.** This phase audits
   `drift/src/lib.rs` itself — the *intentional* public surface

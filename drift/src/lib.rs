@@ -58,8 +58,9 @@ pub mod wire_iroh;
 // longer at the top level can be imported from their containing
 // module (e.g. `drift::crypto::KEY_LEN`,
 // `drift::transport::Metrics`).
+pub use drift_core::crypto::{Direction, SessionKey};
+pub use drift_core::error::{DriftError, Result};
+pub use drift_core::header::{Header, PacketType, HEADER_LEN};
 pub use drift_core::Identity;
-pub use drift_core::{derive_peer_id, Direction, PeerId, SessionKey};
-pub use drift_core::{DriftError, Result};
-pub use drift_core::{Header, PacketType, HEADER_LEN};
+pub use drift_core::{derive_peer_id, PeerId};
 pub use transport::{Transport, TransportConfig, MAX_PAYLOAD};
