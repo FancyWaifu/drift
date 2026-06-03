@@ -79,6 +79,20 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### API surface
 
+- **Phase 6 of public-API lock-down (FINAL): drift-vpn sweep
+  (46 items).** Completes the six-phase lock-down sequence
+  designed in `docs/API_LOCKDOWN_DESIGN.md`. drift-vpn is a
+  bin-only crate (no `[lib]` section in Cargo.toml — every
+  source file is a module of the single `drift-vpn` binary)
+  with zero cross-workspace consumers. Every `pub` item in
+  adapter_probe.rs, bridge_failover.rs, config_gen.rs,
+  config.rs, daemon.rs, doctor.rs, identity.rs, install.rs,
+  metrics.rs, rotate.rs, routing.rs, status.rs was therefore an
+  unreachable leak; all 46 demoted to `pub(crate)` via the same
+  bulk treatment used for drift-bench and drift-wormhole in
+  phase 5. Public-API lock-down sequence complete: **158 items
+  locked down across phases 1–6, plus one dead module
+  (`drift-core::fec`) removed.**
 - **Phase 5 of public-API lock-down: small crates bundle (33
   items).** drift-bench, drift-wormhole, drift-mosh, drift-http,
   drift-git audited. The five small crates have zero

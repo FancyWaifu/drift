@@ -20,7 +20,7 @@ use drift_core::rotation::{self, ROTATION_ANNOUNCE_LEN, ROTATION_FRESHNESS_WINDO
 use rand::RngCore;
 
 /// Inputs for `drift-vpn rotate`.
-pub struct RotateOpts {
+pub(crate) struct RotateOpts {
     /// Path to the existing identity file. Will be left alone —
     /// the old secret is loaded, the announce is signed with it,
     /// but the file isn't modified. The user explicitly archives or
@@ -35,7 +35,7 @@ pub struct RotateOpts {
 }
 
 /// Inputs for `drift-vpn rotate-verify`.
-pub struct RotateVerifyOpts {
+pub(crate) struct RotateVerifyOpts {
     /// The announce blob — hex string or path to a file holding it.
     /// We accept both because the natural distribution channel
     /// (email, signal, paste) sometimes hands you the raw hex and
@@ -48,7 +48,7 @@ pub struct RotateVerifyOpts {
     pub expect_old_pub: String,
 }
 
-pub async fn rotate(opts: RotateOpts) -> Result<()> {
+pub(crate) async fn rotate(opts: RotateOpts) -> Result<()> {
     if opts.out.exists() {
         bail!(
             "--out path {} already exists. Refusing to overwrite — \
@@ -109,7 +109,7 @@ pub async fn rotate(opts: RotateOpts) -> Result<()> {
     Ok(())
 }
 
-pub async fn rotate_verify(opts: RotateVerifyOpts) -> Result<()> {
+pub(crate) async fn rotate_verify(opts: RotateVerifyOpts) -> Result<()> {
     let blob = load_announce_input(&opts.announce).await?;
     let bytes = hex::decode(blob.trim()).context("announce input is not valid hex")?;
     if bytes.len() != ROTATION_ANNOUNCE_LEN {

@@ -93,7 +93,7 @@ impl CheckResult {
 /// `probe`: when true, additionally attempts a real handshake
 /// against each configured peer / bridge. Catches unreachability
 /// + pubkey-mismatch failures that the static checks can't see.
-pub async fn run(config_path: &Path, probe: bool) -> Result<bool> {
+pub(crate) async fn run(config_path: &Path, probe: bool) -> Result<bool> {
     let mut results = Vec::new();
 
     // Order is deliberate — checks that gate later checks come

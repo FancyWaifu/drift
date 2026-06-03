@@ -36,7 +36,7 @@ use std::time::Duration;
 ///   * macOS:  `/var/run/drift-vpn/status.sock` — equivalent
 ///     tmpfs-style location that's actually writable.
 ///   * other:  `$TMPDIR/drift-vpn/status.sock` as a last resort.
-pub fn default_socket_path() -> PathBuf {
+pub(crate) fn default_socket_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         PathBuf::from("/var/run/drift-vpn/status.sock")
@@ -55,14 +55,14 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct StatusReport {
+pub(crate) struct StatusReport {
     pub local: LocalInfo,
     pub peers: Vec<PeerStatus>,
     pub metrics: MetricsSnapshot,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct LocalInfo {
+pub(crate) struct LocalInfo {
     pub peer_id_hex: String,
     pub pubkey_hex: String,
     pub iface: String,
@@ -78,7 +78,7 @@ pub struct LocalInfo {
 /// or not.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PeerKind {
+pub(crate) enum PeerKind {
     /// Direct peer reachable via one or more `endpoints`. Has a
     /// real DRIFT session and meaningful tx/rx/srtt.
     Direct,
@@ -95,7 +95,7 @@ pub enum PeerKind {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PeerStatus {
+pub(crate) struct PeerStatus {
     pub peer_id_hex: String,
     pub pubkey_hex: String,
     pub allowed_ips: Vec<String>,
@@ -119,7 +119,7 @@ fn default_peer_kind() -> PeerKind {
 }
 
 /// Information the daemon serves to status clients.
-pub struct StatusContext {
+pub(crate) struct StatusContext {
     pub local_pubkey: [u8; 32],
     pub local_peer_id: PeerId,
     pub iface_name: String,
@@ -131,7 +131,7 @@ pub struct StatusContext {
 }
 
 #[derive(Clone)]
-pub struct KnownPeer {
+pub(crate) struct KnownPeer {
     pub peer_id: PeerId,
     pub pubkey: [u8; 32],
     pub allowed_ips: Vec<String>,
@@ -195,7 +195,7 @@ impl StatusContext {
 /// not writable), log a warning and exit cleanly. The daemon
 /// itself stays running.
 #[cfg(unix)]
-pub async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
+pub(crate) async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
     use tokio::io::AsyncWriteExt;
 
     if let Some(parent) = path.parent() {
@@ -250,7 +250,7 @@ pub async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
 
 /// Client side: connect, read one JSON blob, parse, return.
 #[cfg(unix)]
-pub async fn fetch(path: &Path) -> Result<StatusReport> {
+pub(crate) async fn fetch(path: &Path) -> Result<StatusReport> {
     use tokio::io::AsyncReadExt;
     let mut sock = tokio::net::UnixStream::connect(path)
         .await
@@ -265,7 +265,7 @@ pub async fn fetch(path: &Path) -> Result<StatusReport> {
 }
 
 /// Pretty-print a status report (`drift-vpn status` output).
-pub fn render_human(report: &StatusReport) -> String {
+pub(crate) fn render_human(report: &StatusReport) -> String {
     let mut out = String::new();
     use std::fmt::Write;
     let _ = writeln!(
@@ -378,7 +378,7 @@ pub fn render_human(report: &StatusReport) -> String {
 ///     don't collide with anything else a node is exposing.
 ///
 /// Format ref: <https://prometheus.io/docs/instrumenting/exposition_formats/>
-pub fn render_prometheus(report: &StatusReport) -> String {
+pub(crate) fn render_prometheus(report: &StatusReport) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
@@ -579,7 +579,7 @@ pub fn render_prometheus(report: &StatusReport) -> String {
 /// rebuilds the snapshot per request, which is cheap (one
 /// peer-table walk + a handful of atomic reads).
 #[cfg(unix)]
-pub async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusContext>) {
+pub(crate) async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusContext>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = match tokio::net::TcpListener::bind(addr).await {

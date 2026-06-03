@@ -34,7 +34,7 @@ use drift_config::schema::{DriftToml, Host, VpnHost, VpnOverlay};
 use std::path::{Path, PathBuf};
 
 /// `drift-vpn config init --cidr 10.99.0.0/24`
-pub fn init(config_path: &Path, cidr: &str, mtu: u32) -> Result<()> {
+pub(crate) fn init(config_path: &Path, cidr: &str, mtu: u32) -> Result<()> {
     if !cidr.contains('/') {
         bail!("--cidr must be a CIDR like 10.99.0.0/24");
     }
@@ -64,7 +64,7 @@ pub fn init(config_path: &Path, cidr: &str, mtu: u32) -> Result<()> {
 }
 
 /// `drift-vpn config assign <host> --tun 10.99.0.1 --role hub`
-pub fn assign(config_path: &Path, host: &str, tun_addr: &str, role: &str) -> Result<()> {
+pub(crate) fn assign(config_path: &Path, host: &str, tun_addr: &str, role: &str) -> Result<()> {
     let mut doc = cfg_io::read_or_default(config_path)?;
     if !doc.hosts.contains_key(host) {
         bail!("no [hosts.{}] entry in drift.toml — add it first with `drift-config peer add` or `drift-config keygen --name {}`", host, host);
@@ -92,7 +92,7 @@ pub fn assign(config_path: &Path, host: &str, tun_addr: &str, role: &str) -> Res
 /// For every host that has BOTH a `[hosts.X]` entry and a
 /// `[vpn.X]` entry, write `out/<host>/config.toml` containing
 /// the daemon-ready config.
-pub fn gen(config_path: &Path, out_dir: &Path) -> Result<()> {
+pub(crate) fn gen(config_path: &Path, out_dir: &Path) -> Result<()> {
     let doc = cfg_io::read(config_path)?;
     let vpn = doc.vpn.as_ref().ok_or_else(|| {
         anyhow!("no [vpn] block in drift.toml — run `drift-vpn config init` first")
@@ -288,6 +288,6 @@ fn cidr_prefix_suffix(cidr: &str) -> Result<String> {
 // Identity-path helper for callers that want to know where each
 // host's identity file lives.
 #[allow(dead_code)]
-pub fn default_identity_path() -> PathBuf {
+pub(crate) fn default_identity_path() -> PathBuf {
     PathBuf::from("/etc/drift/identity.key")
 }
