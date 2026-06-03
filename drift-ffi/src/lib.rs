@@ -77,7 +77,11 @@ fn map_err(e: drift::error::DriftError) -> DriftResultCode {
     use drift::error::DriftError as E;
     use DriftResultCode::*;
     match e {
-        E::UnknownPeer => DRIFT_ERR_UNKNOWN_PEER,
+        // Slice 5 dropped the flat `UnknownPeer` variant in favor of
+        // the `Peer(PeerError)` wrapper. The FFI result code stays
+        // the same regardless of which `PeerError` variant fired,
+        // so we collapse them all to `DRIFT_ERR_UNKNOWN_PEER` here.
+        E::Peer(_) => DRIFT_ERR_UNKNOWN_PEER,
         E::AuthFailed => DRIFT_ERR_AUTH_FAILED,
         E::PacketTooShort { .. } => DRIFT_ERR_PACKET_TOO_SHORT,
         E::SessionExhausted => DRIFT_ERR_SESSION_EXHAUSTED,
