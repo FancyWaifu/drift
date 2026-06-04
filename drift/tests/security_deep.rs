@@ -217,20 +217,30 @@ async fn src_id_spoofing_rejected() {
     assert!(got.is_err(), "forged packet was delivered");
 }
 
-/// Measure the approximate CPU cost of processing unauthenticated HELLO
-/// packets. Informational — quantifies the DoS amplification risk from
-/// having no cookie challenge in the handshake.
+/// Verify that Bob handles a flood of unauthenticated HELLOs cleanly:
+///   * the recv loop keeps up (every flood packet is read off the socket
+///     and counted in `packets_received`),
+///   * Bob's transport remains responsive — a legitimate handshake after
+///     the flood completes and delivers application data within a
+///     generous timeout.
+///
+/// Also reports the achieved drop rate as test output for informational
+/// tracking. NOTE: as of writing, fake HELLOs whose body fails the
+/// pre-auth cookie / decryption check are dropped silently — no
+/// dedicated metric currently records them. The check we make here
+/// (`packets_received` advanced by ≈ATTACK_COUNT) is the only
+/// observable evidence the flood reached the transport. A future
+/// observability pass should expose a counter for these drops
+/// (tracked as a separate item).
 #[tokio::test]
 async fn cookie_dos_cost_measurement() {
     let bob = Identity::from_secret_bytes([0xE0; 32]);
-    let fake_alice_pub = [0u8; 32]; // not in trust list
     let bob_t = Transport::bind("127.0.0.1:0".parse().unwrap(), bob)
         .await
         .unwrap();
-    // Bob does NOT add fake_alice_pub — so every HELLO should be dropped
-    // at the peer-lookup stage.
-    let _ = fake_alice_pub;
     let addr = bob_t.local_addr().unwrap();
+    let bob_peer_id = bob_t.local_peer_id();
+    let recv_before = bob_t.metrics().packets_received;
 
     // Send 10k fake HELLOs and time it.
     let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -239,27 +249,70 @@ async fn cookie_dos_cost_measurement() {
     hello_bytes[1] = PacketType::Hello as u8;
     hello_bytes[30..32].copy_from_slice(&48u16.to_be_bytes());
     // dst_id = bob's peer_id
-    let bob_peer_id = bob_t.local_peer_id();
     hello_bytes[20..28].copy_from_slice(&bob_peer_id);
 
+    const ATTACK_COUNT: usize = 10_000;
     let start = Instant::now();
-    for _ in 0..10_000 {
+    for _ in 0..ATTACK_COUNT {
         attacker.send_to(&hello_bytes, addr).await.unwrap();
     }
     let elapsed = start.elapsed();
-
-    // Give Bob a moment to drain.
     tokio::time::sleep(Duration::from_millis(200)).await;
     println!(
-        "cookie_dos: sent 10k fake HELLOs in {:?}, {:.0} pps",
+        "cookie_dos: sent {} fake HELLOs in {:?}, {:.0} pps",
+        ATTACK_COUNT,
         elapsed,
-        10_000.0 / elapsed.as_secs_f64()
+        ATTACK_COUNT as f64 / elapsed.as_secs_f64()
     );
 
-    // The point of this test is to not crash / deadlock. No assertion
-    // on the rate — it's informational. But Bob should still be alive.
-    let bob_id = Identity::from_secret_bytes([0xE0; 32]);
-    let _ = bob_id;
+    // Assertion 1: Bob's recv loop kept up with the flood — every
+    // packet was read off the socket and counted in packets_received.
+    // Loopback UDP is not perfectly reliable under load, but the
+    // overwhelming majority should land. Anything below 80 % means
+    // the recv loop is wedged or the kernel buffer overflowed.
+    let recv_after = bob_t.metrics().packets_received;
+    let recv_delta = recv_after - recv_before;
+    assert!(
+        recv_delta >= (ATTACK_COUNT as u64 * 8) / 10,
+        "expected bob to receive ≥{} flood packets, got {}",
+        (ATTACK_COUNT * 8) / 10,
+        recv_delta
+    );
+
+    // Assertion 2: Bob can still complete a legitimate handshake after
+    // the flood — the recv loop didn't deadlock or starve. We do a
+    // standard alice/bob handshake against Bob's still-running transport
+    // and require the data to arrive within a generous timeout.
+    let alice = Identity::from_secret_bytes([0xE1; 32]);
+    let alice_pub = alice.public_bytes();
+    let bob_pub = bob_t.local_public();
+    bob_t
+        .add_peer(
+            alice_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            Direction::Responder,
+        )
+        .await
+        .unwrap();
+    let alice_t = Transport::bind("127.0.0.1:0".parse().unwrap(), alice)
+        .await
+        .unwrap();
+    let bob_peer = alice_t
+        .add_peer(bob_pub, addr, Direction::Initiator)
+        .await
+        .unwrap();
+    alice_t
+        .send_data(&bob_peer, b"post-flood-liveness", 0, 0)
+        .await
+        .unwrap();
+    let pkt = tokio::time::timeout(Duration::from_secs(5), bob_t.recv())
+        .await
+        .expect("bob's recv loop deadlocked after the flood")
+        .expect("bob's transport shut down after the flood");
+    assert_eq!(
+        pkt.payload, b"post-flood-liveness",
+        "post-flood handshake delivered the wrong payload"
+    );
 }
 
 /// Header authentication — flipping any byte in the header (other than
