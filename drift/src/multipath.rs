@@ -139,6 +139,7 @@ impl MultipathManager {
                 // only to direct callers of `probe_path`, who
                 // were already getting a wrong-named error.
                 self.mark_unhealthy(peer, addr).await;
+                self.transport.bump_path_probe_failed();
                 return Err(crate::error::DriftError::DeadlineExpired);
             }
             if self.transport.metrics().path_probes_succeeded > before {

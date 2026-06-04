@@ -287,6 +287,65 @@ async fn routing_loop_terminates() {
     drop(b_t);
 }
 
+/// Forwarder-amplification cap: a single datagram arriving with
+/// `hop_ttl` above MAX_INCOMING_HOP_TTL (16) must be dropped
+/// without being forwarded, AND the drop must bump
+/// `amplification_blocked` so an operator watching metrics can
+/// see the attack. Before this counter was wired up, the cap
+/// fired but only emitted a debug log — the attack was invisible
+/// in production telemetry.
+#[tokio::test]
+async fn excessive_hop_ttl_bumps_amplification_blocked() {
+    use drift::header::{Header, PacketType, HEADER_LEN};
+    use tokio::net::UdpSocket;
+
+    let probe_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bridge_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bridge_addr = bridge_sock.local_addr().unwrap();
+    drop(bridge_sock);
+
+    let bridge_id = Identity::from_secret_bytes([0xA0; 32]);
+    let bridge = Transport::bind(bridge_addr, bridge_id).await.unwrap();
+
+    // Register a phantom destination on the bridge so it WOULD
+    // forward if hop_ttl were inside the budget. This way the
+    // packet hits the same forward-decision branch the attacker
+    // is trying to exploit.
+    let phantom: [u8; 8] = [0xCC; 8];
+    bridge
+        .add_route(phantom, "127.0.0.1:1".parse().unwrap())
+        .await;
+
+    let before = bridge.metrics().amplification_blocked;
+    let before_fwd = bridge.metrics().forwarded;
+
+    // Craft a packet with hop_ttl = 200 (well above the cap of 16).
+    let mut header = Header::new(PacketType::Data, 1, [1; 8], phantom).with_hop_ttl(200);
+    header.payload_len = 16;
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+    let mut packet = hbuf.to_vec();
+    packet.extend_from_slice(&[0u8; 16 + 16]);
+
+    probe_sock.send_to(&packet, bridge_addr).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let after = bridge.metrics().amplification_blocked;
+    let after_fwd = bridge.metrics().forwarded;
+
+    assert_eq!(
+        after,
+        before + 1,
+        "amplification_blocked should advance by exactly 1 for one excessive-TTL packet (before={before}, after={after})"
+    );
+    assert_eq!(
+        after_fwd, before_fwd,
+        "packet with hop_ttl > MAX_INCOMING_HOP_TTL must NOT be forwarded"
+    );
+
+    drop(bridge);
+}
+
 /// A four-hop chain (A → R1 → R2 → R3 → B) that also asserts the
 /// per-relay `forwarded` metric: every DATA packet we send must
 /// show up as a forwarded event on EVERY intermediate relay,
