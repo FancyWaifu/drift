@@ -220,18 +220,16 @@ async fn src_id_spoofing_rejected() {
 /// Verify that Bob handles a flood of unauthenticated HELLOs cleanly:
 ///   * the recv loop keeps up (every flood packet is read off the socket
 ///     and counted in `packets_received`),
-///   * Bob's transport remains responsive — a legitimate handshake after
-///     the flood completes and delivers application data within a
-///     generous timeout.
+///   * each malformed HELLO bumps the `malformed_packets` codec-drop
+///     counter (the test sends packets with bodies shorter than
+///     `HELLO_PAYLOAD_LEN`, which `handle_hello` rejects as
+///     `CodecError::PacketTooShort`),
+///   * Bob's transport remains responsive — a legitimate handshake
+///     after the flood completes and delivers application data within
+///     a generous timeout.
 ///
 /// Also reports the achieved drop rate as test output for informational
-/// tracking. NOTE: as of writing, fake HELLOs whose body fails the
-/// pre-auth cookie / decryption check are dropped silently — no
-/// dedicated metric currently records them. The check we make here
-/// (`packets_received` advanced by ≈ATTACK_COUNT) is the only
-/// observable evidence the flood reached the transport. A future
-/// observability pass should expose a counter for these drops
-/// (tracked as a separate item).
+/// tracking.
 #[tokio::test]
 async fn cookie_dos_cost_measurement() {
     let bob = Identity::from_secret_bytes([0xE0; 32]);
@@ -240,7 +238,7 @@ async fn cookie_dos_cost_measurement() {
         .unwrap();
     let addr = bob_t.local_addr().unwrap();
     let bob_peer_id = bob_t.local_peer_id();
-    let recv_before = bob_t.metrics().packets_received;
+    let m_before = bob_t.metrics();
 
     // Send 10k fake HELLOs and time it.
     let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -270,13 +268,30 @@ async fn cookie_dos_cost_measurement() {
     // Loopback UDP is not perfectly reliable under load, but the
     // overwhelming majority should land. Anything below 80 % means
     // the recv loop is wedged or the kernel buffer overflowed.
-    let recv_after = bob_t.metrics().packets_received;
-    let recv_delta = recv_after - recv_before;
+    let m_after = bob_t.metrics();
+    let recv_delta = m_after.packets_received - m_before.packets_received;
+    let lower_bound = (ATTACK_COUNT as u64 * 8) / 10;
     assert!(
-        recv_delta >= (ATTACK_COUNT as u64 * 8) / 10,
+        recv_delta >= lower_bound,
         "expected bob to receive ≥{} flood packets, got {}",
-        (ATTACK_COUNT * 8) / 10,
+        lower_bound,
         recv_delta
+    );
+
+    // Assertion 2: every received flood packet bumped the
+    // malformed_packets counter — the bodies are too short for
+    // `HELLO_PAYLOAD_LEN`, so handle_hello rejects them at the
+    // codec layer (`CodecError::PacketTooShort`). The recv-loop
+    // arm for `DriftError::Codec(_)` bumps malformed_packets,
+    // closing the observability gap surfaced by an earlier
+    // version of this test (commit-history note in the
+    // `malformed_packets` field on `Metrics`).
+    let malformed_delta = m_after.malformed_packets - m_before.malformed_packets;
+    assert!(
+        malformed_delta >= lower_bound,
+        "expected ≥{} malformed_packets from the flood, got {}",
+        lower_bound,
+        malformed_delta
     );
 
     // Assertion 2: Bob can still complete a legitimate handshake after
