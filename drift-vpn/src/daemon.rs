@@ -65,7 +65,53 @@ pub(crate) async fn run(
     // confirm — or override with `--force-cleanup`.
     let conflicting = find_conflicting_tun_interfaces(addr);
     if !conflicting.is_empty() {
-        if force_cleanup {
+        // Auto-recovery: if no OTHER drift-vpn process is alive,
+        // the conflict is a true orphan from a previous run that
+        // didn't clean up — proceed as if --force-cleanup had been
+        // passed, with a single info-level log line so the operator
+        // sees what happened. This eliminates the "kill + --force-
+        // cleanup retry" two-step that today's UX required after
+        // every SIGKILL or unclean exit.
+        //
+        // When a sibling drift-vpn IS alive, we keep the original
+        // hard error — concurrent runs sharing an identity will
+        // AEAD-fight per `feedback_one_identity_one_process.md`,
+        // so we must NOT silently take over. The operator has to
+        // explicitly kill the sibling.
+        //
+        // On Linux we additionally try to delete the orphan iface
+        // (requires CAP_NET_ADMIN, which drift-vpn up needs anyway).
+        // On macOS utun can't be deleted; we just create a fresh
+        // utun and the orphan stays inert (--force-cleanup behavior).
+        let auto_recover = !force_cleanup && !other_drift_vpn_process_alive();
+        if auto_recover {
+            info!(
+                address = %addr,
+                conflicts = ?conflicting,
+                "auto-recovering orphan TUN interface(s) — no other drift-vpn process is alive"
+            );
+            #[cfg(target_os = "linux")]
+            for iface in &conflicting {
+                let res = std::process::Command::new("ip")
+                    .args(["link", "delete", iface])
+                    .output();
+                match res {
+                    Ok(o) if o.status.success() => {
+                        info!(iface = %iface, "deleted orphan TUN interface");
+                    }
+                    Ok(o) => warn!(
+                        iface = %iface,
+                        stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                        "failed to delete orphan TUN interface; continuing with --force-cleanup semantics"
+                    ),
+                    Err(e) => warn!(
+                        iface = %iface,
+                        error = %e,
+                        "could not invoke `ip link delete`; continuing with --force-cleanup semantics"
+                    ),
+                }
+            }
+        } else if force_cleanup {
             warn!(
                 address = %addr,
                 conflicts = ?conflicting,
@@ -73,17 +119,13 @@ pub(crate) async fn run(
             );
         } else {
             return Err(anyhow!(
-                "address {} is already assigned to existing TUN interface(s): {}. \
-                 These are likely orphan devices from a previous drift-vpn run that \
-                 didn't shut down cleanly — routing for the configured subnet may \
-                 point at the orphan, silently dropping traffic.\n\n\
+                "address {} is already assigned to existing TUN interface(s): {}, \
+                 AND another drift-vpn process is currently running. \
+                 Concurrent processes with the same identity silently AEAD-fight \
+                 each other, so this can't be auto-recovered.\n\n\
                  Cleanup:\n\
-                 \x20  1. `sudo killall drift-vpn` (kills any leftover drift-vpn process)\n\
-                 \x20  2. On Linux: `sudo ip link delete <iface>` for each listed interface\n\
-                 \x20     On macOS: utun devices can't be destroyed once orphaned; \n\
-                 \x20     the only fix is a reboot, OR pass `--force-cleanup` and \n\
-                 \x20     accept that the routing table may need manual fixup with \n\
-                 \x20     `sudo route delete -net <cidr>`.",
+                 \x20  1. `sudo killall drift-vpn` (kills the sibling drift-vpn process)\n\
+                 \x20  2. Re-run drift-vpn up — auto-recovery will handle the orphan TUN.",
                 addr,
                 conflicting.join(", ")
             ));
@@ -1042,6 +1084,44 @@ async fn run_unestablished_watchdog(transport: Arc<Transport>, peers: Vec<Watchd
             next_warn.insert(peer.peer_id, now + next_interval);
         }
     }
+}
+
+/// True if any drift-vpn process other than the current one is
+/// running on this host. Used by the orphan-TUN auto-recovery
+/// path to decide whether the conflict is a true orphan (no
+/// sibling process) or a legitimate concurrent run that the
+/// operator must resolve by hand. Best-effort: shells out to
+/// `ps`, returns false on failure (errs on the side of
+/// auto-recovering rather than blocking startup).
+fn other_drift_vpn_process_alive() -> bool {
+    let me = std::process::id();
+    let out = match std::process::Command::new("ps")
+        .args(["-eo", "pid,comm"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&out);
+    for line in text.lines().skip(1) {
+        let mut parts = line.split_whitespace();
+        let pid: u32 = match parts.next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        if pid == me {
+            continue;
+        }
+        // `comm` may be truncated by ps to 15 chars; the binary
+        // is exactly "drift-vpn" (9 chars) so no truncation
+        // ambiguity. Match the full basename.
+        let comm = parts.next().unwrap_or("");
+        let comm = comm.rsplit('/').next().unwrap_or(comm);
+        if comm == "drift-vpn" {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns the names of TUN-family interfaces (utun* on macOS,

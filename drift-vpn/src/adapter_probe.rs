@@ -153,42 +153,63 @@ pub(crate) async fn register_and_probe(
             // the wait-for-Established. This is the metric
             // that actually captures adapter cost on the
             // current network.
+            //
+            // The whole task is wrapped in `tokio::time::timeout`
+            // so a hanging `register_one` (e.g., connect_federate
+            // stuck on a SYN that the network silently drops)
+            // can't push wall-clock past PROBE_DEADLINE. Without
+            // this wrapper, a single bad candidate was observed
+            // to extend the probe to 75 s on hostile networks
+            // even though the per-task deadline check existed,
+            // because the deadline check only runs after
+            // register_one returns.
             let measure_started = Instant::now();
-            let bridge_pid = match register_one(&t, &spec).await {
-                Ok((pid, _pub)) => pid,
-                Err(e) => {
-                    debug!(spec = %spec, error = %e, "bridge register failed");
-                    return AdapterMeasurement {
+            let probe_one = async {
+                let bridge_pid = match register_one(&t, &spec).await {
+                    Ok((pid, _pub)) => pid,
+                    Err(e) => {
+                        warn!(spec = %spec, error = %e, "candidate failed (register error)");
+                        return AdapterMeasurement {
+                            spec: spec.clone(),
+                            bridge_pid: [0u8; 8],
+                            bridge_pub: [0u8; 32],
+                            handshake_time: None,
+                        };
+                    }
+                };
+                let bridge_pub = match crate::config::parse_bridge_spec(&spec) {
+                    Ok((_, pk)) => pk,
+                    Err(_) => [0u8; 32], // unreachable: register_one would have failed first
+                };
+                loop {
+                    if t.peer_is_established(&bridge_pid).await {
+                        let handshake_ms = measure_started.elapsed().as_millis() as u64;
+                        info!(spec = %spec, handshake_ms, "candidate established");
+                        return AdapterMeasurement {
+                            spec: spec.clone(),
+                            bridge_pid,
+                            bridge_pub,
+                            handshake_time: Some(measure_started.elapsed()),
+                        };
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+            };
+            match tokio::time::timeout(PROBE_DEADLINE, probe_one).await {
+                Ok(m) => m,
+                Err(_) => {
+                    warn!(
+                        spec = %spec,
+                        deadline_secs = PROBE_DEADLINE.as_secs(),
+                        "candidate failed (deadline exceeded)"
+                    );
+                    AdapterMeasurement {
                         spec,
                         bridge_pid: [0u8; 8],
                         bridge_pub: [0u8; 32],
                         handshake_time: None,
-                    };
+                    }
                 }
-            };
-            let bridge_pub = match crate::config::parse_bridge_spec(&spec) {
-                Ok((_, pk)) => pk,
-                Err(_) => [0u8; 32], // unreachable: register_one would have failed first
-            };
-            let deadline = measure_started + PROBE_DEADLINE;
-            loop {
-                if t.peer_is_established(&bridge_pid).await {
-                    return AdapterMeasurement {
-                        spec,
-                        bridge_pid,
-                        bridge_pub,
-                        handshake_time: Some(measure_started.elapsed()),
-                    };
-                }
-                if Instant::now() >= deadline {
-                    return AdapterMeasurement {
-                        spec,
-                        bridge_pid,
-                        bridge_pub,
-                        handshake_time: None,
-                    };
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
             }
         }));
     }
@@ -246,13 +267,27 @@ pub(crate) async fn register_and_probe(
         .iter()
         .filter(|m| m.handshake_time.is_some())
         .count();
-    info!(
-        candidates = total,
-        succeeded,
-        failed = total - succeeded,
-        wall_clock_ms = total_elapsed.as_millis() as u64,
-        "adapter probe complete; ranked"
-    );
+    if succeeded == 0 {
+        warn!(
+            candidates = total,
+            succeeded,
+            failed = total - succeeded,
+            wall_clock_ms = total_elapsed.as_millis() as u64,
+            "adapter probe complete — ALL CANDIDATES FAILED. Peer will be unreachable until at least one bridge wire recovers. \
+             Check: (1) network filtering between this host and the bridge (corporate / ISP egress filters often silently drop \
+             non-standard TCP/UDP ports), (2) the bridge process is actually running on the target, (3) for off-LAN access, add an \
+             `iroh-n0://<endpoint-id>@<bridge-pub>` via_bridge entry — iroh-n0 routes through public n0 relay infrastructure on \
+             standard ports and works through most filters."
+        );
+    } else {
+        info!(
+            candidates = total,
+            succeeded,
+            failed = total - succeeded,
+            wall_clock_ms = total_elapsed.as_millis() as u64,
+            "adapter probe complete; ranked"
+        );
+    }
     for (idx, m) in results.iter().enumerate() {
         match m.handshake_time {
             Some(t) => info!(
