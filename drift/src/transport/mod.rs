@@ -715,6 +715,15 @@ pub(crate) struct MetricsInner {
     pub(crate) deadline_dropped: AtomicU64,
     pub(crate) coalesce_dropped: AtomicU64,
     pub(crate) auth_failures: AtomicU64,
+    /// Packets dropped at the recv path because the codec layer
+    /// rejected the wire bytes — short packet, wrong version,
+    /// unknown packet-type tag, length-tag mismatch, malformed
+    /// sub-message. Anything that surfaces as
+    /// `DriftError::Codec(_)` during `process_incoming`. Bumped
+    /// from the recv-loop catchall. A flood of these typically
+    /// means either an attacker is probing or an off-protocol
+    /// peer is misconfigured and pointed at this listener.
+    pub(crate) malformed_packets: AtomicU64,
     pub(crate) forwarded: AtomicU64,
     /// Packets dropped at the mesh-forward path because the
     /// source IP didn't match any known peer's addr. Bumped
@@ -785,6 +794,14 @@ pub struct Metrics {
     pub deadline_dropped: u64,
     pub coalesce_dropped: u64,
     pub auth_failures: u64,
+    /// Codec-layer drops at the recv path: short packet, wrong
+    /// version nibble, unknown packet-type tag, length-tag
+    /// mismatch, malformed sub-message. Anything that surfaces
+    /// as `DriftError::Codec(_)` during `process_incoming`.
+    /// Bumped from the recv-loop catchall, so it covers both
+    /// the long-header (`process_incoming`) and short-header
+    /// (`process_short_header`) decode paths.
+    pub malformed_packets: u64,
     pub forwarded: u64,
     /// SEC.FIX.1: forwards dropped because the source IP didn't
     /// match any established peer. Bumped on the open-relay
@@ -1727,6 +1744,7 @@ impl Transport {
             deadline_dropped: m.deadline_dropped.load(Ordering::Relaxed),
             coalesce_dropped: m.coalesce_dropped.load(Ordering::Relaxed),
             auth_failures: m.auth_failures.load(Ordering::Relaxed),
+            malformed_packets: m.malformed_packets.load(Ordering::Relaxed),
             forwarded: m.forwarded.load(Ordering::Relaxed),
             forward_unauth_drops: m.forward_unauth_drops.load(Ordering::Relaxed),
             beacons_sent: m.beacons_sent.load(Ordering::Relaxed),
@@ -5628,6 +5646,16 @@ impl Inner {
                             ) {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
+                            // Codec drops on the short-header path
+                            // (e.g. truncated decode_short) bump
+                            // the same malformed_packets metric as
+                            // the long-header path. Added alongside
+                            // the metric's introduction.
+                            if matches!(e, DriftError::Codec(_)) {
+                                self.metrics
+                                    .malformed_packets
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
                                 let (pkt_diag, peer_diag, hs_diag) =
                                     self.auth_fail_diag(data).await;
@@ -5684,6 +5712,18 @@ impl Inner {
                             DriftError::Peer(_) => {
                                 self.metrics
                                     .unknown_peer_drops
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            // Codec-layer drops (short packet, wrong
+                            // version, unknown packet type, length
+                            // mismatch, malformed sub-message). Used
+                            // to fall to `_ => {}` without recording
+                            // — surfaced as an observability gap by
+                            // `cookie_dos_cost_measurement` and the
+                            // metric was added here as the fix.
+                            DriftError::Codec(_) => {
+                                self.metrics
+                                    .malformed_packets
                                     .fetch_add(1, Ordering::Relaxed);
                             }
                             _ => {}
