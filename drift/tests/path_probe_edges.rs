@@ -200,3 +200,75 @@ async fn single_roaming_event_produces_single_probe() {
         m.path_probes_succeeded
     );
 }
+
+/// A `MultipathManager::probe_path` to a candidate address that
+/// never responds must time out, return `DeadlineExpired`, AND
+/// bump `path_probes_failed`. Before this counter was wired up,
+/// operators had to infer probe loss from
+/// `path_probes_sent - path_probes_succeeded`, which conflated
+/// "still in flight" with "failed".
+#[tokio::test]
+async fn probe_path_deadline_bumps_path_probes_failed() {
+    use drift::multipath::MultipathManager;
+    use drift::DriftError;
+
+    let bob_id = Identity::from_secret_bytes([0x80; 32]);
+    let alice_id = Identity::from_secret_bytes([0x81; 32]);
+    let bob_pub = bob_id.public_bytes();
+    let alice_pub = alice_id.public_bytes();
+
+    let bob = Arc::new(
+        Transport::bind("127.0.0.1:0".parse().unwrap(), bob_id)
+            .await
+            .unwrap(),
+    );
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
+    let bob_addr = bob.local_addr().unwrap();
+
+    let alice = Arc::new(
+        Transport::bind("127.0.0.1:0".parse().unwrap(), alice_id)
+            .await
+            .unwrap(),
+    );
+    let bob_peer = alice
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    // Complete a real handshake so the peer is Established —
+    // probe_candidate_path short-circuits on UnknownPeer otherwise.
+    alice.send_data(&bob_peer, b"warm-up", 0, 0).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mp = MultipathManager::new(alice.clone());
+    // Bind a socket and never read from it — the kernel accepts
+    // our PathChallenges into its recv buffer, but nothing ever
+    // sends a PathResponse back, so the probe deadline fires.
+    let blackhole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = blackhole.local_addr().unwrap();
+    mp.add_path(bob_peer, dead_addr).await;
+
+    let failed_before = alice.metrics().path_probes_failed;
+
+    let result = mp.probe_path(&bob_peer, dead_addr).await;
+    assert!(
+        matches!(result, Err(DriftError::DeadlineExpired)),
+        "probe of unresponsive address must return DeadlineExpired, got {result:?}"
+    );
+
+    let failed_after = alice.metrics().path_probes_failed;
+    assert_eq!(
+        failed_after,
+        failed_before + 1,
+        "path_probes_failed should advance by exactly 1 for one probe timeout (before={failed_before}, after={failed_after})"
+    );
+}

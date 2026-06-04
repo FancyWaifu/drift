@@ -737,6 +737,7 @@ pub(crate) struct MetricsInner {
     pub(crate) handshakes_evicted: AtomicU64,
     pub(crate) path_probes_sent: AtomicU64,
     pub(crate) path_probes_succeeded: AtomicU64,
+    pub(crate) path_probes_failed: AtomicU64,
     pub(crate) peer_id_collisions: AtomicU64,
     pub(crate) auto_rekeys: AtomicU64,
     pub(crate) resumption_tickets_issued: AtomicU64,
@@ -815,6 +816,12 @@ pub struct Metrics {
     pub handshakes_evicted: u64,
     pub path_probes_sent: u64,
     pub path_probes_succeeded: u64,
+    /// Path probes that timed out without a matching
+    /// `PathResponse`. Computed at probe-deadline expiry in
+    /// `multipath::probe_path`; the failing path is also marked
+    /// unhealthy. Operators can compute `sent - succeeded -
+    /// failed` to see how many probes are still outstanding.
+    pub path_probes_failed: u64,
     pub peer_id_collisions: u64,
     pub auto_rekeys: u64,
     pub resumption_tickets_issued: u64,
@@ -1754,6 +1761,7 @@ impl Transport {
             handshakes_evicted: m.handshakes_evicted.load(Ordering::Relaxed),
             path_probes_sent: m.path_probes_sent.load(Ordering::Relaxed),
             path_probes_succeeded: m.path_probes_succeeded.load(Ordering::Relaxed),
+            path_probes_failed: m.path_probes_failed.load(Ordering::Relaxed),
             peer_id_collisions: m.peer_id_collisions.load(Ordering::Relaxed),
             auto_rekeys: m.auto_rekeys.load(Ordering::Relaxed),
             resumption_tickets_issued: m.resumption_tickets_issued.load(Ordering::Relaxed),
@@ -1898,6 +1906,13 @@ impl Transport {
         self.inner
             .probe_candidate_path(peer_id, candidate_addr)
             .await
+    }
+
+    pub(crate) fn bump_path_probe_failed(&self) {
+        self.inner
+            .metrics
+            .path_probes_failed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Cross-interface variant of `probe_candidate_path`. Sends
@@ -5978,6 +5993,9 @@ impl Inner {
             // set hop_ttl to u8::MAX (255) and force us to amplify a
             // single datagram into many network hops.
             if header.hop_ttl > MAX_INCOMING_HOP_TTL {
+                self.metrics
+                    .amplification_blocked
+                    .fetch_add(1, Ordering::Relaxed);
                 debug!(
                     hop_ttl = header.hop_ttl,
                     "dropping incoming packet with excessive hop_ttl"
