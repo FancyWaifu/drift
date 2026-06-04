@@ -5642,9 +5642,24 @@ impl Inner {
                             // CI runners (see slice 7 history).
                             if matches!(
                                 e,
-                                DriftError::Crypto(drift_core::error::CryptoError::AeadAuthFailed,),
+                                DriftError::Crypto(drift_core::error::CryptoError::AeadAuthFailed,)
+                                    | DriftError::Crypto(
+                                        drift_core::error::CryptoError::SignatureInvalid,
+                                    ),
                             ) {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                            }
+                            // Replays on the short-header data
+                            // path (the hot path for established
+                            // sessions — `check_and_update_replay`
+                            // fires here on every duplicate or
+                            // out-of-window seq). Was silently
+                            // dropped before this arm was added.
+                            if matches!(
+                                e,
+                                DriftError::Crypto(drift_core::error::CryptoError::Replay { .. }),
+                            ) {
+                                self.metrics.replays_caught.fetch_add(1, Ordering::Relaxed);
                             }
                             // Codec drops on the short-header path
                             // (e.g. truncated decode_short) bump
@@ -5654,6 +5669,18 @@ impl Inner {
                             if matches!(e, DriftError::Codec(_)) {
                                 self.metrics
                                     .malformed_packets
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            // Peer-layer rejections on the short-
+                            // header path: CID-map miss (peer no
+                            // longer in table), peer-table miss
+                            // for the resolved peer-id, session
+                            // not ready (handshake torn down
+                            // mid-stream). Mirrors the long-header
+                            // `Peer(_)` arm.
+                            if matches!(e, DriftError::Peer(_)) {
+                                self.metrics
+                                    .unknown_peer_drops
                                     .fetch_add(1, Ordering::Relaxed);
                             }
                             if let Some(suppressed) = self.drop_warn_throttle.tick_or_count() {
@@ -5695,13 +5722,23 @@ impl Inner {
                             // AEAD-tag-mismatch on the data path
                             // (SessionKey::open returns
                             // CryptoError::AeadAuthFailed since
-                            // slice 8). Producers of typed
-                            // `Crypto(_)` errors at non-data-path
-                            // sites (HELLO low-order, sig-verify,
-                            // etc.) explicitly bump `auth_failures`
-                            // at the produce site before returning,
-                            // so they don't need an arm here.
-                            DriftError::Crypto(drift_core::error::CryptoError::AeadAuthFailed) => {
+                            // slice 8). KeyExchangeFailed sites
+                            // (HELLO low-order, PQ policy
+                            // mismatch, HELLO_ACK PQ posture) have
+                            // inline `auth_failures` bumps at the
+                            // produce site, so adding a `Crypto(_)`
+                            // catchall here would double-count
+                            // them — and earlier history showed
+                            // it also caused mid-stream-rekey
+                            // timing flakes on slow CI runners.
+                            // SignatureInvalid is matched
+                            // separately because none of its
+                            // produce sites have inline bumps and
+                            // it can't fire during a rekey window.
+                            DriftError::Crypto(drift_core::error::CryptoError::AeadAuthFailed)
+                            | DriftError::Crypto(
+                                drift_core::error::CryptoError::SignatureInvalid,
+                            ) => {
                                 self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
                             }
                             DriftError::DeadlineExpired => {
