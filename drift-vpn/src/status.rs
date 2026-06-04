@@ -218,8 +218,18 @@ pub(crate) async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
         }
     };
     // World-readable; same model as wg-quick's runtime files.
+    // Surfaced as a warn-level log if chmod fails so the operator
+    // notices when `drift-vpn status` from a non-root shell would
+    // hit permission-denied (rare — happens on filesystems that
+    // ignore chmod, e.g., FAT mounts in test rigs).
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+    if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "could not chmod status socket to 0o666 — `drift-vpn status` from a non-root shell may fail with EACCES"
+        );
+    }
 
     tracing::info!(path = %path.display(), "status socket listening");
 
@@ -249,12 +259,42 @@ pub(crate) async fn run_server(path: PathBuf, ctx: Arc<StatusContext>) {
 }
 
 /// Client side: connect, read one JSON blob, parse, return.
+///
+/// Translates the raw OS errors into actionable messages:
+///   * ENOENT → daemon not running (suggest `drift-vpn up`)
+///   * ECONNREFUSED → stale socket from a crashed daemon
+///   * EACCES → permission denied (socket not world-readable; rare)
+///
+/// Anything else falls through with the underlying error attached.
 #[cfg(unix)]
 pub(crate) async fn fetch(path: &Path) -> Result<StatusReport> {
     use tokio::io::AsyncReadExt;
-    let mut sock = tokio::net::UnixStream::connect(path)
-        .await
-        .with_context(|| format!("connecting to {}", path.display()))?;
+    let mut sock = match tokio::net::UnixStream::connect(path).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(match e.kind() {
+                std::io::ErrorKind::NotFound => anyhow::anyhow!(
+                    "no drift-vpn daemon running — start it with `drift-vpn up -c <config>` \
+                     (status socket {} does not exist)",
+                    path.display()
+                ),
+                std::io::ErrorKind::ConnectionRefused => anyhow::anyhow!(
+                    "status socket {} exists but no daemon is listening — \
+                     the previous drift-vpn likely crashed without cleanup. \
+                     Remove the stale socket and restart: `rm {} && drift-vpn up -c <config>`",
+                    path.display(),
+                    path.display()
+                ),
+                std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+                    "permission denied connecting to {} — the socket isn't world-readable. \
+                     Either run `drift-vpn status` as the same user that started the daemon, \
+                     or restart the daemon and check its log for a `could not chmod status socket` warning.",
+                    path.display()
+                ),
+                _ => anyhow::Error::from(e).context(format!("connecting to {}", path.display())),
+            });
+        }
+    };
     let mut buf = String::new();
     tokio::time::timeout(Duration::from_secs(2), sock.read_to_string(&mut buf))
         .await
