@@ -94,6 +94,30 @@ enum Cmd {
         #[clap(long)]
         json: bool,
     },
+    /// Gracefully stop the running drift-vpn daemon. Looks up
+    /// the daemon's PID via its status socket, sends SIGTERM,
+    /// and waits up to `--timeout` seconds for it to exit. If
+    /// it's still alive after the timeout, with `--force` set
+    /// the daemon gets a follow-up SIGKILL; without `--force`,
+    /// `down` reports the lingering PID so the operator can
+    /// decide how to escalate.
+    Down {
+        /// Path to the status socket the daemon is serving on.
+        #[clap(long)]
+        socket: Option<PathBuf>,
+        /// Seconds to wait for the daemon to exit after SIGTERM
+        /// before either escalating to SIGKILL (`--force`) or
+        /// reporting the lingering PID. Default 10s, plenty of
+        /// time for an active session to flush.
+        #[clap(long, default_value_t = 10)]
+        timeout: u64,
+        /// Send SIGKILL if the daemon doesn't exit within the
+        /// timeout window. Default behavior is to leave the
+        /// process alive and report the PID so the operator can
+        /// investigate why it didn't shut down on SIGTERM.
+        #[clap(long)]
+        force: bool,
+    },
 
     /// Generate per-host drift-vpn configs from the shared
     /// drift.toml inventory managed by `drift-config`.
@@ -260,7 +284,15 @@ enum ConfigCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Disable ANSI color codes when stdout isn't a terminal —
+    // operators often run `drift-vpn up > /var/log/drift-vpn.log`
+    // or pipe through `cat`/`tail`, and the [2m...[0m escape
+    // sequences make those logs unreadable. tracing-subscriber's
+    // default emits ANSI unconditionally; we wire it to the
+    // stdout TTY check instead.
+    use std::io::IsTerminal;
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "drift_vpn=info,drift=warn".into()),
@@ -316,6 +348,22 @@ async fn main() -> Result<()> {
             {
                 let _ = (socket, json);
                 anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
+            }
+        }
+        Cmd::Down {
+            socket,
+            timeout,
+            force,
+        } => {
+            #[cfg(unix)]
+            {
+                let path = socket.unwrap_or_else(status::default_socket_path);
+                graceful_down(&path, timeout, force).await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (socket, timeout, force);
+                anyhow::bail!("drift-vpn down requires Unix sockets (Linux + macOS today)");
             }
         }
         Cmd::Doctor {
@@ -440,6 +488,97 @@ fn resolve_config_path(opt: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Look up the running daemon's PID via its status socket,
+/// send SIGTERM, wait up to `timeout_secs` for it to exit,
+/// optionally escalate to SIGKILL with `force`. Implements the
+/// `drift-vpn down` UX so operators don't have to `ps | grep`
+/// and `kill` by hand (which today's session had us doing every
+/// few minutes — the foreground-daemon model is fine but needs
+/// a counterpart to `up`).
+#[cfg(unix)]
+async fn graceful_down(path: &std::path::Path, timeout_secs: u64, force: bool) -> Result<()> {
+    let report = status::fetch(path).await?;
+    let pid = report.local.pid;
+    if pid == 0 {
+        anyhow::bail!(
+            "status report from {} did not include a PID — daemon may be running an older binary; \
+             fall back to `killall drift-vpn`",
+            path.display()
+        );
+    }
+    let pid_i =
+        i32::try_from(pid).map_err(|_| anyhow::anyhow!("daemon PID {} out of range", pid))?;
+    println!(
+        "sending SIGTERM to drift-vpn daemon (pid {}, uptime {}s)",
+        pid, report.local.uptime_secs
+    );
+    // SAFETY: kill(pid, SIGTERM) — sending a signal to a known
+    // PID with a documented number is straightforward libc; the
+    // crate `nix` would wrap this but pulling it in just for one
+    // signal isn't worth the deps.
+    let rc = unsafe { libc::kill(pid_i, libc::SIGTERM) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::bail!(
+                "daemon already gone (kill returned ESRCH for pid {}). \
+                 Status socket {} may be stale — remove it manually.",
+                pid,
+                path.display()
+            );
+        }
+        return Err(anyhow::Error::from(err).context(format!("kill({}, SIGTERM)", pid)));
+    }
+
+    // Poll for the PID to disappear. Sending signal 0 to a PID
+    // checks if it exists without affecting it — ESRCH means
+    // "gone", success means "still alive".
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(timeout_secs);
+    let poll = std::time::Duration::from_millis(100);
+    loop {
+        if unsafe { libc::kill(pid_i, 0) } != 0
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+        {
+            println!(
+                "drift-vpn daemon shut down cleanly after {:.2}s",
+                started.elapsed().as_secs_f64()
+            );
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(poll).await;
+    }
+
+    // Still alive past the timeout.
+    if force {
+        println!(
+            "daemon still alive after {}s — escalating to SIGKILL",
+            timeout_secs
+        );
+        let rc = unsafe { libc::kill(pid_i, libc::SIGKILL) };
+        if rc != 0 {
+            return Err(anyhow::Error::from(std::io::Error::last_os_error())
+                .context(format!("kill({}, SIGKILL)", pid)));
+        }
+        // After SIGKILL the process exits "soon" — no poll loop
+        // needed; the kernel guarantees termination.
+        println!("drift-vpn daemon killed (pid {})", pid);
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "drift-vpn daemon (pid {}) didn't exit within {}s of SIGTERM. \
+             Re-run with `--force` to escalate to SIGKILL, or investigate why \
+             the daemon is stuck (likely the TUN device read is blocking — \
+             check kernel state).",
+            pid,
+            timeout_secs
+        );
+    }
+}
+
 /// Resolve `--config <path>` for drift-vpn's own daemon config
 /// (`up`, `doctor`). Walks a list of candidate paths and picks
 /// the first that exists, falling back to the system-level
@@ -473,23 +612,86 @@ fn resolve_vpn_config_path(opt: Option<PathBuf>) -> PathBuf {
 /// every actual deployment of drift-vpn we've debugged this
 /// session kept its config; the system path is the fallback
 /// for service-style installs.
+///
+/// When invoked via `sudo` (or inside a `sudo su` shell), the
+/// HOME env var points at root's home directory, not the operator
+/// who started the privileged shell. We probe `SUDO_USER`'s home
+/// first so configs at `~/.config/drift-vpn/config.toml` get
+/// picked up automatically — this was the #1 footgun in the last
+/// session's hands-on session ("sudo drift-vpn up" -> "config not
+/// found at /etc/drift-vpn/config.toml" when the user's config
+/// was actually at `/Users/<them>/.config/drift-vpn/config.toml`).
 fn default_vpn_config_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let sudo_home = sudo_user_home();
 
-    #[cfg(target_os = "macos")]
-    if let Some(h) = &home {
+    let mut push_user_paths = |h: &PathBuf| {
+        #[cfg(target_os = "macos")]
         out.push(h.join("Library/Application Support/drift-vpn/config.toml"));
-    }
 
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        out.push(PathBuf::from(xdg).join("drift-vpn/config.toml"));
-    } else if let Some(h) = &home {
-        out.push(h.join(".config/drift-vpn/config.toml"));
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+            out.push(PathBuf::from(xdg).join("drift-vpn/config.toml"));
+        } else {
+            out.push(h.join(".config/drift-vpn/config.toml"));
+        }
+    };
+
+    // SUDO_USER's home goes first so the operator's config wins
+    // over a leftover root-owned config (which usually doesn't
+    // exist anyway). When not running under sudo, sudo_home is
+    // None and this is a no-op.
+    if let Some(h) = &sudo_home {
+        push_user_paths(h);
+    }
+    if let Some(h) = &home {
+        // Avoid pushing duplicate paths when running as a normal
+        // user (sudo_home is None) — the HOME path is the only
+        // user-level path. When running under sudo and HOME ==
+        // sudo_home, the dedupe below handles it.
+        push_user_paths(h);
     }
 
     out.push(PathBuf::from("/etc/drift-vpn/config.toml"));
+    out.dedup();
     out
+}
+
+/// If running under `sudo` (or `sudo -i` / `sudo su`), look up
+/// the invoking operator's home directory via `SUDO_USER`. Uses
+/// shell tilde-expansion (`sh -c 'echo ~<user>'`) so it works on
+/// macOS (where getent isn't standard) and Linux without adding
+/// a passwd-database dep. Returns None when not under sudo, when
+/// the user doesn't exist, or when the lookup fails.
+fn sudo_user_home() -> Option<PathBuf> {
+    let user = std::env::var("SUDO_USER").ok()?;
+    if user.is_empty() || user == "root" {
+        return None;
+    }
+    // Reject anything that isn't a plain alphanumeric / dash /
+    // underscore username — defense-in-depth against shell
+    // injection via SUDO_USER (which sudo controls, but the
+    // string still flows through `sh -c`).
+    if !user
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return None;
+    }
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("echo ~{}", user))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // sh emits the literal `~user` when the lookup fails.
+    if home.is_empty() || home.starts_with('~') {
+        return None;
+    }
+    Some(PathBuf::from(home))
 }
 
 #[cfg(test)]

@@ -68,6 +68,12 @@ pub(crate) struct LocalInfo {
     pub iface: String,
     pub addr: String,
     pub uptime_secs: u64,
+    /// Daemon's PID. Used by `drift-vpn down` to send a graceful
+    /// SIGTERM without shelling out to `ps`. Always present;
+    /// historical reports without it deserialize to 0 via the
+    /// default impl.
+    #[serde(default)]
+    pub pid: u32,
 }
 
 /// How drift-vpn reaches this peer. Determines whether the
@@ -181,6 +187,7 @@ impl StatusContext {
                 uptime_secs: std::time::Instant::now()
                     .duration_since(self.started_at)
                     .as_secs(),
+                pid: std::process::id(),
             },
             peers,
             metrics: self.metrics.snapshot(),
