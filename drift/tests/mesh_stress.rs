@@ -215,7 +215,10 @@ impl<T> RemoveWrap<T> for Vec<T> {
 }
 
 /// A routing loop: node A's route for C goes via B, B's route for C goes
-/// via A. hop_ttl should decrement until the loop terminates.
+/// via A. `hop_ttl` should decrement on each forward until it hits zero,
+/// at which point the packet is dropped. Without TTL the packet would
+/// ping-pong forever; with TTL the total forwarded count is bounded by
+/// the initial TTL (8 here).
 #[tokio::test]
 async fn routing_loop_terminates() {
     use tokio::net::UdpSocket;
@@ -238,9 +241,15 @@ async fn routing_loop_terminates() {
     a_t.add_route(phantom_id, b_addr).await;
     b_t.add_route(phantom_id, a_addr).await;
 
+    // Snapshot metrics before injection so we can compute the delta
+    // attributable to this packet's traversal.
+    let a_before = a_t.metrics().forwarded;
+    let b_before = b_t.metrics().forwarded;
+
     // Send a packet destined for the phantom through A.
     use drift::header::{Header, PacketType, HEADER_LEN};
-    let mut header = Header::new(PacketType::Data, 1, [1; 8], phantom_id).with_hop_ttl(8);
+    const INITIAL_TTL: u8 = 8;
+    let mut header = Header::new(PacketType::Data, 1, [1; 8], phantom_id).with_hop_ttl(INITIAL_TTL);
     header.payload_len = 16;
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
@@ -256,7 +265,24 @@ async fn routing_loop_terminates() {
     // infinite ping-ponging or running away.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // If we get here without hanging or crashing, the TTL worked.
+    // The actual TTL-loop assertion: with the initial TTL of 8, the
+    // packet should bounce between A and B at most a handful of times
+    // before being dropped. We give the bound some slack (TTL + 2)
+    // for whatever the relay implementation counts as a "forward",
+    // but the critical property is that the count is BOUNDED — without
+    // TTL handling it would grow to thousands during the 300 ms sleep.
+    let a_delta = a_t.metrics().forwarded - a_before;
+    let b_delta = b_t.metrics().forwarded - b_before;
+    let total_forwards = a_delta + b_delta;
+    assert!(
+        total_forwards <= u64::from(INITIAL_TTL) + 2,
+        "TTL did not bound the loop: {} forwards (A={}, B={}) for initial TTL={}",
+        total_forwards,
+        a_delta,
+        b_delta,
+        INITIAL_TTL
+    );
+
     drop(a_t);
     drop(b_t);
 }
