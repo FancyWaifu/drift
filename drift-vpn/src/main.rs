@@ -620,7 +620,7 @@ fn resolve_vpn_config_path(opt: Option<PathBuf>) -> PathBuf {
 /// picked up automatically — this was the #1 footgun in the last
 /// session's hands-on session ("sudo drift-vpn up" -> "config not
 /// found at /etc/drift-vpn/config.toml" when the user's config
-/// was actually at /Users/<them>/.config/drift-vpn/config.toml).
+/// was actually at `/Users/<them>/.config/drift-vpn/config.toml`).
 fn default_vpn_config_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
