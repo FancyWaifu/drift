@@ -26,13 +26,33 @@ mod bridge_failover;
 #[cfg(unix)]
 mod daemon;
 
+/// Long-form version string that combines the crate version with
+/// the git SHA + build date set in build.rs. Shown by
+/// `drift-vpn --version`; the short `-V` still emits just the
+/// crate version for tooling that greps it.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("DRIFT_VPN_GIT_SHA"),
+    ", built ",
+    env!("DRIFT_VPN_BUILD_DATE"),
+    ")"
+);
+
 #[derive(Parser)]
 #[clap(
     name = "drift-vpn",
     about = "Identity-routed multi-transport VPN over DRIFT",
-    version
+    version,
+    long_version = LONG_VERSION,
 )]
 struct Cli {
+    /// Increase log verbosity. `-v` enables debug output for
+    /// drift-vpn and DRIFT; `-vv` enables trace. RUST_LOG, if
+    /// explicitly set in the environment, wins over this flag —
+    /// operators with custom filters keep their behavior.
+    #[clap(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
     #[clap(subcommand)]
     cmd: Cmd,
 }
@@ -271,6 +291,16 @@ enum Cmd {
         #[clap(long)]
         expect_old_pub: String,
     },
+
+    /// Emit shell completion scripts for `drift-vpn`. Pipe the
+    /// output to your shell's completion directory. Example for
+    /// zsh: `drift-vpn completions zsh > ~/.zsh/completions/_drift-vpn`
+    /// (then ensure that directory is in `fpath` and re-run
+    /// `compinit`).
+    Completions {
+        #[clap(subcommand)]
+        shell: CompletionsShell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -327,6 +357,28 @@ enum ConfigCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum CompletionsShell {
+    Bash,
+    Zsh,
+    Fish,
+    Elvish,
+    Powershell,
+}
+
+impl CompletionsShell {
+    fn to_clap(&self) -> clap_complete::Shell {
+        use clap_complete::Shell;
+        match self {
+            CompletionsShell::Bash => Shell::Bash,
+            CompletionsShell::Zsh => Shell::Zsh,
+            CompletionsShell::Fish => Shell::Fish,
+            CompletionsShell::Elvish => Shell::Elvish,
+            CompletionsShell::Powershell => Shell::PowerShell,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Disable ANSI color codes when stdout isn't a terminal —
@@ -335,16 +387,24 @@ async fn main() -> Result<()> {
     // sequences make those logs unreadable. tracing-subscriber's
     // default emits ANSI unconditionally; we wire it to the
     // stdout TTY check instead.
+    let cli = Cli::parse();
+    // Verbosity ladder. RUST_LOG, when set in the env, wins —
+    // operators with custom filters keep their behavior — but
+    // when it's not set, `-v` / `-vv` give the obvious knob
+    // without the env-var dance.
+    let default_filter = match cli.verbose {
+        0 => "drift_vpn=info,drift=warn",
+        1 => "drift_vpn=debug,drift=debug",
+        _ => "drift_vpn=trace,drift=trace",
+    };
     use std::io::IsTerminal;
     tracing_subscriber::fmt()
         .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "drift_vpn=info,drift=warn".into()),
+                .unwrap_or_else(|_| default_filter.into()),
         )
         .init();
-
-    let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen { out } => {
             let pub_hex = identity::keygen(&out).await?;
@@ -562,6 +622,16 @@ async fn main() -> Result<()> {
                 expect_old_pub,
             })
             .await?;
+        }
+        Cmd::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(
+                shell.to_clap(),
+                &mut cmd,
+                "drift-vpn",
+                &mut std::io::stdout(),
+            );
         }
         Cmd::Config { cmd } => match cmd {
             ConfigCmd::Init { config, cidr, mtu } => {
