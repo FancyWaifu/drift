@@ -78,10 +78,19 @@ enum Cmd {
         #[clap(short, long, default_value = "identity.key")]
         out: PathBuf,
     },
-    /// Print the pubkey for an existing identity file.
+    /// Print the pubkey, derived peer-id, file path, and mode for
+    /// an existing identity file. Default output is human-readable;
+    /// `--json` emits a structured object for scripts (e.g.
+    /// `drift-vpn show -i key.hex --json | jq .pubkey`).
     Show {
         #[clap(short, long)]
         identity_file: PathBuf,
+        /// Emit a JSON object: `{"path", "pubkey", "peer_id",
+        /// "mode"}`. `peer_id` is the 8-byte short id derived
+        /// from the pubkey (the same one shown in
+        /// `drift-vpn status` rows).
+        #[clap(long)]
+        json: bool,
     },
     /// Connect to a running daemon's status socket and print
     /// peer state, link RTTs, and counters. Operator-facing —
@@ -302,6 +311,20 @@ enum ConfigCmd {
         #[clap(short, long, default_value = "./out")]
         out: PathBuf,
     },
+    /// Validate a drift-vpn daemon config.toml offline — parses
+    /// the file (catches `deny_unknown_fields` typos and syntax
+    /// errors), verifies the referenced identity file exists +
+    /// is readable + decodes as a 32-byte hex secret, and sanity-
+    /// checks each peer's CIDR + endpoint URL shape. No TUN, no
+    /// network, no root needed. Useful as a CI gate before
+    /// pushing a config edit to a host. Exits 0 on success, 1
+    /// with a list of problems otherwise.
+    Check {
+        /// Path to the drift-vpn config.toml. When omitted, walks
+        /// the same candidate path list as `drift-vpn up`.
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -328,9 +351,30 @@ async fn main() -> Result<()> {
             eprintln!("wrote secret to {}", out.display());
             println!("{}", pub_hex);
         }
-        Cmd::Show { identity_file } => {
+        Cmd::Show {
+            identity_file,
+            json,
+        } => {
             let id = identity::load(&identity_file).await?;
-            println!("{}", hex::encode(id.public_bytes()));
+            let pubkey_hex = hex::encode(id.public_bytes());
+            let peer_id_hex = hex::encode(drift::derive_peer_id(&id.public_bytes()));
+            let mode = identity_file_mode(&identity_file);
+            if json {
+                let obj = serde_json::json!({
+                    "path": identity_file.display().to_string(),
+                    "pubkey": pubkey_hex,
+                    "peer_id": peer_id_hex,
+                    "mode": mode,
+                });
+                println!("{}", serde_json::to_string_pretty(&obj)?);
+            } else {
+                println!("file:    {}", identity_file.display());
+                if let Some(m) = mode {
+                    println!("mode:    {}", m);
+                }
+                println!("pubkey:  {}", pubkey_hex);
+                println!("peer_id: {}", peer_id_hex);
+            }
         }
         Cmd::Up {
             config: path,
@@ -537,9 +581,86 @@ async fn main() -> Result<()> {
                 let path = resolve_config_path(config)?;
                 config_gen::gen(&path, &out)?;
             }
+            ConfigCmd::Check { config } => {
+                let path = resolve_vpn_config_path(config);
+                if check_vpn_config(&path).await? {
+                    println!("OK — {} parses cleanly", path.display());
+                } else {
+                    std::process::exit(1);
+                }
+            }
         },
     }
     Ok(())
+}
+
+/// Offline validation for a drift-vpn daemon config.toml. Returns
+/// Ok(true) when everything passes, Ok(false) when one or more
+/// problems were found (and printed to stderr), or an Err on a
+/// truly unexpected condition (e.g., the path itself errored on
+/// `metadata`).
+async fn check_vpn_config(path: &std::path::Path) -> Result<bool> {
+    let mut problems: Vec<String> = Vec::new();
+
+    let body = match tokio::fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("FAIL — reading {}: {}", path.display(), e);
+            return Ok(false);
+        }
+    };
+    let cfg: config::Config = match toml::from_str(&body) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("FAIL — {}: {}", path.display(), e);
+            return Ok(false);
+        }
+    };
+
+    // Identity file: must exist, be readable, and decode as 32-
+    // byte hex. `identity::load` does all three.
+    let id_path = &cfg.interface.identity_file;
+    match identity::load(id_path).await {
+        Ok(_) => {}
+        Err(e) => problems.push(format!(
+            "identity_file {}: {}",
+            id_path.display(),
+            e.root_cause()
+        )),
+    }
+
+    // Per-peer sanity: every peer needs SOME way to be reached
+    // (endpoint, endpoints, via_bridge, via_bridges, or
+    // via_bridges_auto). A peer with none configured will sit
+    // in pending forever.
+    for (i, peer) in cfg.peers.iter().enumerate() {
+        let has_route = peer.endpoint.is_some()
+            || peer.endpoints.as_ref().is_some_and(|v| !v.is_empty())
+            || peer.via_bridge.is_some()
+            || peer.via_bridges.as_ref().is_some_and(|v| !v.is_empty())
+            || peer.via_bridges_auto.is_some();
+        if !has_route {
+            problems.push(format!(
+                "peer #{} ({}…) has no endpoint / via_bridge / via_bridges_auto — would be unreachable at runtime",
+                i,
+                &peer.public_key[..peer.public_key.len().min(8)]
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(true)
+    } else {
+        eprintln!(
+            "FAIL — {} problem(s) in {}:",
+            problems.len(),
+            path.display()
+        );
+        for p in &problems {
+            eprintln!("  - {}", p);
+        }
+        Ok(false)
+    }
 }
 
 /// Resolve `--config <path>` (or fall back to drift-config's
@@ -639,6 +760,25 @@ async fn graceful_down(path: &std::path::Path, timeout_secs: u64, force: bool) -
             pid,
             timeout_secs
         );
+    }
+}
+
+/// Read the identity file's permission mode as an octal string
+/// like `"600"` or `"644"`. Returns None on non-Unix or when the
+/// metadata read fails (e.g., file doesn't exist — but identity::
+/// load would have already errored in that case).
+fn identity_file_mode(path: &std::path::Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path).ok()?;
+        let bits = meta.permissions().mode() & 0o777;
+        Some(format!("{:o}", bits))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
     }
 }
 
