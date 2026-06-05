@@ -16,6 +16,9 @@ clap = { version = "4", features = ["derive"] }
 # Shell completion generator. Used by `drift-vpn completions`
 # to emit bash/zsh/fish/elvish/powershell scripts.
 clap_complete = "4"
+# Man page generator — `drift-vpn manpage` emits troff format
+# for distro packaging. Pairs with `completions` above.
+clap_mangen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
