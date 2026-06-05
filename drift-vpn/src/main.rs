@@ -118,6 +118,28 @@ enum Cmd {
         #[clap(long)]
         force: bool,
     },
+    /// Stop the running drift-vpn daemon (if any) and bring it
+    /// back up with the same flags as `up`. Common operational
+    /// flow after editing config: `drift-vpn restart` instead of
+    /// `drift-vpn down && drift-vpn up`. When no daemon is
+    /// running, behaves identically to `drift-vpn up` (the down
+    /// phase is skipped silently).
+    Restart {
+        /// Path to TOML config (same semantics as `up`).
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+        /// Override the status-socket path.
+        #[clap(long)]
+        status_socket: Option<PathBuf>,
+        /// Skip the orphan-TUN startup check on the bring-up
+        /// phase. See `up --force-cleanup` for the trade-off.
+        #[clap(long)]
+        force_cleanup: bool,
+        /// Seconds to wait for the running daemon to exit after
+        /// SIGTERM before escalating to SIGKILL. Default 10s.
+        #[clap(long, default_value_t = 10)]
+        down_timeout: u64,
+    },
 
     /// Generate per-host drift-vpn configs from the shared
     /// drift.toml inventory managed by `drift-config`.
@@ -364,6 +386,47 @@ async fn main() -> Result<()> {
             {
                 let _ = (socket, timeout, force);
                 anyhow::bail!("drift-vpn down requires Unix sockets (Linux + macOS today)");
+            }
+        }
+        Cmd::Restart {
+            config: path,
+            status_socket,
+            force_cleanup,
+            down_timeout,
+        } => {
+            #[cfg(unix)]
+            {
+                let sock = status_socket
+                    .clone()
+                    .unwrap_or_else(status::default_socket_path);
+                // Try to stop the existing daemon. If there isn't
+                // one running, that's fine — restart degrades
+                // gracefully into a plain up. We only abort on
+                // unexpected errors (e.g., daemon refused to
+                // exit on SIGTERM and we're not in --force mode).
+                match graceful_down(&sock, down_timeout, false).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let msg = format!("{:#}", e);
+                        if msg.contains("no drift-vpn daemon running") {
+                            println!(
+                                "no daemon running at {} — proceeding with bring-up",
+                                sock.display()
+                            );
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+                let cfg_path = resolve_vpn_config_path(path);
+                let cfg = config::Config::load(&cfg_path).await?;
+                let id = identity::load(&cfg.interface.identity_file).await?;
+                daemon::run(cfg, id, sock, force_cleanup).await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (path, status_socket, force_cleanup, down_timeout);
+                anyhow::bail!("drift-vpn restart requires a Unix-like OS for TUN/utun support");
             }
         }
         Cmd::Doctor {
