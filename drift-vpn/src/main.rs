@@ -92,11 +92,25 @@ enum Cmd {
         #[clap(long)]
         force_cleanup: bool,
     },
-    /// Generate a fresh identity keypair, write the secret
-    /// to `--out`, and print the pubkey hex to stdout.
+    /// Generate a fresh identity keypair, write the secret to
+    /// `--out` (mode 0600), and print the resulting pubkey +
+    /// derived peer-id + file metadata to stdout. With `--json`
+    /// the output is structured (`{path, pubkey, peer_id, mode}`)
+    /// for scripting. Old behavior of "stdout is the bare pubkey"
+    /// is preserved with `--quiet`.
     Keygen {
         #[clap(short, long, default_value = "identity.key")]
         out: PathBuf,
+        /// Emit `{path, pubkey, peer_id, mode}` JSON instead of
+        /// the human-readable summary. Mutually exclusive with
+        /// `--quiet`.
+        #[clap(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Print only the bare pubkey hex on stdout (old default).
+        /// Useful when you're piping into another command:
+        /// `peer_pub=$(drift-vpn keygen --quiet -o k.hex)`.
+        #[clap(long)]
+        quiet: bool,
     },
     /// Print the pubkey, derived peer-id, file path, and mode for
     /// an existing identity file. Default output is human-readable;
@@ -122,6 +136,12 @@ enum Cmd {
         /// Print raw JSON instead of the human-readable summary.
         #[clap(long)]
         json: bool,
+        /// Show only the peer whose 8-byte peer-id (hex) starts
+        /// with this prefix. Useful when many peers are
+        /// configured. Both human and JSON outputs respect the
+        /// filter. With no match, exits 1.
+        #[clap(long)]
+        peer: Option<String>,
     },
     /// Gracefully stop the running drift-vpn daemon. Looks up
     /// the daemon's PID via its status socket, sends SIGTERM,
@@ -301,6 +321,12 @@ enum Cmd {
         #[clap(subcommand)]
         shell: CompletionsShell,
     },
+    /// Emit a roff(7) man page for `drift-vpn` to stdout. Pipe to
+    /// the local man path: `drift-vpn manpage >
+    /// /usr/local/share/man/man1/drift-vpn.1`. Useful for distro
+    /// packaging and for offline help when the operator can't
+    /// reach `--help`.
+    Manpage,
 }
 
 #[derive(Subcommand)]
@@ -350,6 +376,17 @@ enum ConfigCmd {
     /// pushing a config edit to a host. Exits 0 on success, 1
     /// with a list of problems otherwise.
     Check {
+        /// Path to the drift-vpn config.toml. When omitted, walks
+        /// the same candidate path list as `drift-vpn up`.
+        #[clap(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Print the resolved drift-vpn config — which file path the
+    /// auto-discovery picked, the raw TOML body, and key derived
+    /// metadata (peer count, identity-file path, listen URLs).
+    /// Useful for answering "why is drift-vpn doing X?" without
+    /// `cat`-ing config files by hand and grep-ing for typos.
+    Show {
         /// Path to the drift-vpn config.toml. When omitted, walks
         /// the same candidate path list as `drift-vpn up`.
         #[clap(short, long)]
@@ -406,10 +443,38 @@ async fn main() -> Result<()> {
         )
         .init();
     match cli.cmd {
-        Cmd::Keygen { out } => {
+        Cmd::Keygen { out, json, quiet } => {
             let pub_hex = identity::keygen(&out).await?;
-            eprintln!("wrote secret to {}", out.display());
-            println!("{}", pub_hex);
+            let peer_id_hex = hex::encode(drift::derive_peer_id(&<[u8; 32]>::try_from(
+                hex::decode(&pub_hex)?.as_slice(),
+            )?));
+            let mode = identity_file_mode(&out);
+            if quiet {
+                println!("{}", pub_hex);
+            } else if json {
+                let obj = serde_json::json!({
+                    "path": out.display().to_string(),
+                    "pubkey": pub_hex,
+                    "peer_id": peer_id_hex,
+                    "mode": mode,
+                });
+                println!("{}", serde_json::to_string_pretty(&obj)?);
+            } else {
+                println!("file:    {}", out.display());
+                if let Some(m) = mode {
+                    println!("mode:    {}", m);
+                }
+                println!("pubkey:  {}", pub_hex);
+                println!("peer_id: {}", peer_id_hex);
+                eprintln!();
+                eprintln!(
+                    "Share the pubkey with peers — they paste it into their drift-vpn config's"
+                );
+                eprintln!(
+                    "`[[peer]] public_key` field. The peer_id is the 8-byte short identifier"
+                );
+                eprintln!("that shows up in `drift-vpn status` output for cross-referencing.");
+            }
         }
         Cmd::Show {
             identity_file,
@@ -459,11 +524,25 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Status { socket, json } => {
+        Cmd::Status { socket, json, peer } => {
             #[cfg(unix)]
             {
                 let path = socket.unwrap_or_else(status::default_socket_path);
-                let report = status::fetch(&path).await?;
+                let mut report = status::fetch(&path).await?;
+                if let Some(prefix) = peer.as_deref() {
+                    let before = report.peers.len();
+                    let prefix_lc = prefix.to_lowercase();
+                    report
+                        .peers
+                        .retain(|p| p.peer_id_hex.to_lowercase().starts_with(&prefix_lc));
+                    if report.peers.is_empty() {
+                        anyhow::bail!(
+                            "no peer matched prefix `{}` ({} peers configured)",
+                            prefix,
+                            before
+                        );
+                    }
+                }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
@@ -472,7 +551,7 @@ async fn main() -> Result<()> {
             }
             #[cfg(not(unix))]
             {
-                let _ = (socket, json);
+                let _ = (socket, json, peer);
                 anyhow::bail!("drift-vpn status requires Unix sockets (Linux + macOS today)");
             }
         }
@@ -633,6 +712,14 @@ async fn main() -> Result<()> {
                 &mut std::io::stdout(),
             );
         }
+        Cmd::Manpage => {
+            use anyhow::Context as _;
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+            let man = clap_mangen::Man::new(cmd);
+            man.render(&mut std::io::stdout())
+                .context("rendering man page to stdout")?;
+        }
         Cmd::Config { cmd } => match cmd {
             ConfigCmd::Init { config, cidr, mtu } => {
                 let path = resolve_config_path(config)?;
@@ -659,7 +746,41 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+            ConfigCmd::Show { config } => {
+                let path = resolve_vpn_config_path(config);
+                show_vpn_config(&path).await?;
+            }
         },
+    }
+    Ok(())
+}
+
+/// Print the resolved drift-vpn daemon config — path, raw TOML,
+/// and a short summary of derived metadata. Useful for the "what
+/// is drift-vpn actually reading?" debugging question without
+/// shell-piping cat/grep by hand.
+async fn show_vpn_config(path: &std::path::Path) -> Result<()> {
+    use anyhow::Context as _;
+    let body = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    let cfg: config::Config =
+        toml::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
+
+    println!("# resolved drift-vpn config");
+    println!("# path: {}", path.display());
+    println!("# peers: {}", cfg.peers.len());
+    println!("# identity_file: {}", cfg.interface.identity_file.display());
+    if !cfg.interface.listen.is_empty() {
+        println!("# listen:");
+        for l in &cfg.interface.listen {
+            println!("#   - {}", l);
+        }
+    }
+    println!();
+    print!("{}", body);
+    if !body.ends_with('\n') {
+        println!();
     }
     Ok(())
 }
