@@ -317,92 +317,77 @@ pub(crate) fn render_human(report: &StatusReport) -> String {
     use std::fmt::Write;
     let _ = writeln!(
         out,
-        "local: peer={} iface={} addr={} uptime={}s",
-        &report.local.peer_id_hex, report.local.iface, report.local.addr, report.local.uptime_secs
+        "drift-vpn — {} on {}, up for {} (pid {})",
+        report.local.addr,
+        report.local.iface,
+        format_duration(report.local.uptime_secs),
+        report.local.pid,
     );
-    let _ = writeln!(out, "  pubkey: {}", report.local.pubkey_hex);
+    let _ = writeln!(out, "  identity: {}", report.local.pubkey_hex);
     let _ = writeln!(out);
-    let _ = writeln!(out, "peers: {}", report.peers.len());
+    let _ = writeln!(out, "peers ({} configured):", report.peers.len());
     for p in &report.peers {
-        // State display depends on kind:
-        //   * Direct/Mesh peer with a DRIFT session →
-        //     "established" or "pending" per is_established.
-        //   * Federation peer has no direct session — show
-        //     "federation-routed" instead of "pending tx=0
-        //     rx=0" so operators don't mistake it for broken.
-        //     Actual reachability is the bridge's session
-        //     state, which the bridge shows in its own peers
-        //     list above this one.
-        let state = match (p.kind, p.is_established) {
-            (PeerKind::Federation, _) => "federation-routed",
-            (_, true) => "established",
-            (_, false) => "pending",
+        // Human-readable summary line: <kind/state>, <addr>, <rtt
+        // or staleness>. Keep the peer-id on its own row so wide
+        // hex doesn't push the human-readable columns off-screen.
+        let summary = match (p.kind, p.is_established) {
+            (PeerKind::Federation, _) => "via bridge".to_string(),
+            (PeerKind::Mesh, true) => "via mesh — established".to_string(),
+            (PeerKind::Mesh, false) => "via mesh — handshaking".to_string(),
+            (PeerKind::Direct, true) => "direct — established".to_string(),
+            (PeerKind::Direct, false) => "direct — handshaking".to_string(),
         };
-        let kind_tag = match p.kind {
-            PeerKind::Direct => "",
-            PeerKind::Mesh => " kind=mesh",
-            PeerKind::Federation => " kind=federation",
+        let where_ = match (p.kind, p.current_addr.as_deref()) {
+            (PeerKind::Federation, _) => "".to_string(),
+            (_, Some(addr)) => format!(" at {}", addr),
+            (_, None) => "".to_string(),
         };
-        let srtt = p
-            .srtt_us
-            .map(|us| format!("{:.1}ms", us as f64 / 1000.0))
-            .unwrap_or_else(|| "—".into());
-        let stale = if p.seconds_since_last_seen == u64::MAX {
-            "never".to_string()
-        } else {
-            format!("{}s", p.seconds_since_last_seen)
+        let timing = match (p.srtt_us, p.seconds_since_last_seen) {
+            (_, u64::MAX) => "never seen".to_string(),
+            (Some(us), s) => format!(
+                "rtt {:.0} ms, last traffic {} ago",
+                us as f64 / 1000.0,
+                format_duration(s)
+            ),
+            (None, s) => format!("last traffic {} ago", format_duration(s)),
         };
-        let _ = writeln!(
-            out,
-            "  {}  {}  state={}{} srtt={} stale={}",
-            &p.peer_id_hex,
-            p.current_addr.as_deref().unwrap_or("—"),
-            state,
-            kind_tag,
-            srtt,
-            stale,
-        );
-        // For federation peers, the tx/rx counters here are
-        // zero by construction — peer_metrics tracks the direct
-        // session, federation peers don't have one. Suppress
-        // the misleading "tx=0 rx=0" and show the data plane
-        // counters from the daemon (tun writes, egress sent)
-        // are the source of truth instead.
-        if p.kind == PeerKind::Federation {
+        let allowed = p.allowed_ips.join(", ");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "  {} ({}){}", p.peer_id_hex, summary, where_);
+        let _ = writeln!(out, "    routes: {}", allowed);
+        let _ = writeln!(out, "    {}", timing);
+        // Federation peers have no direct session, so tx/rx on the
+        // peer struct are zero by construction. Skip them rather
+        // than mislead.
+        if p.kind != PeerKind::Federation {
             let _ = writeln!(
                 out,
-                "    allowed_ips={:?}  (tx/rx counters are bridge-side; see daemon counters below)",
-                p.allowed_ips
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "    allowed_ips={:?}  tx={} rx={}",
-                p.allowed_ips, p.tx_packets, p.rx_packets
+                "    tx {} pkts, rx {} pkts",
+                p.tx_packets, p.rx_packets
             );
         }
     }
     let _ = writeln!(out);
     let m = &report.metrics;
-    let _ = writeln!(out, "counters:");
+    let _ = writeln!(out, "daemon counters:");
     let _ = writeln!(
         out,
-        "  tun:      writes={} bytes={} errs={}",
+        "  tun:       {} writes, {} bytes, {} errors",
         m.tun_writes, m.tun_bytes_written, m.tun_write_errs
     );
     let _ = writeln!(
         out,
-        "  egress:   sent={} errs={} no-route={}",
+        "  egress:    {} sent, {} errors, {} no-route drops",
         m.send_data_ok, m.send_data_errs, m.no_route_drops
     );
     let _ = writeln!(
         out,
-        "  rpfilter: config-mismatch={} unknown-peer={} parse-fail={}",
+        "  rp filter: {} config-mismatch, {} unknown-peer, {} parse-fail",
         m.rpfilter_config_mismatch, m.rpfilter_unknown_peer, m.rpfilter_parse_failed
     );
     let _ = writeln!(
         out,
-        "  failover: total={} udp={} tcp={} other={} restart={} hold-skipped={}",
+        "  failover:  {} commits total ({} udp, {} tcp, {} other), {} restarts, {} hold-skipped",
         m.failover_commits_total,
         m.failover_to_udp,
         m.failover_to_tcp,
@@ -411,6 +396,40 @@ pub(crate) fn render_human(report: &StatusReport) -> String {
         m.failover_hold_skipped
     );
     out
+}
+
+/// Format an integer second count as a human-friendly duration
+/// (e.g. "3m 9s", "1h 4m", "2d 7h"). Used in `drift-vpn status`
+/// for uptime + last-traffic readouts.
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{}s", secs);
+    }
+    if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        return if s == 0 {
+            format!("{}m", m)
+        } else {
+            format!("{}m {}s", m, s)
+        };
+    }
+    if secs < 86_400 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        return if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h {}m", h, m)
+        };
+    }
+    let d = secs / 86_400;
+    let h = (secs % 86_400) / 3600;
+    if h == 0 {
+        format!("{}d", d)
+    } else {
+        format!("{}d {}h", d, h)
+    }
 }
 
 /// Render a `StatusReport` in Prometheus text exposition format.
@@ -704,5 +723,32 @@ pub(crate) async fn run_prom_server(addr: std::net::SocketAddr, ctx: Arc<StatusC
             let _ = sock.write_all(response.as_bytes()).await;
             let _ = sock.shutdown().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_seconds_minutes_hours_days() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(60), "1m");
+        assert_eq!(format_duration(61), "1m 1s");
+        assert_eq!(format_duration(189), "3m 9s");
+        assert_eq!(format_duration(3600), "1h");
+        assert_eq!(format_duration(3660), "1h 1m");
+        assert_eq!(format_duration(86_400), "1d");
+        assert_eq!(format_duration(90_061), "1d 1h");
+    }
+
+    #[test]
+    fn format_duration_no_trailing_zero_units() {
+        // 1m exactly should be "1m", not "1m 0s" — trailing
+        // zero-unit suffixes read as accidental sloppiness.
+        assert_eq!(format_duration(60), "1m");
+        assert_eq!(format_duration(3600), "1h");
+        assert_eq!(format_duration(86_400), "1d");
     }
 }
