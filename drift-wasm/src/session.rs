@@ -1,45 +1,61 @@
-//! Wire-agnostic DRIFT session state.
+//! Wire-agnostic DRIFT session, driven by the sans-IO engine.
 //!
-//! Owns the protocol state machine (peer sessions, handshake
-//! flow, DATA encrypt/decrypt). Has no knowledge of *how* bytes
-//! reach the peer — that's the job of a thin wire adapter (WS,
-//! WebRTC, WebTransport) which plugs its send function in via
-//! `Session::new`.
+//! Until phase 5 of the sans-IO arc (`docs/SANSIO_DESIGN.md`)
+//! this file hand-rolled a simplified dialect of the protocol —
+//! no replay protection, no PQ, no retransmits, no cookies, and
+//! not byte-compatible with the native transport's short-header
+//! path. It is now a ~250-line driver around
+//! `drift_proto::Endpoint`: the browser speaks the exact same
+//! protocol code as every other DRIFT peer, including PQ-hybrid
+//! handshakes, the replay window, HELLO retransmits (driven by a
+//! JS interval), short headers, rekey, and Close.
 //!
-//! Wire code calls `session.handle_incoming_bytes(buf)` when
-//! bytes arrive. Session calls the supplied `send_fn` closure
-//! when it wants to send bytes. Neither side knows what the
-//! other is made of.
+//! The driver pattern is the standard sans-IO pump: wires call
+//! `session.handle_incoming_bytes(buf)` for every inbound frame;
+//! the session feeds the engine and flushes
+//! `Endpoint::poll_transmit` through the wire's `send_fn`.
+//! Browser wires are a single pipe, so the engine's `SocketAddr`
+//! parameters are satisfied with a fixed placeholder — the wire
+//! ignores destination addresses and the bridge routes by DRIFT
+//! header, not IP.
 
-use crate::peer_session::{PeerSession, PendingHandshake};
-use drift_core::crypto::{derive_peer_id, Direction, PeerId, SessionKey};
-use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
-use drift_core::identity::{derive_session_key, Identity, NONCE_LEN, STATIC_KEY_LEN};
+use drift_core::crypto::PeerId;
+use drift_proto::time::Instant;
+use drift_proto::{Config, Direction, Endpoint, Event};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
-const HELLO_PAYLOAD_LEN: usize = STATIC_KEY_LEN + STATIC_KEY_LEN + NONCE_LEN;
-const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
-const MESH_HOP_TTL: u8 = 8;
-
-fn random_nonce() -> [u8; NONCE_LEN] {
-    let mut nonce = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce).expect("getrandom");
-    nonce
+/// Placeholder address for the engine's SocketAddr parameters —
+/// browser wires are a single pipe with no addressing.
+fn wire_addr() -> SocketAddr {
+    SocketAddr::from(([1, 1, 1, 1], 1))
 }
+
+/// How often the JS interval drives `Endpoint::handle_timeout`
+/// (HELLO retransmit backoff, cookie rotation, eviction). 250 ms
+/// comfortably under-samples the engine's shortest default backoff
+/// (2 s).
+const TICK_MS: i32 = 250;
 
 /// Closure type used to hand bytes to the underlying wire.
 pub(crate) type Sender = dyn Fn(&[u8]) -> Result<(), JsValue>;
 
-/// All protocol state. Wire-agnostic.
+struct Waiter {
+    resolve: js_sys::Function,
+    reject: js_sys::Function,
+}
+
 pub(crate) struct SessionState {
-    local_secret: [u8; 32],
-    local_peer_id: PeerId,
+    ep: Endpoint,
+    server_pub: [u8; 32],
     server_peer_id: PeerId,
-    peers: HashMap<PeerId, PeerSession>,
     on_message: Option<js_sys::Function>,
+    /// Handshake promises awaiting Connected / HandshakeTimedOut.
+    waiters: HashMap<PeerId, Waiter>,
 }
 
 /// Wire-agnostic DRIFT session. Clone-able via `Rc`.
@@ -50,33 +66,52 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Construct a Session with a freshly-built wire. The caller
-    /// is responsible for arranging that `send_fn` actually ships
-    /// bytes over the wire, and for calling
-    /// `handle_incoming_bytes` on every inbound frame.
+    /// Construct a Session over a freshly-built wire. The caller
+    /// arranges that `send_fn` ships bytes over the wire and that
+    /// `handle_incoming_bytes` is called on every inbound frame.
     pub(crate) fn new(
         local_secret: [u8; 32],
-        server_pub: [u8; STATIC_KEY_LEN],
+        server_pub: [u8; 32],
         send_fn: Rc<Sender>,
     ) -> Self {
-        let local_id = Identity::from_secret_bytes(local_secret);
-        let local_public = local_id.public_bytes();
-        let local_peer_id = derive_peer_id(&local_public);
-        let server_peer_id = derive_peer_id(&server_pub);
+        let identity = drift_proto::Identity::from_secret_bytes(local_secret);
+        let mut ep = Endpoint::new(
+            identity,
+            Config {
+                // Mirror the old WASM behavior: any peer that can
+                // reach us through the bridge may handshake (the
+                // native equivalent of accept_any_peer).
+                accept_any_peer: true,
+                ..Config::default()
+            },
+        );
+        let server_peer_id = ep.add_peer(server_pub, wire_addr(), Direction::Initiator);
 
-        let mut peers = HashMap::new();
-        peers.insert(server_peer_id, PeerSession::new(server_pub));
-
-        Self {
+        let session = Self {
             state: Rc::new(RefCell::new(SessionState {
-                local_secret,
-                local_peer_id,
+                ep,
+                server_pub,
                 server_peer_id,
-                peers,
                 on_message: None,
+                waiters: HashMap::new(),
             })),
             send_fn,
-        }
+        };
+
+        // Periodic tick: retransmits, cookie rotation, eviction.
+        // The pre-engine dialect had no retransmit path at all — a
+        // single lost HELLO hung the connect promise forever.
+        let tick_session = session.clone();
+        let tick = Closure::wrap(Box::new(move || {
+            tick_session.tick();
+        }) as Box<dyn FnMut()>);
+        set_interval(&tick, TICK_MS);
+        // Session lifetime == page/worker lifetime; the leaked
+        // closure is one allocation per session (standard
+        // wasm-bindgen practice for persistent callbacks).
+        tick.forget();
+
+        session
     }
 
     pub(crate) fn server_peer_id(&self) -> PeerId {
@@ -87,406 +122,161 @@ impl Session {
         self.state.borrow_mut().on_message = Some(cb);
     }
 
-    /// Kick off a DRIFT handshake with the given peer. Returns a
-    /// JS Promise that resolves when the matching HELLO_ACK
-    /// arrives.
+    /// Kick off the handshake with the direct server. Returns a JS
+    /// Promise that resolves on `Event::Connected` (and rejects if
+    /// the engine gives up retransmitting).
     pub(crate) fn begin_handshake(&self, peer_id: PeerId) -> Result<js_sys::Promise, JsValue> {
         let state = self.state.clone();
         let promise = js_sys::Promise::new(&mut |resolve, reject| {
-            let mut s = state.borrow_mut();
-            if let Some(peer) = s.peers.get_mut(&peer_id) {
-                peer.handshake_resolve = Some(resolve);
-                peer.handshake_reject = Some(reject);
-            }
+            state
+                .borrow_mut()
+                .waiters
+                .insert(peer_id, Waiter { resolve, reject });
         });
-        self.send_hello(peer_id)?;
+        {
+            let mut s = self.state.borrow_mut();
+            if peer_id != s.server_peer_id {
+                return Err(JsValue::from_str("begin_handshake: unknown peer"));
+            }
+            let server_pub = s.server_pub;
+            s.ep.connect(Instant::now(), server_pub, wire_addr());
+        }
+        self.pump();
         Ok(promise)
     }
 
-    /// Register a mesh peer (known only by pubkey), then begin a
-    /// handshake with them. The handshake bytes ride the
-    /// existing wire — the server routes them to wherever the
-    /// target peer lives.
-    pub(crate) async fn add_peer(
-        &self,
-        peer_pub: [u8; STATIC_KEY_LEN],
-    ) -> Result<(), JsValue> {
-        let peer_id = derive_peer_id(&peer_pub);
-        {
-            let mut s = self.state.borrow_mut();
-            s.peers
-                .entry(peer_id)
-                .or_insert_with(|| PeerSession::new(peer_pub));
-        }
-        let p = self.begin_handshake(peer_id)?;
-        wasm_bindgen_futures::JsFuture::from(p).await?;
+    /// Register a mesh peer (known only by pubkey) and handshake
+    /// with them. The flights carry the mesh hop-TTL budget so the
+    /// bridge routes them to wherever the target peer lives.
+    pub(crate) async fn add_peer(&self, peer_pub: [u8; 32]) -> Result<(), JsValue> {
+        let peer_id = drift_proto::derive_peer_id(&peer_pub);
+        let state = self.state.clone();
+        let promise = js_sys::Promise::new(&mut |resolve, reject| {
+            state
+                .borrow_mut()
+                .waiters
+                .insert(peer_id, Waiter { resolve, reject });
+        });
+        self.state
+            .borrow_mut()
+            .ep
+            .connect_mesh(Instant::now(), peer_pub, wire_addr());
+        self.pump();
+        wasm_bindgen_futures::JsFuture::from(promise).await?;
         Ok(())
     }
 
-    /// Send an AEAD-encrypted DATA packet to `peer_id`.
-    pub(crate) async fn send_data_to(
-        &self,
-        peer_id: PeerId,
-        payload: &[u8],
-    ) -> Result<(), JsValue> {
-        let wire = {
-            let mut s = self.state.borrow_mut();
-            let local_peer_id = s.local_peer_id;
-            let server_peer_id = s.server_peer_id;
-            let peer = s
-                .peers
-                .get_mut(&peer_id)
-                .ok_or_else(|| JsValue::from_str("unknown peer"))?;
-            if !peer.is_established() {
-                return Err(JsValue::from_str("peer session not established"));
-            }
-
-            let seq = peer.next_seq;
-            peer.next_seq += 1;
-
-            let hop_ttl = if peer_id == server_peer_id {
-                1
-            } else {
-                MESH_HOP_TTL
-            };
-            let mut header = Header::new(PacketType::Data, seq, local_peer_id, peer_id);
-            header.hop_ttl = hop_ttl;
-            if hop_ttl > 1 {
-                header.flags |= drift_core::header::FLAG_ROUTED;
-            }
-            header.payload_len = payload.len() as u16;
-            let mut hbuf = [0u8; HEADER_LEN];
-            header.encode(&mut hbuf);
-            let aad = canonical_aad(&hbuf);
-
-            let mut wire = Vec::with_capacity(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
-            wire.extend_from_slice(&hbuf);
-            peer.tx
-                .as_ref()
-                .unwrap()
-                .seal_into(seq, PacketType::Data as u8, &aad, payload, &mut wire)
-                .map_err(|e| JsValue::from_str(&format!("seal: {}", e)))?;
-            wire
-        };
-
-        (self.send_fn)(&wire)
+    /// Send an AEAD-encrypted DATA packet to `peer_id`. If the
+    /// handshake is still in flight the engine parks the payload
+    /// and flushes it on establishment (the old dialect errored).
+    pub(crate) async fn send_data_to(&self, peer_id: PeerId, payload: &[u8]) -> Result<(), JsValue> {
+        self.state
+            .borrow_mut()
+            .ep
+            .send(Instant::now(), &peer_id, payload, 0, 0)
+            .map_err(|e| JsValue::from_str(&format!("drift send: {e}")))?;
+        self.pump();
+        Ok(())
     }
 
-    /// Dispatch one incoming binary frame. Called by wire code
-    /// from its receive callback. No-op on malformed or
-    /// unexpected packet types — this minimal client doesn't
-    /// participate in beacons, pings, etc.
+    /// Dispatch one incoming binary frame. Called by wire code from
+    /// its receive callback. Rejected packets (malformed, replayed,
+    /// unauthenticated) are logged and dropped — a remote peer must
+    /// not be able to wedge the session.
     pub(crate) fn handle_incoming_bytes(&self, data: &[u8]) {
-        if data.len() < HEADER_LEN {
-            return;
+        let res = self
+            .state
+            .borrow_mut()
+            .ep
+            .handle_datagram(Instant::now(), wire_addr(), data);
+        if let Err(e) = res {
+            web_sys::console::warn_1(&format!("DRIFT: dropped packet: {e}").into());
         }
-        let header = match Header::decode(&data[..HEADER_LEN]) {
-            Ok(h) => h,
-            Err(_) => return,
+        self.pump();
+    }
+
+    /// Drive time-based behavior. Called from the JS interval.
+    fn tick(&self) {
+        self.state.borrow_mut().ep.handle_timeout(Instant::now());
+        self.pump();
+    }
+
+    /// Flush queued transmits through the wire and dispatch queued
+    /// events to JS. Transmits and events are collected under the
+    /// borrow, then the borrow is released BEFORE touching the
+    /// wire or calling back into JS — both can synchronously
+    /// re-enter the session.
+    fn pump(&self) {
+        let (transmits, events) = {
+            let mut s = self.state.borrow_mut();
+            let mut transmits = Vec::new();
+            while let Some(t) = s.ep.poll_transmit() {
+                transmits.push(t.contents);
+            }
+            let mut events = Vec::new();
+            while let Some(e) = s.ep.poll_event() {
+                events.push(e);
+            }
+            (transmits, events)
         };
-        match header.packet_type {
-            PacketType::HelloAck => {
-                if let Err(e) = self.handle_hello_ack(&header, data) {
-                    web_sys::console::warn_1(&format!("DRIFT hello_ack: {:?}", e).into());
+
+        for bytes in transmits {
+            if let Err(e) = (self.send_fn)(&bytes) {
+                web_sys::console::warn_1(&format!("DRIFT: wire send failed: {e:?}").into());
+            }
+        }
+
+        for event in events {
+            match event {
+                Event::Connected { peer } => {
+                    let waiter = self.state.borrow_mut().waiters.remove(&peer);
+                    web_sys::console::log_1(
+                        &format!("DRIFT handshake complete (peer={})", hex8(&peer)).into(),
+                    );
+                    if let Some(w) = waiter {
+                        let _ = w.resolve.call0(&JsValue::NULL);
+                    }
+                }
+                Event::HandshakeTimedOut { peer } => {
+                    let waiter = self.state.borrow_mut().waiters.remove(&peer);
+                    if let Some(w) = waiter {
+                        let _ = w.reject.call1(
+                            &JsValue::NULL,
+                            &JsValue::from_str("DRIFT handshake timed out"),
+                        );
+                    }
+                }
+                Event::Data { peer, payload, .. } => {
+                    let cb = self.state.borrow().on_message.clone();
+                    if let Some(cb) = cb {
+                        let src_hex = JsValue::from_str(&hex8(&peer));
+                        let arr = js_sys::Uint8Array::from(payload.as_slice());
+                        let _ = cb.call2(&JsValue::NULL, &src_hex, &arr);
+                    }
+                }
+                Event::Closed { peer } => {
+                    web_sys::console::log_1(
+                        &format!("DRIFT peer closed session (peer={})", hex8(&peer)).into(),
+                    );
                 }
             }
-            PacketType::Hello => {
-                // Incoming HELLO from another peer — handshake
-                // us as the responder. Mesh-routed by the
-                // bridge means another browser (or any DRIFT
-                // peer that can reach us via the relay) is
-                // initiating a session with us. We auto-register
-                // them (no allowlist on the WASM side — equivalent
-                // of native `accept_any_peer = true`).
-                if let Err(e) = self.handle_hello(&header, data) {
-                    web_sys::console::warn_1(&format!("DRIFT hello: {:?}", e).into());
-                }
-            }
-            PacketType::Data => {
-                self.handle_data(&header, data);
-            }
-            _ => {}
         }
     }
+}
 
-    fn send_hello(&self, peer_id: PeerId) -> Result<(), JsValue> {
-        let local_secret;
-        let local_peer_id;
-        let server_peer_id;
-        {
-            let s = self.state.borrow();
-            local_secret = s.local_secret;
-            local_peer_id = s.local_peer_id;
-            server_peer_id = s.server_peer_id;
-        }
-
-        let local_id = Identity::from_secret_bytes(local_secret);
-        let local_public = local_id.public_bytes();
-        let client_nonce = random_nonce();
-        let ephemeral = Identity::generate();
-        let ephemeral_pub = ephemeral.public_bytes();
-
-        let hop_ttl = if peer_id == server_peer_id {
-            1
-        } else {
-            MESH_HOP_TTL
-        };
-        let mut header = Header::new(PacketType::Hello, 0, local_peer_id, peer_id);
-        header.hop_ttl = hop_ttl;
-        if hop_ttl > 1 {
-            header.flags |= drift_core::header::FLAG_ROUTED;
-        }
-        header.payload_len = HELLO_PAYLOAD_LEN as u16;
-        let mut hbuf = [0u8; HEADER_LEN];
-        header.encode(&mut hbuf);
-
-        let mut wire = Vec::with_capacity(HEADER_LEN + HELLO_PAYLOAD_LEN);
-        wire.extend_from_slice(&hbuf);
-        wire.extend_from_slice(&local_public);
-        wire.extend_from_slice(&ephemeral_pub);
-        wire.extend_from_slice(&client_nonce);
-
-        {
-            let mut s = self.state.borrow_mut();
-            if let Some(peer) = s.peers.get_mut(&peer_id) {
-                peer.pending_hs = Some(PendingHandshake {
-                    client_nonce,
-                    ephemeral,
-                });
-            } else {
-                return Err(JsValue::from_str("unknown peer for HELLO"));
-            }
-        }
-
-        (self.send_fn)(&wire)
-    }
-
-    fn handle_hello_ack(&self, header: &Header, data: &[u8]) -> Result<(), JsValue> {
-        if data.len() < HEADER_LEN + HELLO_ACK_PAYLOAD_LEN {
-            return Err(JsValue::from_str("HELLO_ACK too short"));
-        }
-        let body = &data[HEADER_LEN..];
-        let mut server_eph_pub = [0u8; STATIC_KEY_LEN];
-        server_eph_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
-        let mut server_nonce = [0u8; NONCE_LEN];
-        server_nonce.copy_from_slice(&body[STATIC_KEY_LEN..STATIC_KEY_LEN + NONCE_LEN]);
-        let tag = &body[STATIC_KEY_LEN + NONCE_LEN..STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN];
-        let peer_id = header.src_id;
-
-        let (resolve, _reject) = {
-            let mut s = self.state.borrow_mut();
-            let local_secret = s.local_secret;
-            let peer = s
-                .peers
-                .get_mut(&peer_id)
-                .ok_or_else(|| JsValue::from_str("HELLO_ACK for unknown peer"))?;
-            let hs = peer
-                .pending_hs
-                .take()
-                .ok_or_else(|| JsValue::from_str("HELLO_ACK with no pending handshake"))?;
-
-            let local_id = Identity::from_secret_bytes(local_secret);
-            let static_dh = local_id
-                .dh(&peer.peer_pub)
-                .ok_or_else(|| JsValue::from_str("static DH failed"))?;
-            let ephemeral_dh = hs
-                .ephemeral
-                .dh(&server_eph_pub)
-                .ok_or_else(|| JsValue::from_str("ephemeral DH failed"))?;
-
-            let session_key_bytes =
-                derive_session_key(&static_dh, &ephemeral_dh, &hs.client_nonce, &server_nonce);
-            let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
-            let rx = SessionKey::new(&session_key_bytes, Direction::Responder);
-
-            let mut hbuf = [0u8; HEADER_LEN];
-            header.encode(&mut hbuf);
-            let canon = canonical_aad(&hbuf);
-            let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
-            aad.extend_from_slice(&canon);
-            aad.extend_from_slice(&server_eph_pub);
-            aad.extend_from_slice(&server_nonce);
-            rx.open(1, PacketType::HelloAck as u8, &aad, tag)
-                .map_err(|e| JsValue::from_str(&format!("HELLO_ACK auth failed: {}", e)))?;
-
-            peer.tx = Some(tx);
-            peer.rx = Some(rx);
-            peer.next_seq = 2;
-            (peer.handshake_resolve.take(), peer.handshake_reject.take())
-        };
-
-        web_sys::console::log_1(
-            &format!("DRIFT handshake complete (peer={})", hex8(&peer_id)).into(),
+/// `setInterval` that works in both window and worker contexts.
+fn set_interval(f: &Closure<dyn FnMut()>, ms: i32) {
+    let global = js_sys::global();
+    if let Some(w) = global.dyn_ref::<web_sys::Window>() {
+        let _ = w.set_interval_with_callback_and_timeout_and_arguments_0(
+            f.as_ref().unchecked_ref(),
+            ms,
         );
-        if let Some(resolve) = resolve {
-            let _ = resolve.call0(&JsValue::NULL);
-        }
-        Ok(())
-    }
-
-    /// Server-side handshake. Mirror of native
-    /// `regenerate_session` (drift/src/transport/mod.rs): on
-    /// receipt of a peer's HELLO, derive the session key from
-    /// static+ephemeral DH, seal a HELLO_ACK, and install the
-    /// session so subsequent DATA decrypts.
-    ///
-    /// For v1 we refuse PQ-hybrid HELLOs from the WASM side —
-    /// server-side ML-KEM encap isn't wired into the WASM
-    /// build yet. The peer's WASM session will receive nothing
-    /// and time out; that mirrors native's PQ-mismatch fail-
-    /// closed behavior.
-    fn handle_hello(&self, header: &Header, data: &[u8]) -> Result<(), JsValue> {
-        // Refuse PQ (FLAG_PQ_HYBRID, bit 2 — see drift-core::header).
-        if header.flags & drift_core::header::FLAG_PQ_HYBRID != 0 {
-            return Err(JsValue::from_str(
-                "PQ-hybrid HELLO refused: WASM server-side ML-KEM not implemented",
-            ));
-        }
-        if data.len() < HEADER_LEN + HELLO_PAYLOAD_LEN {
-            return Err(JsValue::from_str("HELLO too short"));
-        }
-        let body = &data[HEADER_LEN..];
-        let mut client_static_pub = [0u8; STATIC_KEY_LEN];
-        client_static_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
-        let mut client_eph_pub = [0u8; STATIC_KEY_LEN];
-        client_eph_pub.copy_from_slice(&body[STATIC_KEY_LEN..STATIC_KEY_LEN * 2]);
-        let mut client_nonce = [0u8; NONCE_LEN];
-        client_nonce.copy_from_slice(
-            &body[STATIC_KEY_LEN * 2..STATIC_KEY_LEN * 2 + NONCE_LEN],
+    } else if let Some(w) = global.dyn_ref::<web_sys::WorkerGlobalScope>() {
+        let _ = w.set_interval_with_callback_and_timeout_and_arguments_0(
+            f.as_ref().unchecked_ref(),
+            ms,
         );
-        // Reject weak (zero / low-order) pubkeys upfront. The
-        // DH below would also catch low-order via Identity::dh's
-        // contributory check, but rejecting the obvious cases
-        // here saves any X25519 work on the fast-path.
-        if client_static_pub == [0u8; STATIC_KEY_LEN]
-            || client_eph_pub == [0u8; STATIC_KEY_LEN]
-        {
-            return Err(JsValue::from_str("rejected weak HELLO pubkey"));
-        }
-        // The HELLO must be addressed to us — mesh routing fans
-        // out, so a mis-addressed HELLO arriving here is either
-        // a bridge bug or a misdirected probe. Drop.
-        let local_peer_id = self.state.borrow().local_peer_id;
-        if header.dst_id != local_peer_id {
-            return Err(JsValue::from_str("HELLO not addressed to us"));
-        }
-        let client_peer_id = derive_peer_id(&client_static_pub);
-
-        // Generate our server-side ephemeral + nonce.
-        let server_ephemeral = Identity::generate();
-        let server_eph_pub = server_ephemeral.public_bytes();
-        let server_nonce = random_nonce();
-
-        // Static + ephemeral DH. Same key derivation as native
-        // `regenerate_session` — only the Direction tags on the
-        // SessionKey are flipped because we're the responder.
-        let local_secret = self.state.borrow().local_secret;
-        let local_id = Identity::from_secret_bytes(local_secret);
-        let static_dh = local_id
-            .dh(&client_static_pub)
-            .ok_or_else(|| JsValue::from_str("static DH failed"))?;
-        let ephemeral_dh = server_ephemeral
-            .dh(&client_eph_pub)
-            .ok_or_else(|| JsValue::from_str("ephemeral DH failed"))?;
-        let session_key_bytes =
-            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce);
-        let tx = SessionKey::new(&session_key_bytes, Direction::Responder);
-        let rx = SessionKey::new(&session_key_bytes, Direction::Initiator);
-
-        // Build HELLO_ACK header. Mirror native: dst is the
-        // client_peer_id, seq=1, hop_ttl=MESH_HOP_TTL so the
-        // bridge will mesh-route the ack back (the original
-        // HELLO came in mesh-routed if header.hop_ttl > 1; the
-        // bridge needs the same routing budget for the reply).
-        let mut ack_header = Header::new(
-            PacketType::HelloAck,
-            1,
-            local_peer_id,
-            client_peer_id,
-        );
-        ack_header.hop_ttl = MESH_HOP_TTL;
-        if MESH_HOP_TTL > 1 {
-            ack_header.flags |= drift_core::header::FLAG_ROUTED;
-        }
-        ack_header.payload_len = HELLO_ACK_PAYLOAD_LEN as u16;
-        let mut hbuf = [0u8; HEADER_LEN];
-        ack_header.encode(&mut hbuf);
-
-        // AAD covers header + server_eph_pub + server_nonce
-        // (matches native).
-        let canon = canonical_aad(&hbuf);
-        let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
-        aad.extend_from_slice(&canon);
-        aad.extend_from_slice(&server_eph_pub);
-        aad.extend_from_slice(&server_nonce);
-        let tag = tx
-            .seal(1, PacketType::HelloAck as u8, &aad, b"")
-            .map_err(|e| JsValue::from_str(&format!("HELLO_ACK seal: {}", e)))?;
-
-        let mut wire = Vec::with_capacity(HEADER_LEN + HELLO_ACK_PAYLOAD_LEN);
-        wire.extend_from_slice(&hbuf);
-        wire.extend_from_slice(&server_eph_pub);
-        wire.extend_from_slice(&server_nonce);
-        wire.extend_from_slice(&tag);
-
-        // Auto-register the peer (no allowlist). Install
-        // tx/rx — they're directly usable; the WASM Session
-        // doesn't use the native AwaitingData→Established two-
-        // phase model.
-        {
-            let mut s = self.state.borrow_mut();
-            let peer = s
-                .peers
-                .entry(client_peer_id)
-                .or_insert_with(|| PeerSession::new(client_static_pub));
-            peer.peer_pub = client_static_pub;
-            peer.tx = Some(tx);
-            peer.rx = Some(rx);
-            // Our first outbound DATA will be seq=2 — seq=1 was
-            // the HELLO_ACK we just sealed.
-            peer.next_seq = 2;
-        }
-
-        (self.send_fn)(&wire)?;
-        web_sys::console::log_1(
-            &format!(
-                "DRIFT inbound handshake complete (peer={})",
-                hex8(&client_peer_id)
-            )
-            .into(),
-        );
-        Ok(())
-    }
-
-    fn handle_data(&self, header: &Header, data: &[u8]) {
-        if data.len() < HEADER_LEN + AUTH_TAG_LEN {
-            return;
-        }
-        let peer_id = header.src_id;
-        let s = self.state.borrow();
-        let peer = match s.peers.get(&peer_id) {
-            Some(p) => p,
-            None => return,
-        };
-        let rx = match &peer.rx {
-            Some(rx) => rx,
-            None => return,
-        };
-        let body = &data[HEADER_LEN..];
-        let hbuf: &[u8; HEADER_LEN] = data[..HEADER_LEN].try_into().unwrap();
-        let aad = canonical_aad(hbuf);
-        match rx.open(header.seq, PacketType::Data as u8, &aad, body) {
-            Ok(plaintext) => {
-                if let Some(ref cb) = s.on_message {
-                    let src_hex = JsValue::from_str(&hex8(&peer_id));
-                    let arr = js_sys::Uint8Array::from(plaintext.as_slice());
-                    let _ = cb.call2(&JsValue::NULL, &src_hex, &arr);
-                }
-            }
-            Err(_) => {
-                web_sys::console::warn_1(&"DRIFT: DATA decrypt failed".into());
-            }
-        }
     }
 }
 

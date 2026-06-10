@@ -14,6 +14,20 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **drift-wasm now runs the real protocol (sans-IO phase 5a).** The
+  browser build's hand-rolled session layer (no replay protection,
+  no PQ, no retransmits, no short headers) is replaced by a thin
+  driver around `drift_proto::Endpoint` — the browser now speaks
+  the same protocol code as every native peer: PQ-hybrid
+  handshakes, replay window, JS-interval-driven HELLO retransmits,
+  short headers, rekey, and Close. JS API unchanged; all five wire
+  adapters untouched. Engine prerequisites: a wasm32 time shim
+  (`drift_proto::time`, web-time backed) and mesh hop-TTL support
+  (`Endpoint::add_mesh_peer` / `connect_mesh`, porting the
+  transport's via_mesh wiring). Verified end-to-end with the node
+  harness against a native bridge: WebSocket and HTTP/SSE
+  handshakes plus WASM → bridge → native-UDP-peer mesh delivery
+  with the bridge blind to the plaintext. (#55)
 - **drift-proto phase 3: 1-RTT resumption.** The sans-IO engine now
   issues, stores, and redeems resumption tickets with the
   transport's exact wire format and KDFs: tickets minted at

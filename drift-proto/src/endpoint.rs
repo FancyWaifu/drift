@@ -12,6 +12,7 @@ use crate::resumption::{
     derive_psk, derive_resumption_key, ClientTicket, ResumptionStore, RESUME_ACK_BODY_LEN,
     RESUME_HELLO_BODY_LEN, TICKET_DEFAULT_TTL, TICKET_ID_LEN, TICKET_PLAINTEXT_LEN,
 };
+use crate::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use drift_core::crypto::{cookie_mac, Direction, PeerId, SessionKey, COOKIE_MAC_LEN};
 use drift_core::error::{CodecError, CryptoError, DriftError, PeerError, SessionError};
 use drift_core::header::{
@@ -30,7 +31,6 @@ use drift_core::{derive_peer_id, Identity, Zeroizing};
 use rand::RngCore;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Wire-size constants, identical to drift/src/transport/mod.rs and
 // cookies.rs.
@@ -250,18 +250,25 @@ fn handshake_backoff_ms(base: u64, attempts: u8) -> u64 {
 }
 
 /// Build a HELLO wire packet. Port of the transport's
-/// `build_hello_wire` with `mesh = false` (the engine has no mesh
-/// routes yet — phase 4).
+/// `build_hello_wire`. `mesh` stamps the hop-TTL budget (and
+/// FLAG_ROUTED) so bridges forward the handshake toward a peer
+/// we can't reach directly — the engine has no route tables
+/// (phase 4); callers signal mesh per-peer via `add_mesh_peer`.
+#[allow(clippy::too_many_arguments)]
 fn build_hello_wire(
     local_peer_id: PeerId,
     dst_id: PeerId,
     identity: &Identity,
     ephemeral_pub: [u8; STATIC_KEY_LEN],
     client_nonce: [u8; NONCE_LEN],
+    mesh: bool,
     cookie: Option<&[u8; COOKIE_BLOB_LEN]>,
     pq_ek: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut header = Header::new(PacketType::Hello, 0, local_peer_id, dst_id);
+    if mesh {
+        header = header.with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
+    }
     if pq_ek.is_some() {
         header.flags |= FLAG_PQ_HYBRID;
     }
@@ -300,8 +307,12 @@ fn build_resume_hello_wire(
     client_eph_pub: [u8; STATIC_KEY_LEN],
     client_nonce: [u8; NONCE_LEN],
     ticket_id: [u8; TICKET_ID_LEN],
+    mesh: bool,
 ) -> Vec<u8> {
     let mut header = Header::new(PacketType::ResumeHello, 0, local_peer_id, dst_id);
+    if mesh {
+        header = header.with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
+    }
     header.payload_len = RESUME_HELLO_BODY_LEN as u16;
     let mut hbuf = [0u8; HEADER_LEN];
     header.encode(&mut hbuf);
@@ -328,6 +339,7 @@ fn regenerate_session(
     local_peer_id: PeerId,
     client_peer_id: PeerId,
     src: SocketAddr,
+    incoming_hop_ttl: u8,
     pq_client_ek: Option<&[u8]>,
 ) -> Result<(Vec<u8>, SocketAddr)> {
     let server_nonce = random_nonce();
@@ -369,6 +381,12 @@ fn regenerate_session(
     peer.coalesce_order.clear();
     peer.mark_session_start();
     peer.addr = src;
+    // A HELLO arriving with hop_ttl > 1 was mesh-routed; replies
+    // (and our DATA) need the same routing budget. Port of the
+    // transport's incoming_hop_ttl handling.
+    if incoming_hop_ttl > 1 {
+        peer.via_mesh = true;
+    }
 
     // `with_hop_ttl(DEFAULT_MESH_TTL)` to match the transport's ACK
     // bytes exactly — it sets hop_ttl=8 AND the FLAG_ROUTED bit,
@@ -455,6 +473,9 @@ fn build_data_packet(
         Header::new(PacketType::Data, seq, local_peer_id, peer.id).with_deadline(deadline_ms);
     if coalesce_group != 0 {
         header = header.with_supersedes(coalesce_group);
+    }
+    if peer.via_mesh {
+        header = header.with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
     }
     header.payload_len = payload.len() as u16;
     header.send_time_ms = send_time_ms;
@@ -586,6 +607,38 @@ impl Endpoint {
         id
     }
 
+    /// Register a peer reachable only via mesh forwarding (e.g. a
+    /// browser peer behind the same bridge). Handshake and DATA
+    /// packets to this peer carry the mesh hop-TTL budget so
+    /// bridges forward them; short headers are not used. Mirrors
+    /// `Transport::add_mesh_peer`, except the engine has no route
+    /// tables — datagrams go to `addr` (the bridge / the only
+    /// wire) and the TTL does the rest.
+    pub fn add_mesh_peer(
+        &mut self,
+        static_pub: [u8; STATIC_KEY_LEN],
+        addr: SocketAddr,
+        direction: Direction,
+    ) -> PeerId {
+        let id = self.add_peer(static_pub, addr, direction);
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.via_mesh = true;
+        }
+        id
+    }
+
+    /// `connect`, but for a mesh-routed peer (see `add_mesh_peer`).
+    pub fn connect_mesh(
+        &mut self,
+        now: Instant,
+        static_pub: [u8; STATIC_KEY_LEN],
+        addr: SocketAddr,
+    ) -> PeerId {
+        let id = self.add_mesh_peer(static_pub, addr, Direction::Initiator);
+        self.start_session(now, &id);
+        id
+    }
+
     /// Register a peer and queue the opening flight — a 1-RTT
     /// `ResumeHello` when a valid ticket is on file for the peer
     /// (stored from a previous session or imported), a full HELLO
@@ -658,7 +711,8 @@ impl Endpoint {
             // makes the rule explicit so a connect()-then-send flow
             // is safe too.
             if let Some(cid) = out_cid {
-                if deadline_ms == 0 && coalesce_group == 0 && peer.next_tx_seq > 1 {
+                if deadline_ms == 0 && coalesce_group == 0 && peer.next_tx_seq > 1 && !peer.via_mesh
+                {
                     let seq = peer.next_seq_checked()?;
                     let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
                     let wire = encode_short(cid, seq, tx, payload)?;
@@ -888,6 +942,7 @@ impl Endpoint {
             // as ResumeHello — a single dropped packet must not
             // silently downgrade the client to a cold handshake.
             let resumption_ctx = peer.pending_resumption.clone();
+            let mesh = peer.via_mesh;
             if let HandshakeState::AwaitingAck {
                 client_nonce,
                 ephemeral,
@@ -932,6 +987,7 @@ impl Endpoint {
                         ephemeral.public_bytes(),
                         *client_nonce,
                         res.ticket_id,
+                        mesh,
                     )
                 } else {
                     let pq_ek = pq.as_ref().map(|(ek, _)| ek.as_slice());
@@ -941,6 +997,7 @@ impl Endpoint {
                         identity,
                         ephemeral.public_bytes(),
                         *client_nonce,
+                        mesh,
                         cookie.as_ref(),
                         pq_ek,
                     )
@@ -1162,12 +1219,14 @@ impl Endpoint {
         } else {
             None
         };
+        let mesh = peer.via_mesh;
         let wire = build_hello_wire(
             local_peer_id,
             peer.id,
             &self.identity,
             ephemeral_pub,
             client_nonce,
+            mesh,
             None,
             pq.as_ref().map(|(ek, _)| ek.as_slice()),
         );
@@ -1428,6 +1487,7 @@ impl Endpoint {
                 local_peer_id,
                 client_peer_id,
                 src,
+                header.hop_ttl,
                 pq_client_ek.as_deref(),
             )?,
         };
@@ -1604,6 +1664,7 @@ impl Endpoint {
         };
         let peer_addr = peer.addr;
         let peer_id = peer.id;
+        let mesh = peer.via_mesh;
         if let HandshakeState::AwaitingAck {
             client_nonce,
             ephemeral,
@@ -1622,6 +1683,7 @@ impl Endpoint {
                 &self.identity,
                 ephemeral.public_bytes(),
                 *client_nonce,
+                mesh,
                 Some(&blob),
                 pq_ek,
             );

@@ -10,3 +10,7 @@ blake2 = "0.10"
 rand = "0.8"
 thiserror = "1"
 tracing = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+getrandom = { version = "0.2", features = ["js"] }

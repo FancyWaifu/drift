@@ -18,13 +18,13 @@
 //!                                                  ‖ client_nonce ‖ server_nonce)
 //! ```
 
+use crate::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use drift_core::crypto::PeerId;
 use drift_core::header::AUTH_TAG_LEN;
 use drift_core::identity::{NONCE_LEN, STATIC_KEY_LEN};
 use drift_core::Zeroizing;
 use std::collections::HashMap;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Length of an opaque ticket id, in bytes.
 pub const TICKET_ID_LEN: usize = 16;

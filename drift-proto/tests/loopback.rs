@@ -950,3 +950,77 @@ fn failed_resumption_falls_back_to_full_hello() {
         "server events: {sev:?}"
     );
 }
+
+// ---- phase 5 prereq: mesh-routed peers -----------------------------
+
+#[test]
+fn mesh_peers_use_hop_ttl_and_skip_short_headers() {
+    let now = Instant::now();
+    let id_a = Identity::from_secret_bytes([0x61; 32]);
+    let id_b = Identity::from_secret_bytes([0x62; 32]);
+    let pub_b = id_b.public_bytes();
+    let (aa, ba) = (addr(1041), addr(1042));
+
+    // B accepts anyone (a browser-style peer behind a bridge).
+    let mut b = Endpoint::new(
+        id_b,
+        Config {
+            accept_any_peer: true,
+            ..Config::default()
+        },
+    );
+    let mut a = Endpoint::new(id_a, Config::default());
+
+    // A dials B as a MESH peer: every flight must carry the
+    // hop-TTL budget + FLAG_ROUTED so a bridge would forward it.
+    let peer_b = a.connect_mesh(now, pub_b, ba);
+    a.send(now, &peer_b, b"over the mesh", 0, 0).unwrap();
+    let hello = a.poll_transmit().unwrap();
+    let h = Header::decode(&hello.contents).unwrap();
+    assert_eq!(h.hop_ttl, 8, "mesh HELLO needs the TTL budget");
+    assert!(h.has_flag(drift_core::header::FLAG_ROUTED));
+    b.handle_datagram(now, aa, &hello.contents).unwrap();
+    let ack = b.poll_transmit().unwrap();
+    a.handle_datagram(now, ba, &ack.contents).unwrap();
+
+    // The flushed DATA also rides the long header with TTL — and
+    // B (who saw hop_ttl > 1 on the HELLO) replies in kind.
+    let data = a.poll_transmit().unwrap();
+    let h = Header::decode(&data.contents).unwrap();
+    assert_eq!(h.packet_type, PacketType::Data);
+    assert_eq!(h.hop_ttl, 8, "mesh DATA needs the TTL budget");
+    b.handle_datagram(now, aa, &data.contents).unwrap();
+    drain_events(&mut b);
+    // (skip B's auto-issued ResumptionTicket transmit)
+    while b.poll_transmit().is_some() {}
+
+    let b_peer_a = drift_proto::derive_peer_id(&id_a_pub());
+    b.send(now, &b_peer_a, b"mesh reply", 0, 0).unwrap();
+    let reply = b.poll_transmit().unwrap();
+    let h = Header::decode(&reply.contents).unwrap();
+    assert_eq!(
+        h.hop_ttl, 8,
+        "responder must mirror the mesh budget (via_mesh from incoming hop_ttl)"
+    );
+    a.handle_datagram(now, ba, &reply.contents).unwrap();
+    let aev = drain_events(&mut a);
+    assert!(
+        aev.iter()
+            .any(|e| matches!(e, Event::Data { payload, .. } if payload == b"mesh reply")),
+        "a events: {aev:?}"
+    );
+
+    // Steady state on a mesh peer must STAY long-header: short
+    // headers can't be mesh-forwarded.
+    a.send(now, &peer_b, b"still long", 0, 0).unwrap();
+    let second = a.poll_transmit().unwrap();
+    assert_eq!(
+        second.contents[0] >> 4,
+        0x1,
+        "mesh DATA must never use the short header"
+    );
+}
+
+fn id_a_pub() -> [u8; 32] {
+    Identity::from_secret_bytes([0x61; 32]).public_bytes()
+}

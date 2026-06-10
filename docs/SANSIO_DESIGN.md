@@ -1,6 +1,6 @@
 # drift-proto: the sans-IO protocol engine
 
-**Status: Phase 3 in progress (Phase 1 landed in #52, Phase 2 in #53).**
+**Status: Phases 1-3 landed (#52, #53, #54); phase 5a (drift-wasm adoption) in progress.**
 
 ## Why
 
@@ -90,8 +90,9 @@ tests, live deployments). We do NOT rip its internals out on day one.
 | **1** | Crate + Tier-1 engine: HELLO/CHALLENGE/HELLO_ACK (classical + ML-KEM hybrid), DoS cookies (issue/validate/rotate), dual-init tiebreak, cached-ACK duplicate-HELLO replay, 3× amplification budget, retry/backoff/give-up, long-header DATA with replay window + deadline + coalesce, AwaitingData→Established transition, pending-queue flush. Short-header/CID fast path (pulled forward from phase 2 — the transport speaks it immediately after handshake, so byte compat required it). Interop proof vs real Transport. | ✅ #52 |
 | **2** | Close (send + authenticated receive), rekey: manual + auto at the seq watermark, RekeyRequest/RekeyAck, grace-window fallback on both header formats; half-open eviction (AwaitingData *and* parked AwaitingAck, mirroring the transport's eviction loop). Interop: rekey + Close in both roles. | ✅ #53 |
 | **3** | 1-RTT resumption: ticket issue at handshake completion + on each resumption, single-use identity-bound server store, transport-compatible 97-byte export/import blobs, ResumeHello/ResumeAck (PSK + fresh ephemeral DH), ResumeHello retransmits, pre-resumption keys in the grace slot. Engine fallback divergences (safe direction, the transport parks instead): tickets cleared on Close (both directions) and burned on resume give-up, dropping the peer to Pending so the next send opens a full HELLO. Interop: resumption in both roles, incl. the transport's post-Close try-resume path. | this PR |
-| **4** | Path validation/migration, mesh beacons — then `drift::Transport` consumes the engine internally (the actual de-braiding of transport/mod.rs). | |
-| **5** | drift-wasm + drift-redox adopt drift-proto; dialect code deleted. (Order swappable with 4 — adopting at the edges first shakes the engine down before the risky transplant.) | |
+| **4** | Path validation/migration, mesh route tables/beacons — then `drift::Transport` consumes the engine internally (the actual de-braiding of transport/mod.rs). Deliberately LAST: by then the engine has survived three interop phases plus real adoption on two platforms. | |
+| **5a** | drift-wasm adopts drift-proto: `session.rs` becomes a ~250-line driver around `Endpoint` (JS interval drives `handle_timeout`; placeholder SocketAddr since browser wires are single-pipe); `peer_session.rs` deleted. The browser gains PQ-hybrid handshakes, the replay window, HELLO retransmits, short headers, rekey, and Close — none of which the old dialect had. Prerequisites landed in the engine: wasm32 time shim (`drift_proto::time`), mesh hop-TTL support (`add_mesh_peer`/`connect_mesh`, via_mesh wiring ported from the transport). Verified e2e: node harness vs a native bridge — WS + HTTP/SSE handshakes, and WASM → bridge → native-UDP-peer mesh delivery. | this PR |
+| **5b** | drift-redox adopts drift-proto (standalone crate at `~/redox-dev/drift-redox`, lives outside this repo): replace its hand-rolled Tier-1 dialect with an `Endpoint` over length-framed std TCP; rebuild via the redoxer rig on Proxmox; re-verify the VM 109 shell. | |
 
 ## Byte-compat invariants (ported verbatim, do not "improve")
 
