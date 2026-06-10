@@ -12,6 +12,24 @@ crate. A change that touches multiple surfaces appears under each.
 
 ## [Unreleased]
 
+### Protocol / Portability
+
+- **New crate: `drift-proto`** — a sans-IO DRIFT protocol engine
+  (quinn-proto style: bytes in, bytes out, explicit time; no
+  sockets, no tokio). Phase 1 covers the Tier-1 protocol:
+  HELLO / CHALLENGE / HELLO_ACK (classical + ML-KEM-768 hybrid),
+  adaptive DoS cookies, dual-init tiebreak, cached-ACK duplicate
+  replay, 3× amplification budget, handshake retry/backoff, and
+  DATA over both the 36-byte long header and the 7-byte
+  short-header CID fast path with replay protection. **Byte
+  compatibility with `drift::Transport` is enforced by interop
+  tests** (`drift/tests/proto_interop.rs`) that drive the engine
+  over a plain `std::net::UdpSocket` against the real tokio
+  transport in both roles. This is the portability layer that
+  drift-wasm / Redox-class ports re-implemented by hand until
+  now; architecture and phase plan in `docs/SANSIO_DESIGN.md`.
+  (#52)
+
 ### Bridge / Federation
 
 - **iroh is now the default federation wire** for `drift bridge`. The

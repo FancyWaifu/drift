@@ -162,6 +162,9 @@ iroh = { version = "=1.0.0-rc.1", optional = true, default-features = false, fea
 libc = "0.2"
 
 [dev-dependencies]
+# Byte-compat interop tests: the sans-IO engine driven over a plain
+# std UdpSocket against this crate's tokio Transport (tests/proto_interop.rs).
+drift-proto = { path = "../drift-proto" }
 tokio = { version = "1", features = ["full"] }
 proptest = "1"
 tempfile = "3"

@@ -1,0 +1,11 @@
+[package]
+name = "drift-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Sans-IO DRIFT protocol state machine — bytes in, bytes out, explicit time. No sockets, no runtime."
+
+[dependencies]
+drift-core = { path = "../drift-core" }
+rand = "0.8"
+thiserror = "1"
+tracing = "0.1"
