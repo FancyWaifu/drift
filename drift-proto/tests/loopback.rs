@@ -482,3 +482,267 @@ fn steady_state_data_uses_short_header_and_decodes() {
         vec![b"long first".as_slice(), b"short second".as_slice()]
     );
 }
+
+// ---- phase 2: rekey / close / eviction ---------------------------
+
+/// Establish a PQ session between a fresh client/server pair and
+/// exchange one payload each way so both sides are fully
+/// Established with CIDs installed.
+fn established_pair(
+    now: Instant,
+    client_seed: u8,
+    server_seed: u8,
+    ca: SocketAddr,
+    sa: SocketAddr,
+) -> (Endpoint, Endpoint, drift_proto::PeerId, drift_proto::PeerId) {
+    let server_id = Identity::from_secret_bytes([server_seed; 32]);
+    let client_id = Identity::from_secret_bytes([client_seed; 32]);
+    let server_pub = server_id.public_bytes();
+    let client_pub = client_id.public_bytes();
+
+    let mut server = Endpoint::new(
+        server_id,
+        Config {
+            accept_any_peer: true,
+            ..Config::default()
+        },
+    );
+    let mut client = Endpoint::new(client_id, Config::default());
+    let server_peer = client.connect(now, server_pub, sa);
+    client
+        .send(now, &server_peer, b"warmup c->s", 0, 0)
+        .unwrap();
+    let mut seen = Vec::new();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+    let client_peer = drift_proto::derive_peer_id(&client_pub);
+    server
+        .send(now, &client_peer, b"warmup s->c", 0, 0)
+        .unwrap();
+    pump(now, &mut server, &mut client, sa, ca, &mut seen);
+    drain_events(&mut client);
+    drain_events(&mut server);
+    (client, server, server_peer, client_peer)
+}
+
+#[test]
+fn manual_rekey_keeps_session_flowing_both_ways() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1020), addr(1021));
+    let (mut client, mut server, server_peer, client_peer) =
+        established_pair(now, 0xD2, 0xD1, ca, sa);
+
+    client.rekey(now, &server_peer).unwrap();
+    let mut seen = Vec::new();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+    assert!(seen.contains(&PacketType::RekeyRequest), "wire: {seen:?}");
+    assert!(seen.contains(&PacketType::RekeyAck), "wire: {seen:?}");
+
+    // Both directions still flow under the new key.
+    client
+        .send(now, &server_peer, b"post-rekey c->s", 0, 0)
+        .unwrap();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+    let sev = drain_events(&mut server);
+    assert!(
+        sev.iter()
+            .any(|e| matches!(e, Event::Data { payload, .. } if payload == b"post-rekey c->s")),
+        "server events: {sev:?}"
+    );
+    server
+        .send(now, &client_peer, b"post-rekey s->c", 0, 0)
+        .unwrap();
+    pump(now, &mut server, &mut client, sa, ca, &mut seen);
+    let cev = drain_events(&mut client);
+    assert!(
+        cev.iter()
+            .any(|e| matches!(e, Event::Data { payload, .. } if payload == b"post-rekey s->c")),
+        "client events: {cev:?}"
+    );
+}
+
+#[test]
+fn old_key_data_decodes_within_grace_then_expires() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1022), addr(1023));
+    let (mut client, mut server, server_peer, client_peer) =
+        established_pair(now, 0xD4, 0xD3, ca, sa);
+
+    // Server seals three packets under the OLD key (the later two
+    // ride the short header — steady state) but they stall in
+    // flight.
+    server
+        .send(now, &client_peer, b"stale long old-key", 0, 0)
+        .unwrap();
+    server
+        .send(now, &client_peer, b"stale short old-key", 0, 0)
+        .unwrap();
+    server
+        .send(now, &client_peer, b"stale, arrives too late", 0, 0)
+        .unwrap();
+    let stale_long = server.poll_transmit().unwrap();
+    let stale_short = server.poll_transmit().unwrap();
+    let stale_late = server.poll_transmit().unwrap();
+    assert_eq!(stale_short.contents[0] >> 4, 0x2, "expected short header");
+
+    // Client rekeys; the request reaches the server, the ack comes
+    // back — both sides now hold the new key with prev in grace.
+    client.rekey(now, &server_peer).unwrap();
+    let mut seen = Vec::new();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+
+    // The stale old-key packets land within the grace window: both
+    // header formats must decode via prev.
+    client
+        .handle_datagram(now, sa, &stale_long.contents)
+        .unwrap();
+    client
+        .handle_datagram(now, sa, &stale_short.contents)
+        .unwrap();
+    let cev = drain_events(&mut client);
+    let got: Vec<&[u8]> = cev
+        .iter()
+        .filter_map(|e| match e {
+            Event::Data { payload, .. } => Some(payload.as_slice()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            b"stale long old-key".as_slice(),
+            b"stale short old-key".as_slice()
+        ]
+    );
+
+    // After the grace window, a never-delivered old-key packet is
+    // rejected — prev has expired, and this isn't a replay (its seq
+    // was never accepted), so only the grace logic can reject it.
+    let late = now + Duration::from_secs(3);
+    let res = client.handle_datagram(late, sa, &stale_late.contents);
+    assert!(
+        res.is_err(),
+        "old-key packet must be rejected once the grace window expires"
+    );
+}
+
+#[test]
+fn close_notifies_peer_and_allows_rehandshake() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1024), addr(1025));
+    let (mut client, mut server, server_peer, _client_peer) =
+        established_pair(now, 0xD6, 0xD5, ca, sa);
+
+    client.close(&server_peer).unwrap();
+    let mut seen = Vec::new();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+    assert!(seen.contains(&PacketType::Close), "wire: {seen:?}");
+    let sev = drain_events(&mut server);
+    assert!(
+        sev.iter().any(|e| matches!(e, Event::Closed { .. })),
+        "server never saw Closed: {sev:?}"
+    );
+
+    // The same client can dial again — the server (auto-registered
+    // entry removed by the Close) accepts a fresh handshake.
+    let server_pub = Identity::from_secret_bytes([0xD5; 32]).public_bytes();
+    let server_peer2 = client.connect(now, server_pub, sa);
+    client
+        .send(now, &server_peer2, b"second life", 0, 0)
+        .unwrap();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+    let sev = drain_events(&mut server);
+    assert!(
+        sev.iter()
+            .any(|e| matches!(e, Event::Data { payload, .. } if payload == b"second life")),
+        "server events after re-handshake: {sev:?}"
+    );
+}
+
+#[test]
+fn auto_rekey_fires_at_seq_watermark() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1026), addr(1027));
+    let (mut client, mut server, server_peer, _client_peer) =
+        established_pair(now, 0xD8, 0xD7, ca, sa);
+
+    // Force the client's seq counter to the watermark; the next send
+    // must transparently rekey before shipping the payload.
+    assert!(client.test_bump_peer_seq(&server_peer, (1u32 << 31) / 4 * 3));
+    client
+        .send(now, &server_peer, b"crosses the watermark", 0, 0)
+        .unwrap();
+    let mut seen = Vec::new();
+    pump(now, &mut client, &mut server, ca, sa, &mut seen);
+    assert!(
+        seen.contains(&PacketType::RekeyRequest),
+        "no auto-rekey on the wire: {seen:?}"
+    );
+    let sev = drain_events(&mut server);
+    assert!(
+        sev.iter().any(
+            |e| matches!(e, Event::Data { payload, .. } if payload == b"crosses the watermark")
+        ),
+        "server events: {sev:?}"
+    );
+}
+
+#[test]
+fn stale_half_open_peers_are_evicted() {
+    let t0 = Instant::now();
+    let server_id = Identity::from_secret_bytes([0xD9; 32]);
+    let client_id = Identity::from_secret_bytes([0xDA; 32]);
+    let server_pub = server_id.public_bytes();
+    let (ca, sa) = (addr(1028), addr(1029));
+
+    // Server side: a HELLO arrives, the client never sends DATA →
+    // AwaitingData. After the cutoff the auto-registered entry is
+    // reaped: replaying the SAME HELLO afterwards yields a fresh
+    // session (different ACK bytes), not the cached one.
+    let mut server = Endpoint::new(
+        server_id,
+        Config {
+            accept_any_peer: true,
+            ..Config::default()
+        },
+    );
+    let mut client = Endpoint::new(
+        client_id,
+        Config {
+            handshake_max_attempts: 1,
+            ..Config::default()
+        },
+    );
+    client.connect(t0, server_pub, sa);
+    let hello = client.poll_transmit().unwrap();
+
+    server.handle_datagram(t0, ca, &hello.contents).unwrap();
+    let ack1 = server.poll_transmit().unwrap();
+    server.handle_datagram(t0, ca, &hello.contents).unwrap();
+    let ack2 = server.poll_transmit().unwrap();
+    assert_eq!(ack1.contents, ack2.contents, "cached-ACK baseline");
+
+    server.handle_timeout(t0 + Duration::from_secs(31));
+    server.handle_datagram(t0, ca, &hello.contents).unwrap();
+    let ack3 = server.poll_transmit().unwrap();
+    assert_ne!(
+        ack1.contents, ack3.contents,
+        "evicted peer must get a fresh session, not the stale cached ACK"
+    );
+
+    // Client side: parked AwaitingAck (attempts exhausted) ages past
+    // the cutoff and resets to Pending — the next send starts a
+    // brand-new handshake (fresh nonce, so different HELLO bytes).
+    client.handle_timeout(t0 + Duration::from_secs(31));
+    drain_events(&mut client); // HandshakeTimedOut
+    let server_peer = drift_proto::derive_peer_id(&server_pub);
+    client
+        .send(t0 + Duration::from_secs(32), &server_peer, b"redial", 0, 0)
+        .unwrap();
+    let hello2 = client
+        .poll_transmit()
+        .expect("no fresh HELLO after eviction");
+    assert_ne!(
+        hello.contents, hello2.contents,
+        "post-eviction handshake must use a fresh nonce/ephemeral"
+    );
+}

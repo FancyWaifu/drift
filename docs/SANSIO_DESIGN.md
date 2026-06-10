@@ -1,6 +1,6 @@
 # drift-proto: the sans-IO protocol engine
 
-**Status: Phase 1 in progress.**
+**Status: Phase 2 in progress (Phase 1 landed in #52).**
 
 ## Why
 
@@ -87,11 +87,11 @@ tests, live deployments). We do NOT rip its internals out on day one.
 
 | Phase | Scope | Status |
 |---|---|---|
-| **1** | Crate + Tier-1 engine: HELLO/CHALLENGE/HELLO_ACK (classical + ML-KEM hybrid), DoS cookies (issue/validate/rotate), dual-init tiebreak, cached-ACK duplicate-HELLO replay, 3× amplification budget, retry/backoff/give-up, long-header DATA with replay window + deadline + coalesce, AwaitingData→Established transition, pending-queue flush. Interop proof vs real Transport. | this PR |
-| **2** | Close, rekey (+grace window), AwaitingData eviction, short-header/CID fast path. | |
+| **1** | Crate + Tier-1 engine: HELLO/CHALLENGE/HELLO_ACK (classical + ML-KEM hybrid), DoS cookies (issue/validate/rotate), dual-init tiebreak, cached-ACK duplicate-HELLO replay, 3× amplification budget, retry/backoff/give-up, long-header DATA with replay window + deadline + coalesce, AwaitingData→Established transition, pending-queue flush. Short-header/CID fast path (pulled forward from phase 2 — the transport speaks it immediately after handshake, so byte compat required it). Interop proof vs real Transport. | ✅ #52 |
+| **2** | Close (send + authenticated receive), rekey: manual + auto at the seq watermark, RekeyRequest/RekeyAck, grace-window fallback on both header formats; half-open eviction (AwaitingData *and* parked AwaitingAck, mirroring the transport's eviction loop). Interop: rekey + Close in both roles. | this PR |
 | **3** | Resumption tickets (ResumeHello/ResumeAck/ResumptionTicket). | |
 | **4** | Path validation/migration, mesh beacons — then `drift::Transport` consumes the engine internally (the actual de-braiding of transport/mod.rs). | |
-| **5** | drift-wasm + drift-redox adopt drift-proto; dialect code deleted. | |
+| **5** | drift-wasm + drift-redox adopt drift-proto; dialect code deleted. (Order swappable with 4 — adopting at the edges first shakes the engine down before the risky transplant.) | |
 
 ## Byte-compat invariants (ported verbatim, do not "improve")
 

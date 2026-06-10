@@ -14,6 +14,16 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **drift-proto phase 2: session lifecycle.** The sans-IO engine now
+  covers rekey (manual via `Endpoint::rekey`, transparent auto-rekey
+  at the same 3/4-of-seq-ceiling watermark as the transport, with the
+  2 s old-key grace window on both long- and short-header receive
+  paths), authenticated `Close` (send via `Endpoint::close`, receive
+  surfaces as `Event::Closed`), and half-open eviction (stale
+  `AwaitingData` / parked `AwaitingAck` peers reaped after
+  `awaiting_data_timeout_secs`, mirroring the transport's eviction
+  loop). Interop tests prove rekey and Close byte-compat against
+  `drift::Transport` in both roles. (#53)
 - **New crate: `drift-proto`** — a sans-IO DRIFT protocol engine
   (quinn-proto style: bytes in, bytes out, explicit time; no
   sockets, no tokio). Phase 1 covers the Tier-1 protocol:
