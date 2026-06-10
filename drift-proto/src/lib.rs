@@ -42,8 +42,10 @@
 //! transport in both roles.
 
 mod endpoint;
+mod resumption;
 
 pub use endpoint::{Config, Endpoint, Event, ProtoError, Transmit};
+pub use resumption::{ClientTicket, EXPORT_BLOB_LEN, TICKET_DEFAULT_TTL};
 
 // Re-export the drift-core types a driver needs, so simple drivers
 // can depend on drift-proto alone.

@@ -14,6 +14,21 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **drift-proto phase 3: 1-RTT resumption.** The sans-IO engine now
+  issues, stores, and redeems resumption tickets with the
+  transport's exact wire format and KDFs: tickets minted at
+  handshake completion and on each resumption (single-use,
+  identity-bound, 24 h TTL), `ResumeHello`/`ResumeAck` with fresh
+  ephemeral DH over the PSK, retransmit-as-ResumeHello, and
+  transport-compatible 97-byte export/import blobs
+  (`Endpoint::export_resumption_ticket` /
+  `import_resumption_ticket`) so a ticket earned in one
+  implementation redeems in the other across process restarts.
+  Engine-only robustness divergences (documented; the transport
+  parks instead): tickets are cleared on Close and burned when a
+  resumption attempt exhausts its retries, falling back to a full
+  HELLO on the next send. Interop tests prove resumption in both
+  roles, including the transport's post-Close try-resume path. (#54)
 - **drift-proto phase 2: session lifecycle.** The sans-IO engine now
   covers rekey (manual via `Endpoint::rekey`, transparent auto-rekey
   at the same 3/4-of-seq-ceiling watermark as the transport, with the

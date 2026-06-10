@@ -6,6 +6,7 @@ description = "Sans-IO DRIFT protocol state machine — bytes in, bytes out, exp
 
 [dependencies]
 drift-core = { path = "../drift-core" }
+blake2 = "0.10"
 rand = "0.8"
 thiserror = "1"
 tracing = "0.1"
