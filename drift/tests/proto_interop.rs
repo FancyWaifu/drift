@@ -604,3 +604,174 @@ async fn close_interop_both_directions() {
     );
     assert!(got_payload(&events, b"about to close"), "{events:?}");
 }
+
+// ---- phase 3: 1-RTT resumption across implementations -------------
+
+/// Engine resumes against a transport server: a fresh engine
+/// process (same identity) imports the ticket the transport issued
+/// and reconnects with ResumeHello — the transport must redeem it,
+/// complete the 1-RTT handshake, and deliver data both ways.
+#[tokio::test]
+async fn engine_resumes_against_transport_server() {
+    let server_id = Identity::from_secret_bytes([0xE9; 32]);
+    let server_pub = server_id.public_bytes();
+    let cfg = TransportConfig {
+        accept_any_peer: true,
+        ..TransportConfig::default()
+    };
+    let server = Arc::new(
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), server_id, cfg)
+            .await
+            .unwrap(),
+    );
+    let server_addr = server.local_addr().unwrap();
+
+    // Session one: full handshake; wait for the transport's
+    // ResumptionTicket to arrive and export it.
+    let session_one = tokio::task::spawn_blocking(move || {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut ep = Endpoint::new(
+            Identity::from_secret_bytes([0xEA; 32]),
+            ProtoConfig::default(),
+        );
+        let peer = ep.connect(Instant::now(), server_pub, server_addr);
+        ep.send(Instant::now(), &peer, b"session one", 0, 0)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buf = [0u8; 2048];
+        socket
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        loop {
+            while let Some(t) = ep.poll_transmit() {
+                socket.send_to(&t.contents, t.dst).unwrap();
+            }
+            if let Ok((n, src)) = socket.recv_from(&mut buf) {
+                let _ = ep.handle_datagram(Instant::now(), src, &buf[..n]);
+            }
+            while ep.poll_event().is_some() {}
+            if let Some(blob) = ep.export_resumption_ticket(&peer) {
+                return blob;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "transport never issued a resumption ticket"
+            );
+        }
+    });
+    let got = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("no session-one DATA")
+        .expect("recv None");
+    assert_eq!(got.payload, b"session one");
+    let blob = session_one.await.unwrap();
+
+    // Session two: fresh engine, same identity, imported ticket.
+    let resumed = tokio::task::spawn_blocking(move || {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut ep = Endpoint::new(
+            Identity::from_secret_bytes([0xEA; 32]),
+            ProtoConfig::default(),
+        );
+        ep.import_resumption_ticket(&blob).unwrap();
+        let peer = ep.connect(Instant::now(), server_pub, server_addr);
+        // The opening flight must be a ResumeHello (type 14).
+        let first = ep.poll_transmit().expect("no opening flight");
+        assert_eq!(
+            first.contents[1], 14,
+            "resumed connect must open with ResumeHello"
+        );
+        socket.send_to(&first.contents, first.dst).unwrap();
+        ep.send(Instant::now(), &peer, b"resumed session", 0, 0)
+            .unwrap();
+        pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            ev.iter().any(|e| matches!(e, Event::Connected { .. }))
+        })
+    });
+
+    let got2 = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("no resumed-session DATA — 1-RTT resumption failed")
+        .expect("recv None");
+    assert_eq!(got2.payload, b"resumed session");
+    resumed.await.unwrap();
+
+    let m = server.metrics();
+    assert!(
+        m.resumptions_completed >= 1,
+        "transport should have completed a resumption, metrics: \
+         resumptions_completed={}",
+        m.resumptions_completed
+    );
+}
+
+/// Transport resumes against an engine server: after Close resets
+/// the (explicitly registered) peer, the transport's next send must
+/// take its try-resume path — the engine redeems the ticket it
+/// issued, completes 1-RTT, and receives the payload.
+#[tokio::test]
+async fn transport_resumes_against_engine_server() {
+    let engine_id = Identity::from_secret_bytes([0xEB; 32]);
+    let engine_pub = engine_id.public_bytes();
+    let client_id = Identity::from_secret_bytes([0xEC; 32]);
+    let client_pub = client_id.public_bytes();
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let engine_addr = socket.local_addr().unwrap();
+
+    let engine_side = tokio::task::spawn_blocking(move || {
+        let mut ep = Endpoint::new(engine_id, ProtoConfig::default());
+        // Explicit registration: the entry survives Close as
+        // Pending, which is what makes later resumption possible.
+        ep.add_peer(
+            client_pub,
+            "0.0.0.0:0".parse().unwrap(),
+            drift_proto::Direction::Responder,
+        );
+        pump_until(&mut ep, &socket, Duration::from_secs(10), |ev| {
+            got_payload(ev, b"resumed by the transport")
+        })
+    });
+
+    let client = Transport::bind("127.0.0.1:0".parse().unwrap(), client_id)
+        .await
+        .unwrap();
+    let engine_peer = client
+        .add_peer(engine_pub, engine_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    // Session one (full handshake) — the engine issues a ticket at
+    // the transition, which the transport stores.
+    client
+        .send_data(&engine_peer, b"session one", 0, 0)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        client.metrics().resumption_tickets_received >= 1,
+        "transport never stored the engine's ticket"
+    );
+    // Close — peer drops to Pending on both sides; the transport
+    // keeps its ticket.
+    client.close_peer(&engine_peer).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Next send: the transport's try-resume branch fires.
+    client
+        .send_data(&engine_peer, b"resumed by the transport", 0, 0)
+        .await
+        .unwrap();
+
+    let events = engine_side.await.unwrap();
+    assert!(
+        got_payload(&events, b"resumed by the transport"),
+        "engine never delivered the resumed payload: {events:?}"
+    );
+    let m = client.metrics();
+    assert!(
+        m.resumptions_completed >= 1,
+        "transport should have resumed (resumptions_completed={})",
+        m.resumptions_completed
+    );
+    assert_eq!(m.handshakes_completed, 1, "second session must be 1-RTT");
+}

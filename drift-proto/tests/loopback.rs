@@ -455,9 +455,12 @@ fn steady_state_data_uses_short_header_and_decodes() {
         ca,
         Direction::Responder,
     );
+    // (The server's seq 1 went to the auto-issued ResumptionTicket
+    // at the transition, so even its first DATA may ride the short
+    // header — safe, because the client installed CIDs at
+    // HELLO_ACK.)
     server.send(now, &client_peer, b"long first", 0, 0).unwrap();
     let first = server.poll_transmit().unwrap();
-    assert_eq!(first.contents[0] >> 4, 0x1, "server's first DATA is long");
     server
         .send(now, &client_peer, b"short second", 0, 0)
         .unwrap();
@@ -744,5 +747,206 @@ fn stale_half_open_peers_are_evicted() {
     assert_ne!(
         hello.contents, hello2.contents,
         "post-eviction handshake must use a fresh nonce/ephemeral"
+    );
+}
+
+// ---- phase 3: 1-RTT resumption -----------------------------------
+
+#[test]
+fn ticket_issued_then_one_rtt_resumption_works() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1030), addr(1031));
+    let (client, mut server, server_peer, _client_peer) = established_pair(now, 0xF2, 0xF1, ca, sa);
+
+    // The server issued a ticket at handshake completion; the
+    // client stored it during the pump.
+    let blob = client
+        .export_resumption_ticket(&server_peer)
+        .expect("no ticket stored after full handshake");
+    assert_eq!(blob.len(), drift_proto::EXPORT_BLOB_LEN);
+
+    // "Restart" the client: fresh endpoint, same identity, ticket
+    // imported from the blob. connect() must open with ResumeHello
+    // — never a full HELLO.
+    let server_pub = Identity::from_secret_bytes([0xF1; 32]).public_bytes();
+    let mut client2 = Endpoint::new(Identity::from_secret_bytes([0xF2; 32]), Config::default());
+    let resumed_peer = client2.import_resumption_ticket(&blob).unwrap();
+    assert_eq!(resumed_peer, server_peer);
+    let p = client2.connect(now, server_pub, sa);
+    client2.send(now, &p, b"resumed payload", 0, 0).unwrap();
+
+    let mut seen = Vec::new();
+    pump(now, &mut client2, &mut server, ca, sa, &mut seen);
+    assert!(
+        seen.contains(&PacketType::ResumeHello),
+        "no ResumeHello: {seen:?}"
+    );
+    assert!(
+        seen.contains(&PacketType::ResumeAck),
+        "no ResumeAck: {seen:?}"
+    );
+    assert!(
+        !seen.contains(&PacketType::Hello),
+        "resumption must not fall back to a full HELLO: {seen:?}"
+    );
+    let cev = drain_events(&mut client2);
+    assert!(
+        cev.iter().any(|e| matches!(e, Event::Connected { .. })),
+        "client2 events: {cev:?}"
+    );
+    let sev = drain_events(&mut server);
+    assert!(
+        sev.iter()
+            .any(|e| matches!(e, Event::Data { payload, .. } if payload == b"resumed payload")),
+        "server events: {sev:?}"
+    );
+    // A fresh ticket was issued on the resumed session.
+    assert!(
+        client2.export_resumption_ticket(&server_peer).is_some(),
+        "no fresh ticket after resumption"
+    );
+}
+
+#[test]
+fn resumption_ticket_is_single_use() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1032), addr(1033));
+    let (client, mut server, server_peer, _client_peer) = established_pair(now, 0xF4, 0xF3, ca, sa);
+    let blob = client.export_resumption_ticket(&server_peer).unwrap();
+
+    let server_pub = Identity::from_secret_bytes([0xF3; 32]).public_bytes();
+    let mut client2 = Endpoint::new(Identity::from_secret_bytes([0xF4; 32]), Config::default());
+    client2.import_resumption_ticket(&blob).unwrap();
+    client2.connect(now, server_pub, sa);
+    let resume_hello = client2.poll_transmit().expect("no ResumeHello queued");
+
+    // First redemption succeeds...
+    server
+        .handle_datagram(now, ca, &resume_hello.contents)
+        .unwrap();
+    assert!(server.poll_transmit().is_some(), "no ResumeAck");
+    // ...replaying the same ResumeHello fails: the ticket was
+    // consumed (single-use).
+    let replay = server.handle_datagram(now, ca, &resume_hello.contents);
+    assert!(replay.is_err(), "consumed ticket must not redeem twice");
+}
+
+#[test]
+fn import_rejects_malformed_and_expired_blobs() {
+    let mut ep = Endpoint::new(Identity::from_secret_bytes([0xF5; 32]), Config::default());
+    assert!(ep.import_resumption_ticket(b"garbage").is_err());
+
+    // Build a structurally valid blob, then doctor the expiry to
+    // the past: import must refuse it.
+    let now = Instant::now();
+    let (ca, sa) = (addr(1034), addr(1035));
+    let (client, _server, server_peer, _) = established_pair(now, 0xF7, 0xF6, ca, sa);
+    let mut blob = client.export_resumption_ticket(&server_peer).unwrap();
+    let exp_off = 1 + 16 + 32; // version + ticket_id + psk
+    blob[exp_off..exp_off + 8].copy_from_slice(&1u64.to_be_bytes()); // ~1970
+    let res = ep.import_resumption_ticket(&blob);
+    assert!(res.is_err(), "expired blob must be refused");
+}
+
+#[test]
+fn ticket_bound_to_other_identity_is_refused_without_burning() {
+    let now = Instant::now();
+    let (ca, sa) = (addr(1036), addr(1037));
+    let (client_a, mut server, server_peer, _) = established_pair(now, 0xF9, 0xF8, ca, sa);
+    let blob = client_a.export_resumption_ticket(&server_peer).unwrap();
+    let server_pub = Identity::from_secret_bytes([0xF8; 32]).public_bytes();
+
+    // A different identity (registered with the server, so the
+    // lookup gets as far as the identity binding) tries to redeem
+    // A's ticket.
+    let thief_id = Identity::from_secret_bytes([0xFA; 32]);
+    let thief_pub = thief_id.public_bytes();
+    server.add_peer(thief_pub, addr(1038), drift_proto::Direction::Responder);
+    let mut thief = Endpoint::new(thief_id, Config::default());
+    thief.import_resumption_ticket(&blob).unwrap();
+    thief.connect(now, server_pub, sa);
+    let stolen_resume = thief.poll_transmit().unwrap();
+    let res = server.handle_datagram(now, addr(1038), &stolen_resume.contents);
+    assert!(res.is_err(), "ticket bound to A must not redeem for B");
+    assert!(server.poll_transmit().is_none());
+
+    // The refusal must NOT have consumed the ticket: the rightful
+    // owner can still resume.
+    let mut client_a2 = Endpoint::new(Identity::from_secret_bytes([0xF9; 32]), Config::default());
+    client_a2.import_resumption_ticket(&blob).unwrap();
+    client_a2.connect(now, server_pub, sa);
+    let legit = client_a2.poll_transmit().unwrap();
+    server.handle_datagram(now, ca, &legit.contents).unwrap();
+    assert!(server.poll_transmit().is_some(), "rightful resume failed");
+}
+
+#[test]
+fn failed_resumption_falls_back_to_full_hello() {
+    let t0 = Instant::now();
+    let server_id = Identity::from_secret_bytes([0xFB; 32]);
+    let client_id = Identity::from_secret_bytes([0xFC; 32]);
+    let server_pub = server_id.public_bytes();
+    let client_pub = client_id.public_bytes();
+    let (ca, sa) = (addr(1039), addr(1040));
+
+    // First, get a real ticket from a real session.
+    let (client_old, _old_server, server_peer, _) = established_pair(t0, 0xFC, 0xFB, ca, sa);
+    let blob = client_old.export_resumption_ticket(&server_peer).unwrap();
+
+    // A REBOOTED server: same identity, knows the client
+    // (explicit registration), but its ticket store is empty.
+    let mut server = Endpoint::new(server_id, Config::default());
+    server.add_peer(client_pub, ca, Direction::Responder);
+
+    let mut client = Endpoint::new(
+        client_id,
+        Config {
+            handshake_max_attempts: 1,
+            handshake_retry_base_ms: 100,
+            ..Config::default()
+        },
+    );
+    client.import_resumption_ticket(&blob).unwrap();
+    let p = client.connect(t0, server_pub, sa);
+    client.send(t0, &p, b"eventually delivered", 0, 0).unwrap();
+
+    // The ResumeHello hits the empty store and is rejected.
+    let resume = client.poll_transmit().unwrap();
+    assert_eq!(resume.contents[1], PacketType::ResumeHello as u8);
+    assert!(server.handle_datagram(t0, ca, &resume.contents).is_err());
+
+    // Give-up fires (max_attempts = 1) → engine fallback: peer
+    // resets to Pending and the dead ticket is burned.
+    client.handle_timeout(t0 + Duration::from_millis(250));
+    let ev = drain_events(&mut client);
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::HandshakeTimedOut { .. })),
+        "{ev:?}"
+    );
+
+    // The next send opens with a FULL HELLO and the session
+    // completes normally.
+    client
+        .send(t0 + Duration::from_millis(300), &p, b"redial", 0, 0)
+        .unwrap();
+    let mut seen = Vec::new();
+    pump(
+        t0 + Duration::from_millis(300),
+        &mut client,
+        &mut server,
+        ca,
+        sa,
+        &mut seen,
+    );
+    assert!(
+        seen.contains(&PacketType::Hello),
+        "no fallback HELLO: {seen:?}"
+    );
+    let sev = drain_events(&mut server);
+    assert!(
+        sev.iter()
+            .any(|e| matches!(e, Event::Data { payload, .. } if payload == b"eventually delivered" || payload == b"redial")),
+        "server events: {sev:?}"
     );
 }

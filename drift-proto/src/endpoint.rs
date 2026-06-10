@@ -8,6 +8,10 @@
 //! invariants" section of `docs/SANSIO_DESIGN.md` before changing
 //! anything here.
 
+use crate::resumption::{
+    derive_psk, derive_resumption_key, ClientTicket, ResumptionStore, RESUME_ACK_BODY_LEN,
+    RESUME_HELLO_BODY_LEN, TICKET_DEFAULT_TTL, TICKET_ID_LEN, TICKET_PLAINTEXT_LEN,
+};
 use drift_core::crypto::{cookie_mac, Direction, PeerId, SessionKey, COOKIE_MAC_LEN};
 use drift_core::error::{CodecError, CryptoError, DriftError, PeerError, SessionError};
 use drift_core::header::{
@@ -16,7 +20,9 @@ use drift_core::header::{
 use drift_core::identity::{
     derive_session_key, random_nonce, rekey_derive, NONCE_LEN, STATIC_KEY_LEN,
 };
-use drift_core::session::{HandshakeState, Peer, PendingSend, PrevSession, SEQ_SEND_CEILING};
+use drift_core::session::{
+    HandshakeState, Peer, PendingResumption, PendingSend, PrevSession, SEQ_SEND_CEILING,
+};
 use drift_core::short_header::{
     derive_initiator_rx_cid, derive_responder_rx_cid, encode_short, is_short_header, open_short,
 };
@@ -283,6 +289,31 @@ fn build_hello_wire(
     wire
 }
 
+/// Rebuild a `ResumeHello` wire packet for the retransmit path.
+/// Port of the transport's `build_resume_hello_wire` (mesh=false);
+/// note the transport quirk that retransmits carry seq 0 while the
+/// initial send allocates a real seq — neither is AEAD-relevant
+/// (ResumeHello is unsealed) and the server ignores it.
+fn build_resume_hello_wire(
+    local_peer_id: PeerId,
+    dst_id: PeerId,
+    client_eph_pub: [u8; STATIC_KEY_LEN],
+    client_nonce: [u8; NONCE_LEN],
+    ticket_id: [u8; TICKET_ID_LEN],
+) -> Vec<u8> {
+    let mut header = Header::new(PacketType::ResumeHello, 0, local_peer_id, dst_id);
+    header.payload_len = RESUME_HELLO_BODY_LEN as u16;
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+
+    let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_HELLO_BODY_LEN);
+    wire.extend_from_slice(&hbuf);
+    wire.extend_from_slice(&ticket_id);
+    wire.extend_from_slice(&client_eph_pub);
+    wire.extend_from_slice(&client_nonce);
+    wire
+}
+
 /// Server-side session derivation + HELLO_ACK construction. Port of
 /// the transport's `regenerate_session` (minus the interface
 /// bookkeeping and the inflight atomic, which the engine derives by
@@ -460,6 +491,10 @@ pub struct Endpoint {
     /// Short-header send map: peer → the CID to stamp on outgoing
     /// short-header packets so the peer's recv path can look us up.
     peer_out_cid: HashMap<PeerId, u16>,
+    /// Client-side resumption tickets, keyed by the issuing peer.
+    client_tickets: HashMap<PeerId, ClientTicket>,
+    /// Server-side ticket store (single-use, identity-bound).
+    resumption_store: ResumptionStore,
 }
 
 impl Endpoint {
@@ -475,6 +510,8 @@ impl Endpoint {
             events: VecDeque::new(),
             cid_map: HashMap::new(),
             peer_out_cid: HashMap::new(),
+            client_tickets: HashMap::new(),
+            resumption_store: ResumptionStore::default(),
         }
     }
 
@@ -484,6 +521,39 @@ impl Endpoint {
 
     pub fn public_bytes(&self) -> [u8; STATIC_KEY_LEN] {
         self.identity.public_bytes()
+    }
+
+    /// Export the stored resumption ticket for a peer as an opaque
+    /// blob (97 bytes, transport-compatible format). The blob
+    /// carries the PSK in the clear — persist it with the same care
+    /// as a private key. `None` if no unexpired ticket is on file.
+    pub fn export_resumption_ticket(&self, peer_id: &PeerId) -> Option<Vec<u8>> {
+        self.client_tickets
+            .get(peer_id)
+            .filter(|t| t.expiry > SystemTime::now())
+            .map(|t| t.to_bytes())
+    }
+
+    /// Import a ticket blob produced by `export_resumption_ticket`
+    /// (or by `drift::Transport`'s exporter — same format). The
+    /// blob is validated before storage: well-formed, unexpired,
+    /// and — when the issuing peer is already registered — its
+    /// embedded server pubkey must match the stored one. Returns
+    /// the issuing peer's id; `connect` to that peer will then use
+    /// the 1-RTT resumption path.
+    pub fn import_resumption_ticket(&mut self, blob: &[u8]) -> Result<PeerId> {
+        let ticket = ClientTicket::from_bytes(blob).ok_or(PeerError::ResumptionTicketNotFound)?;
+        if ticket.expiry <= SystemTime::now() {
+            return Err(PeerError::TicketExpired.into());
+        }
+        if let Some(p) = self.peers.get(&ticket.server_id) {
+            if p.peer_static_pub != ticket.server_static_pub {
+                return Err(PeerError::ResumptionTicketNotFound.into());
+            }
+        }
+        let id = ticket.server_id;
+        self.client_tickets.insert(id, ticket);
+        Ok(id)
     }
 
     /// Test hook (same convention as `Transport::test_bump_peer_seq`):
@@ -516,7 +586,10 @@ impl Endpoint {
         id
     }
 
-    /// Register a peer and queue the opening HELLO.
+    /// Register a peer and queue the opening flight — a 1-RTT
+    /// `ResumeHello` when a valid ticket is on file for the peer
+    /// (stored from a previous session or imported), a full HELLO
+    /// otherwise.
     pub fn connect(
         &mut self,
         now: Instant,
@@ -524,7 +597,7 @@ impl Endpoint {
         addr: SocketAddr,
     ) -> PeerId {
         let id = self.add_peer(static_pub, addr, Direction::Initiator);
-        self.start_hello(now, &id);
+        self.start_session(now, &id);
         id
     }
 
@@ -611,11 +684,12 @@ impl Endpoint {
             coalesce_group,
         });
 
-        // First send to a Pending initiator kicks off the handshake.
+        // First send to a Pending initiator kicks off the handshake
+        // (resumed when a ticket is on file, full HELLO otherwise).
         if matches!(peer.handshake, HandshakeState::Pending)
             && peer.direction == Direction::Initiator
         {
-            self.start_hello(now, peer_id);
+            self.start_session(now, peer_id);
         }
         Ok(())
     }
@@ -717,6 +791,12 @@ impl Endpoint {
         // routes behind. The transport leaves them to be
         // overwritten by the next session.
         self.drop_cids(peer_id);
+        // Engine divergence (safe direction): drop the resumption
+        // ticket too. An auto-registered server forgets us on
+        // Close, so resuming against it can never succeed — the
+        // transport keeps the ticket and a redial parks in
+        // ResumeHello retries until give-up.
+        self.client_tickets.remove(peer_id);
 
         self.transmits.push_back(Transmit {
             dst,
@@ -762,6 +842,9 @@ impl Endpoint {
             PacketType::RekeyRequest => self.on_rekey_request(now, &header, body),
             PacketType::RekeyAck => self.on_rekey_ack(&header, body),
             PacketType::Close => self.on_close(&header, body),
+            PacketType::ResumeHello => self.on_resume_hello(now, &header, body, src),
+            PacketType::ResumeAck => self.on_resume_ack(now, &header, body),
+            PacketType::ResumptionTicket => self.on_resumption_ticket(&header, body),
             // Mesh / resumption / federation packet types arrive in
             // later phases; drop them for now.
             _ => Ok(()),
@@ -787,6 +870,7 @@ impl Endpoint {
         let identity = &self.identity;
         let mut out: Vec<Transmit> = Vec::new();
         let mut timed_out: Vec<PeerId> = Vec::new();
+        let mut resume_failed: Vec<PeerId> = Vec::new();
         for peer in self.peers.values_mut() {
             // RFC 6298-style RTT-aware base when a previous session
             // measured this neighbor; static default otherwise.
@@ -799,6 +883,11 @@ impl Endpoint {
             };
             let peer_id = peer.id;
             let peer_addr = peer.addr;
+            // Snapshot before borrowing handshake mutably: an
+            // AwaitingAck entered via ResumeHello must retransmit
+            // as ResumeHello — a single dropped packet must not
+            // silently downgrade the client to a cold handshake.
+            let resumption_ctx = peer.pending_resumption.clone();
             if let HandshakeState::AwaitingAck {
                 client_nonce,
                 ephemeral,
@@ -819,22 +908,43 @@ impl Endpoint {
                     if *attempts == max_attempts {
                         *attempts = attempts.saturating_add(1);
                         timed_out.push(peer_id);
+                        // Engine divergence (safe direction): a
+                        // failed RESUMPTION attempt falls back —
+                        // reset to Pending and burn the ticket so
+                        // the next send issues a full HELLO. The
+                        // transport documents this fallback but
+                        // parks instead, leaving the client
+                        // re-presenting a ticket the server may
+                        // have already consumed or lost.
+                        if resumption_ctx.is_some() {
+                            resume_failed.push(peer_id);
+                        }
                     }
                     continue;
                 }
                 *attempts += 1;
                 *last_sent = now;
 
-                let pq_ek = pq.as_ref().map(|(ek, _)| ek.as_slice());
-                let wire = build_hello_wire(
-                    local_peer_id,
-                    peer_id,
-                    identity,
-                    ephemeral.public_bytes(),
-                    *client_nonce,
-                    cookie.as_ref(),
-                    pq_ek,
-                );
+                let wire = if let Some(res) = &resumption_ctx {
+                    build_resume_hello_wire(
+                        local_peer_id,
+                        peer_id,
+                        ephemeral.public_bytes(),
+                        *client_nonce,
+                        res.ticket_id,
+                    )
+                } else {
+                    let pq_ek = pq.as_ref().map(|(ek, _)| ek.as_slice());
+                    build_hello_wire(
+                        local_peer_id,
+                        peer_id,
+                        identity,
+                        ephemeral.public_bytes(),
+                        *client_nonce,
+                        cookie.as_ref(),
+                        pq_ek,
+                    )
+                };
                 out.push(Transmit {
                     dst: peer_addr,
                     contents: wire,
@@ -847,6 +957,13 @@ impl Endpoint {
                 .into_iter()
                 .map(|peer| Event::HandshakeTimedOut { peer }),
         );
+        for id in resume_failed {
+            if let Some(peer) = self.peers.get_mut(&id) {
+                peer.pending_resumption = None;
+                peer.handshake = HandshakeState::Pending;
+            }
+            self.client_tickets.remove(&id);
+        }
 
         // Half-open eviction — port of run_handshake_eviction_loop.
         // Reap peers stuck in either half-open state past the
@@ -977,6 +1094,10 @@ impl Endpoint {
         self.install_cids(peer_id, &cid_key, false);
         self.events.push_back(Event::Connected { peer: peer_id });
         self.transmits.extend(flushed);
+        // Hand the client a resumption ticket for 1-RTT reconnects
+        // — best-effort, same as the transport's post-transition
+        // issue in handle_data.
+        let _ = self.issue_ticket(peer_id);
         Ok(())
     }
 
@@ -1651,6 +1772,9 @@ impl Endpoint {
             peer.probing = None;
         }
         self.drop_cids(&peer_id);
+        // See close(): a peer that closed on us has likely dropped
+        // our entry; a stored ticket would only park future redials.
+        self.client_tickets.remove(&peer_id);
         self.events.push_back(Event::Closed { peer: peer_id });
         Ok(())
     }
@@ -1660,6 +1784,430 @@ impl Endpoint {
     fn drop_cids(&mut self, peer_id: &PeerId) {
         self.cid_map.retain(|_cid, pid| pid != peer_id);
         self.peer_out_cid.remove(peer_id);
+    }
+
+    /// Open a session toward a Pending initiator peer: 1-RTT
+    /// `ResumeHello` when a valid ticket is on file (mirroring the
+    /// transport's `try_resume` branch in `send_data`), full HELLO
+    /// otherwise.
+    fn start_session(&mut self, now: Instant, peer_id: &PeerId) {
+        let can_resume = self
+            .client_tickets
+            .get(peer_id)
+            .map(|t| t.expiry > SystemTime::now())
+            .unwrap_or(false)
+            && self
+                .peers
+                .get(peer_id)
+                .map(|p| {
+                    matches!(p.handshake, HandshakeState::Pending)
+                        && p.direction == Direction::Initiator
+                })
+                .unwrap_or(false);
+        if can_resume && self.send_resume_hello(now, peer_id).is_ok() {
+            return;
+        }
+        self.start_hello(now, peer_id);
+    }
+
+    /// Build and queue a `ResumeHello` using the stored ticket.
+    /// Port of the transport's `send_resume_hello`: stashes the
+    /// ephemeral in `AwaitingAck` (cookie/PQ unused on this path)
+    /// plus a `pending_resumption` marker so the matching
+    /// `ResumeAck` knows which PSK finishes the derivation.
+    fn send_resume_hello(&mut self, now: Instant, peer_id: &PeerId) -> Result<()> {
+        let ticket = match self.client_tickets.get(peer_id) {
+            Some(t) if t.expiry > SystemTime::now() => t.clone(),
+            Some(_) => {
+                self.client_tickets.remove(peer_id);
+                return Err(PeerError::ResumptionTicketNotFound.into());
+            }
+            None => return Err(PeerError::ResumptionTicketNotFound.into()),
+        };
+        let local_peer_id = self.local_peer_id;
+
+        let ephemeral = Identity::generate();
+        let client_eph_pub = ephemeral.public_bytes();
+        let mut client_nonce = [0u8; NONCE_LEN];
+        rand::thread_rng().fill_bytes(&mut client_nonce);
+
+        let peer = self
+            .peers
+            .get_mut(peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        peer.pending_resumption = Some(PendingResumption {
+            ticket_id: ticket.ticket_id,
+            psk: ticket.psk,
+        });
+        peer.handshake = HandshakeState::AwaitingAck {
+            client_nonce,
+            ephemeral,
+            last_sent: now,
+            attempts: 1,
+            cookie: None,
+            // Resumption doesn't run a fresh KEM — the resumed
+            // session inherits the original session's key strength
+            // via the PSK. Same as the transport.
+            pq: None,
+        };
+
+        let seq = peer.next_seq_checked()?;
+        let mut header = peer.make_header(PacketType::ResumeHello, seq, local_peer_id);
+        header.payload_len = RESUME_HELLO_BODY_LEN as u16;
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+
+        let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_HELLO_BODY_LEN);
+        wire.extend_from_slice(&hbuf);
+        wire.extend_from_slice(&ticket.ticket_id);
+        wire.extend_from_slice(&client_eph_pub);
+        wire.extend_from_slice(&client_nonce);
+        let dst = peer.addr;
+        self.transmits.push_back(Transmit {
+            dst,
+            contents: wire,
+        });
+        Ok(())
+    }
+
+    /// Server side: mint + queue a `ResumptionTicket` on a live
+    /// session. Port of `issue_resumption_ticket`. The PSK derives
+    /// from the current session key and never crosses the wire.
+    fn issue_ticket(&mut self, peer_id: PeerId) -> Result<()> {
+        let mut ticket_id = [0u8; TICKET_ID_LEN];
+        rand::thread_rng().fill_bytes(&mut ticket_id);
+        let expiry = SystemTime::now() + TICKET_DEFAULT_TTL;
+        let expiry_ms = expiry
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let local_peer_id = self.local_peer_id;
+
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        let session_key_bytes = match &peer.handshake {
+            HandshakeState::Established { key_bytes, .. } => key_bytes.clone(),
+            _ => return Err(PeerError::SessionNotEstablished.into()),
+        };
+        let client_static_pub = peer.peer_static_pub;
+
+        let seq = peer.next_seq_checked()?;
+        let mut header = peer.make_header(PacketType::ResumptionTicket, seq, local_peer_id);
+        header.payload_len = (TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN) as u16;
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let aad = canonical_aad(&hbuf);
+
+        let mut plaintext = [0u8; TICKET_PLAINTEXT_LEN];
+        plaintext[..TICKET_ID_LEN].copy_from_slice(&ticket_id);
+        plaintext[TICKET_ID_LEN..].copy_from_slice(&expiry_ms.to_be_bytes());
+
+        let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+        let mut wire = Vec::with_capacity(HEADER_LEN + TICKET_PLAINTEXT_LEN + AUTH_TAG_LEN);
+        wire.extend_from_slice(&hbuf);
+        tx.seal_into(
+            seq,
+            PacketType::ResumptionTicket as u8,
+            &aad,
+            &plaintext,
+            &mut wire,
+        )?;
+        let dst = peer.addr;
+
+        let psk = derive_psk(&session_key_bytes, &ticket_id);
+        self.resumption_store
+            .insert(ticket_id, psk, expiry, client_static_pub);
+        self.transmits.push_back(Transmit {
+            dst,
+            contents: wire,
+        });
+        Ok(())
+    }
+
+    /// Client side: store an incoming `ResumptionTicket`. Port of
+    /// `handle_resumption_ticket` — decrypt failures are silent
+    /// (a ticket racing a rekey window is not an attack), and the
+    /// PSK is derived from the CURRENT session key even when the
+    /// ticket decrypted under `prev` (transport behavior, kept).
+    fn on_resumption_ticket(&mut self, header: &Header, body: &[u8]) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(PeerError::WrongDestination.into());
+        }
+        let server_id = header.src_id;
+        let Some(peer) = self.peers.get_mut(&server_id) else {
+            return Ok(());
+        };
+        let session_key_bytes = match &peer.handshake {
+            HandshakeState::Established { key_bytes, .. } => key_bytes.clone(),
+            _ => return Ok(()),
+        };
+        let server_static_pub = peer.peer_static_pub;
+
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let aad = canonical_aad(&hbuf);
+        let pt = {
+            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+            rx.open(header.seq, PacketType::ResumptionTicket as u8, &aad, body)
+        };
+        let pt = match pt {
+            Ok(p) => Some(p),
+            Err(_) => {
+                if let HandshakeState::Established { prev: Some(p), .. } = &peer.handshake {
+                    p.rx.open(header.seq, PacketType::ResumptionTicket as u8, &aad, body)
+                        .ok()
+                } else {
+                    None
+                }
+            }
+        };
+        let Some(plaintext) = pt else {
+            return Ok(());
+        };
+        if plaintext.len() != TICKET_PLAINTEXT_LEN {
+            return Err(CodecError::PacketTooShort {
+                got: plaintext.len(),
+                need: TICKET_PLAINTEXT_LEN,
+            }
+            .into());
+        }
+        let mut ticket_id = [0u8; TICKET_ID_LEN];
+        ticket_id.copy_from_slice(&plaintext[..TICKET_ID_LEN]);
+        let mut exp_bytes = [0u8; 8];
+        exp_bytes.copy_from_slice(&plaintext[TICKET_ID_LEN..]);
+        let expiry = UNIX_EPOCH + Duration::from_millis(u64::from_be_bytes(exp_bytes));
+        let psk = derive_psk(&session_key_bytes, &ticket_id);
+
+        self.client_tickets.insert(
+            server_id,
+            ClientTicket {
+                ticket_id,
+                psk,
+                expiry,
+                server_id,
+                server_static_pub,
+            },
+        );
+        Ok(())
+    }
+
+    /// Server side: redeem a `ResumeHello`. Port of
+    /// `handle_resume_hello`: single-use identity-bound ticket
+    /// lookup, fresh ephemeral DH, `ResumeAck` (seq 1) sealed under
+    /// the new key, peer installed directly as Established with the
+    /// old keys (if any) in the grace slot, address migration to
+    /// the datagram source (safe — the PSK authenticates), and a
+    /// fresh ticket issued on the resumed session.
+    fn on_resume_hello(
+        &mut self,
+        now: Instant,
+        header: &Header,
+        body: &[u8],
+        src: SocketAddr,
+    ) -> Result<()> {
+        if body.len() < RESUME_HELLO_BODY_LEN {
+            return Err(CodecError::PacketTooShort {
+                got: body.len(),
+                need: RESUME_HELLO_BODY_LEN,
+            }
+            .into());
+        }
+        if header.dst_id != self.local_peer_id {
+            return Err(PeerError::WrongDestination.into());
+        }
+        let mut ticket_id = [0u8; TICKET_ID_LEN];
+        ticket_id.copy_from_slice(&body[..TICKET_ID_LEN]);
+        let mut client_eph_pub = [0u8; STATIC_KEY_LEN];
+        client_eph_pub.copy_from_slice(&body[TICKET_ID_LEN..TICKET_ID_LEN + STATIC_KEY_LEN]);
+        let mut client_nonce = [0u8; NONCE_LEN];
+        client_nonce.copy_from_slice(&body[TICKET_ID_LEN + STATIC_KEY_LEN..RESUME_HELLO_BODY_LEN]);
+
+        if client_eph_pub == [0u8; STATIC_KEY_LEN] {
+            return Err(CryptoError::KeyExchangeFailed.into());
+        }
+        let client_peer_id = header.src_id;
+        let local_peer_id = self.local_peer_id;
+
+        // Resumption reuses a previously authenticated identity —
+        // the peer must still be known (a server that forgot the
+        // peer drops the attempt; the client falls back to a full
+        // HELLO via its retry path).
+        let client_static_pub = self
+            .peers
+            .get(&client_peer_id)
+            .ok_or(PeerError::NotRegistered)?
+            .peer_static_pub;
+
+        let psk = self
+            .resumption_store
+            .take(&ticket_id, &client_static_pub)
+            .ok_or(PeerError::ResumptionTicketNotFound)?;
+
+        let server_ephemeral = Identity::generate();
+        let server_eph_pub = server_ephemeral.public_bytes();
+        let server_nonce = random_nonce();
+        let ephemeral_dh = server_ephemeral
+            .dh(&client_eph_pub)
+            .ok_or(CryptoError::KeyExchangeFailed)?;
+        drop(server_ephemeral);
+
+        let new_session_key =
+            derive_resumption_key(&psk, &ephemeral_dh, &client_nonce, &server_nonce);
+
+        let peer = self
+            .peers
+            .get_mut(&client_peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+
+        // Old keys (if any) ride the grace slot so in-flight
+        // pre-resumption DATA still decrypts briefly.
+        let prev_session = match &peer.handshake {
+            HandshakeState::Established { tx, rx, .. } => Some(PrevSession {
+                tx: tx.clone(),
+                rx: rx.clone(),
+                installed_at: now,
+            }),
+            _ => None,
+        };
+
+        let seq = 1u32;
+        let mut ack_header = peer.make_header(PacketType::ResumeAck, seq, local_peer_id);
+        ack_header.payload_len = RESUME_ACK_BODY_LEN as u16;
+        let mut hbuf = [0u8; HEADER_LEN];
+        ack_header.encode(&mut hbuf);
+        let canon = canonical_aad(&hbuf);
+        let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
+        aad.extend_from_slice(&canon);
+        aad.extend_from_slice(&server_eph_pub);
+        aad.extend_from_slice(&server_nonce);
+
+        let server_tx = SessionKey::new(&new_session_key, Direction::Responder);
+        let auth_tag = server_tx.seal(seq, PacketType::ResumeAck as u8, &aad, b"")?;
+        let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_ACK_BODY_LEN);
+        wire.extend_from_slice(&hbuf);
+        wire.extend_from_slice(&server_eph_pub);
+        wire.extend_from_slice(&server_nonce);
+        wire.extend_from_slice(&auth_tag);
+
+        let server_rx = SessionKey::new(&new_session_key, Direction::Initiator);
+        peer.reset_seq();
+        // The ResumeAck used seq 1, so the next outgoing is 2.
+        peer.next_tx_seq = 2;
+        peer.coalesce_state.clear();
+        peer.coalesce_order.clear();
+        peer.mark_session_start();
+        peer.handshake = HandshakeState::Established {
+            tx: server_tx,
+            rx: server_rx,
+            key_bytes: new_session_key,
+            prev: prev_session,
+        };
+        peer.addr = src;
+        peer.last_seen = now;
+
+        self.transmits.push_back(Transmit {
+            dst: src,
+            contents: wire,
+        });
+        self.events.push_back(Event::Connected {
+            peer: client_peer_id,
+        });
+        // Fresh ticket for next time — best-effort, same as the
+        // transport.
+        let _ = self.issue_ticket(client_peer_id);
+        Ok(())
+    }
+
+    /// Client side: finish a 1-RTT resumption. Port of
+    /// `handle_resume_ack`: requires `pending_resumption` + an
+    /// in-flight `AwaitingAck`, derives the same key from
+    /// PSK + ephemeral DH + nonces, verifies the ack's tag, and
+    /// flushes parked DATA.
+    fn on_resume_ack(&mut self, now: Instant, header: &Header, body: &[u8]) -> Result<()> {
+        if body.len() < RESUME_ACK_BODY_LEN {
+            return Err(CodecError::PacketTooShort {
+                got: body.len(),
+                need: RESUME_ACK_BODY_LEN,
+            }
+            .into());
+        }
+        let mut server_eph_pub = [0u8; STATIC_KEY_LEN];
+        server_eph_pub.copy_from_slice(&body[..STATIC_KEY_LEN]);
+        let mut server_nonce = [0u8; NONCE_LEN];
+        server_nonce.copy_from_slice(&body[STATIC_KEY_LEN..STATIC_KEY_LEN + NONCE_LEN]);
+        let tag_start = STATIC_KEY_LEN + NONCE_LEN;
+        let tag = &body[tag_start..tag_start + AUTH_TAG_LEN];
+
+        let server_id = header.src_id;
+        let local_peer_id = self.local_peer_id;
+        let peer = self
+            .peers
+            .get_mut(&server_id)
+            .ok_or(PeerError::NotRegistered)?;
+
+        let Some(resumption) = peer.pending_resumption.take() else {
+            return Ok(()); // ResumeAck without a pending resumption
+        };
+        let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
+        let (client_nonce, ephemeral) = match old_state {
+            HandshakeState::AwaitingAck {
+                client_nonce,
+                ephemeral,
+                ..
+            } => (client_nonce, ephemeral),
+            other => {
+                peer.handshake = other;
+                return Ok(()); // wrong state — ignore
+            }
+        };
+
+        let ephemeral_dh = ephemeral
+            .dh(&server_eph_pub)
+            .ok_or(CryptoError::KeyExchangeFailed)?;
+        drop(ephemeral);
+        let new_session_key =
+            derive_resumption_key(&resumption.psk, &ephemeral_dh, &client_nonce, &server_nonce);
+
+        let tx = SessionKey::new(&new_session_key, Direction::Initiator);
+        let rx = SessionKey::new(&new_session_key, Direction::Responder);
+
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let canon = canonical_aad(&hbuf);
+        let mut aad = Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN);
+        aad.extend_from_slice(&canon);
+        aad.extend_from_slice(&server_eph_pub);
+        aad.extend_from_slice(&server_nonce);
+        rx.open(header.seq, PacketType::ResumeAck as u8, &aad, tag)?;
+
+        peer.reset_seq();
+        peer.coalesce_state.clear();
+        peer.coalesce_order.clear();
+        peer.mark_session_start();
+        peer.handshake = HandshakeState::Established {
+            tx,
+            rx,
+            key_bytes: new_session_key,
+            prev: None,
+        };
+        peer.last_seen = now;
+        self.events.push_back(Event::Connected { peer: server_id });
+
+        // Flush DATA parked while the resumption was in flight.
+        let pending = std::mem::take(&mut peer.pending);
+        for ps in pending {
+            let t = build_data_packet(
+                local_peer_id,
+                peer,
+                &ps.payload,
+                ps.deadline_ms,
+                ps.coalesce_group,
+            )?;
+            self.transmits.push_back(t);
+        }
+        Ok(())
     }
 
     /// DATA processing. Port of `handle_data`'s long-header path:
