@@ -13,8 +13,10 @@ use drift_core::error::{CodecError, CryptoError, DriftError, PeerError, SessionE
 use drift_core::header::{
     canonical_aad, Header, PacketType, AUTH_TAG_LEN, FLAG_PQ_HYBRID, HEADER_LEN,
 };
-use drift_core::identity::{derive_session_key, random_nonce, NONCE_LEN, STATIC_KEY_LEN};
-use drift_core::session::{HandshakeState, Peer, PendingSend};
+use drift_core::identity::{
+    derive_session_key, random_nonce, rekey_derive, NONCE_LEN, STATIC_KEY_LEN,
+};
+use drift_core::session::{HandshakeState, Peer, PendingSend, PrevSession, SEQ_SEND_CEILING};
 use drift_core::short_header::{
     derive_initiator_rx_cid, derive_responder_rx_cid, encode_short, is_short_header, open_short,
 };
@@ -33,6 +35,17 @@ const HELLO_ACK_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_CT_LEN; // 1088
 const COOKIE_TS_LEN: usize = 8;
 const COOKIE_BLOB_LEN: usize = COOKIE_TS_LEN + COOKIE_MAC_LEN; // 24
 const HELLO_WITH_COOKIE_LEN: usize = HELLO_PAYLOAD_LEN + COOKIE_BLOB_LEN; // 104
+
+/// Grace window during which the pre-rekey session keys stay live
+/// on the receive path, so old-key DATA already in flight at the
+/// key switch still decrypts. Identical to the transport's.
+const REKEY_GRACE: Duration = Duration::from_secs(2);
+
+/// Auto-rekey watermark: once a session's tx seq crosses 3/4 of
+/// `SEQ_SEND_CEILING`, the next send triggers a transparent rekey
+/// so the caller never sees `SessionExhausted`. Identical to the
+/// transport's.
+const AUTO_REKEY_THRESHOLD: u32 = (SEQ_SEND_CEILING / 4) * 3;
 
 /// Engine configuration. Field names, semantics, and defaults match
 /// the corresponding `drift::TransportConfig` fields so behavior is
@@ -60,6 +73,9 @@ pub struct Config {
     /// Cap on DATA payloads queued per peer while a handshake is in
     /// flight.
     pub pending_queue_cap: usize,
+    /// Reap peers stuck half-open (`AwaitingData` / `AwaitingAck`)
+    /// for longer than this. `u64::MAX` disables eviction.
+    pub awaiting_data_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -75,6 +91,7 @@ impl Default for Config {
             cookie_max_age_secs: 60,
             cookie_rotate_secs: 30,
             pending_queue_cap: 256,
+            awaiting_data_timeout_secs: 30,
         }
     }
 }
@@ -105,6 +122,10 @@ pub enum Event {
     /// parked in `AwaitingAck` (mirroring the transport); a later
     /// `send` after resetting via `connect` starts fresh.
     HandshakeTimedOut { peer: PeerId },
+    /// The peer sent an authenticated `Close`: its session state is
+    /// gone (auto-registered peers are removed entirely; explicit
+    /// peers reset to `Pending` and can re-handshake later).
+    Closed { peer: PeerId },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -369,6 +390,23 @@ fn regenerate_session(
     Ok((wire, src))
 }
 
+/// Authenticated session-close packet: an AEAD-sealed empty body —
+/// the tag is the message. Port of the transport's
+/// `build_close_packet`.
+fn build_close_packet(local_peer_id: PeerId, peer: &mut Peer) -> Result<Vec<u8>> {
+    let seq = peer.next_seq_checked()?;
+    let mut header = peer.make_header(PacketType::Close, seq, local_peer_id);
+    header.payload_len = AUTH_TAG_LEN as u16;
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+    let aad = canonical_aad(&hbuf);
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+    let mut wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
+    wire.extend_from_slice(&hbuf);
+    tx.seal_into(seq, PacketType::Close as u8, &aad, b"", &mut wire)?;
+    Ok(wire)
+}
+
 /// Long-header DATA construction. Port of the transport's
 /// `build_data_packet` (no CID/short-header fast path, no mesh —
 /// phase 2/4).
@@ -448,6 +486,21 @@ impl Endpoint {
         self.identity.public_bytes()
     }
 
+    /// Test hook (same convention as `Transport::test_bump_peer_seq`):
+    /// force a peer's tx seq counter so tests can cross the
+    /// auto-rekey watermark without sending 1.6 billion packets.
+    /// Returns false if the peer is unknown.
+    #[doc(hidden)]
+    pub fn test_bump_peer_seq(&mut self, peer_id: &PeerId, value: u32) -> bool {
+        match self.peers.get_mut(peer_id) {
+            Some(peer) => {
+                peer.next_tx_seq = value;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Register a peer without initiating a handshake (server-side
     /// allowlisting). Mirrors `Transport::add_peer`.
     pub fn add_peer(
@@ -492,6 +545,21 @@ impl Endpoint {
                 len: payload.len(),
                 max: crate::MAX_PAYLOAD,
             });
+        }
+        // Transparent auto-rekey: when the session's seq counter is
+        // 3/4 of the way to the nonce-reuse ceiling, rekey before
+        // building this packet so the caller never sees
+        // `SessionExhausted`. Same watermark as the transport.
+        let needs_rekey = self
+            .peers
+            .get(peer_id)
+            .map(|p| {
+                matches!(p.handshake, HandshakeState::Established { .. })
+                    && p.next_tx_seq >= AUTO_REKEY_THRESHOLD
+            })
+            .unwrap_or(false);
+        if needs_rekey {
+            self.rekey(now, peer_id)?;
         }
         let pending_cap = self.config.pending_queue_cap;
         let local_peer_id = self.local_peer_id;
@@ -552,6 +620,111 @@ impl Endpoint {
         Ok(())
     }
 
+    /// Rekey an established session: derive a fresh session key
+    /// from the old key + 32 random salt bytes, ship the salt in a
+    /// `RekeyRequest` sealed under the OLD key, and keep the old
+    /// keys in a grace slot so in-flight packets still decrypt.
+    /// Port of the transport's `rekey`.
+    pub fn rekey(&mut self, now: Instant, peer_id: &PeerId) -> Result<()> {
+        let mut salt = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut salt);
+        let local_peer_id = self.local_peer_id;
+
+        let peer = self
+            .peers
+            .get_mut(peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
+            HandshakeState::Established {
+                tx, rx, key_bytes, ..
+            } => (tx.clone(), rx.clone(), key_bytes.clone()),
+            _ => return Err(PeerError::SessionNotEstablished.into()),
+        };
+
+        // 1. RekeyRequest sealed with the OLD tx key, body = salt.
+        let seq = peer.next_seq_checked()?;
+        let mut header = peer.make_header(PacketType::RekeyRequest, seq, local_peer_id);
+        header.payload_len = (32 + AUTH_TAG_LEN) as u16;
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let aad = canonical_aad(&hbuf);
+        let mut wire = Vec::with_capacity(HEADER_LEN + 32 + AUTH_TAG_LEN);
+        wire.extend_from_slice(&hbuf);
+        old_tx.seal_into(seq, PacketType::RekeyRequest as u8, &aad, &salt, &mut wire)?;
+
+        // 2. Derive + install the new key; old keys go to the grace
+        //    slot. The rekey initiator takes the Initiator nonce
+        //    direction for the new key namespace regardless of who
+        //    initiated the original handshake — same as the
+        //    transport.
+        let new_key_bytes = rekey_derive(&old_key_bytes, &salt);
+        let new_tx = SessionKey::new(&new_key_bytes, Direction::Initiator);
+        let new_rx = SessionKey::new(&new_key_bytes, Direction::Responder);
+        peer.reset_seq();
+        peer.mark_session_start();
+        let mut cid_key = [0u8; 32];
+        cid_key.copy_from_slice(&*new_key_bytes);
+        peer.handshake = HandshakeState::Established {
+            tx: new_tx,
+            rx: new_rx,
+            key_bytes: new_key_bytes,
+            prev: Some(PrevSession {
+                tx: old_tx,
+                rx: old_rx,
+                installed_at: now,
+            }),
+        };
+        let dst = peer.addr;
+
+        self.transmits.push_back(Transmit {
+            dst,
+            contents: wire,
+        });
+        // Refresh CID maps for the new key. The old CID entries
+        // stay in the map (the transport's insert-only behavior) —
+        // they're what routes in-flight old-key short-header
+        // packets to this peer for the grace-window fallback.
+        self.install_cids(*peer_id, &cid_key, true);
+        Ok(())
+    }
+
+    /// Close an established (or half-open) session: emit an
+    /// AEAD-sealed `Close` and drop local session state immediately
+    /// — no retry if the packet is lost. Port of the transport's
+    /// `close_peer`.
+    pub fn close(&mut self, peer_id: &PeerId) -> Result<()> {
+        let local_peer_id = self.local_peer_id;
+        let peer = self
+            .peers
+            .get_mut(peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        if !peer.handshake.is_ready_for_data() {
+            return Err(PeerError::SessionNotReady.into());
+        }
+        let wire = build_close_packet(local_peer_id, peer)?;
+        let dst = peer.addr;
+
+        if peer.auto_registered {
+            self.peers.remove(peer_id);
+        } else {
+            peer.handshake = HandshakeState::Pending;
+            peer.pending.clear();
+            peer.session_epoch = None;
+            peer.probing = None;
+        }
+        // Engine divergence (safe direction): drop this peer's CID
+        // entries so a dead session can't leave stale short-header
+        // routes behind. The transport leaves them to be
+        // overwritten by the next session.
+        self.drop_cids(peer_id);
+
+        self.transmits.push_back(Transmit {
+            dst,
+            contents: wire,
+        });
+        Ok(())
+    }
+
     /// Drain the next outbound datagram.
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.transmits.pop_front()
@@ -586,8 +759,11 @@ impl Endpoint {
             PacketType::HelloAck => self.on_hello_ack(now, &header, body),
             PacketType::Challenge => self.on_challenge(now, &header, body),
             PacketType::Data => self.on_data(now, &header, body),
-            // Mesh / rekey / resumption / federation packet types
-            // arrive in later phases; drop them for now.
+            PacketType::RekeyRequest => self.on_rekey_request(now, &header, body),
+            PacketType::RekeyAck => self.on_rekey_ack(&header, body),
+            PacketType::Close => self.on_close(&header, body),
+            // Mesh / resumption / federation packet types arrive in
+            // later phases; drop them for now.
             _ => Ok(()),
         }
     }
@@ -671,6 +847,44 @@ impl Endpoint {
                 .into_iter()
                 .map(|peer| Event::HandshakeTimedOut { peer }),
         );
+
+        // Half-open eviction — port of run_handshake_eviction_loop.
+        // Reap peers stuck in either half-open state past the
+        // cutoff: AwaitingData (server replied, client never sent
+        // DATA — aged via session_epoch) and AwaitingAck (we sent
+        // HELLO, no reply — aged via last_sent, which retransmits
+        // refresh). Auto-registered peers are removed; explicit
+        // peers reset to Pending so the app can redial.
+        if self.config.awaiting_data_timeout_secs != u64::MAX {
+            let cutoff = Duration::from_secs(self.config.awaiting_data_timeout_secs);
+            let mut to_remove: Vec<PeerId> = Vec::new();
+            for peer in self.peers.values_mut() {
+                let stale_age = match &peer.handshake {
+                    HandshakeState::AwaitingData { .. } => peer
+                        .session_epoch
+                        .map(|e| now.saturating_duration_since(e))
+                        .unwrap_or_default(),
+                    HandshakeState::AwaitingAck { last_sent, .. } => {
+                        now.saturating_duration_since(*last_sent)
+                    }
+                    _ => continue,
+                };
+                if stale_age <= cutoff {
+                    continue;
+                }
+                if peer.auto_registered {
+                    to_remove.push(peer.id);
+                } else {
+                    peer.handshake = HandshakeState::Pending;
+                    peer.pending.clear();
+                    peer.session_epoch = None;
+                }
+            }
+            for id in to_remove {
+                self.peers.remove(&id);
+                self.drop_cids(&id);
+            }
+        }
     }
 
     /// Earliest instant at which `handle_timeout` has work to do.
@@ -767,8 +981,7 @@ impl Endpoint {
     }
 
     /// Short-header DATA receive. Port of the transport's
-    /// `process_short_header` (minus the rekey grace window — phase
-    /// 2 — and path migration — phase 4).
+    /// `process_short_header` (minus path migration — phase 4).
     fn on_short_data(&mut self, now: Instant, datagram: &[u8]) -> Result<()> {
         let (cid, _seq, _body) = drift_core::short_header::decode_short(datagram)?;
         let peer_id = *self.cid_map.get(&cid).ok_or(PeerError::NotRegistered)?;
@@ -777,7 +990,32 @@ impl Endpoint {
             .get_mut(&peer_id)
             .ok_or(PeerError::NotRegistered)?;
         let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-        let (_cid, seq, payload) = open_short(datagram, rx)?;
+        let first_try = open_short(datagram, rx);
+        let (_cid, seq, payload) = match first_try {
+            Ok(out) => out,
+            Err(err) => {
+                // Rekey grace fallback, same as the long-header
+                // path. The pre-rekey CID entries are still in the
+                // map — that's how an old-key packet found this
+                // peer in the first place.
+                let mut recovered = None;
+                if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
+                    if let Some(p) = prev {
+                        if now.saturating_duration_since(p.installed_at) <= REKEY_GRACE {
+                            if let Ok(out) = open_short(datagram, &p.rx) {
+                                recovered = Some(out);
+                            }
+                        } else {
+                            *prev = None;
+                        }
+                    }
+                }
+                match recovered {
+                    Some(out) => out,
+                    None => return Err(err.into()),
+                }
+            }
+        };
         peer.check_and_update_replay(seq)?;
         peer.last_seen = now;
         self.complete_server_handshake(peer_id)?;
@@ -1274,6 +1512,156 @@ impl Endpoint {
         Ok(())
     }
 
+    /// Receiver side of the rekey handshake. Port of
+    /// `handle_rekey_request`: decrypt the salt with the CURRENT rx
+    /// (the old key from the sender's perspective), derive + install
+    /// the same new key with the old pair in the grace slot, and ack
+    /// under the NEW tx key.
+    fn on_rekey_request(&mut self, now: Instant, header: &Header, body: &[u8]) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(PeerError::WrongDestination.into());
+        }
+        let peer_id = header.src_id;
+        let local_peer_id = self.local_peer_id;
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        let (old_tx, old_rx, old_key_bytes) = match &peer.handshake {
+            HandshakeState::Established {
+                tx, rx, key_bytes, ..
+            } => (tx.clone(), rx.clone(), key_bytes.clone()),
+            _ => return Err(PeerError::SessionNotEstablished.into()),
+        };
+
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let aad = canonical_aad(&hbuf);
+        let salt_bytes = old_rx.open(header.seq, PacketType::RekeyRequest as u8, &aad, body)?;
+        if salt_bytes.len() != 32 {
+            return Err(CodecError::PacketTooShort {
+                got: salt_bytes.len(),
+                need: 32,
+            }
+            .into());
+        }
+        let mut salt = [0u8; 32];
+        salt.copy_from_slice(&salt_bytes);
+
+        // The request receiver takes the Responder nonce direction
+        // for the new key namespace — mirror of `rekey()`.
+        let new_key_bytes = rekey_derive(&old_key_bytes, &salt);
+        let new_tx = SessionKey::new(&new_key_bytes, Direction::Responder);
+        let new_rx = SessionKey::new(&new_key_bytes, Direction::Initiator);
+
+        peer.reset_seq();
+        peer.mark_session_start();
+        let mut cid_key = [0u8; 32];
+        cid_key.copy_from_slice(&*new_key_bytes);
+        peer.handshake = HandshakeState::Established {
+            tx: new_tx,
+            rx: new_rx,
+            key_bytes: new_key_bytes,
+            prev: Some(PrevSession {
+                tx: old_tx,
+                rx: old_rx,
+                installed_at: now,
+            }),
+        };
+
+        // RekeyAck sealed with the NEW tx — proves to the initiator
+        // that we hold the new key.
+        let ack_seq = peer.next_seq_checked()?;
+        let mut ack_header = peer.make_header(PacketType::RekeyAck, ack_seq, local_peer_id);
+        ack_header.payload_len = AUTH_TAG_LEN as u16;
+        let mut ack_hbuf = [0u8; HEADER_LEN];
+        ack_header.encode(&mut ack_hbuf);
+        let ack_aad = canonical_aad(&ack_hbuf);
+        let (tx_ref, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+        let mut ack_wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
+        ack_wire.extend_from_slice(&ack_hbuf);
+        tx_ref.seal_into(
+            ack_seq,
+            PacketType::RekeyAck as u8,
+            &ack_aad,
+            b"",
+            &mut ack_wire,
+        )?;
+        let dst = peer.addr;
+
+        self.transmits.push_back(Transmit {
+            dst,
+            contents: ack_wire,
+        });
+        self.install_cids(peer_id, &cid_key, false);
+        Ok(())
+    }
+
+    /// `RekeyAck` arrival: sealed with the NEW key, so a successful
+    /// open proves the peer installed it. `prev` is deliberately NOT
+    /// dropped here — old-key DATA may still be in flight; the
+    /// grace-window timer expires it instead. Port of
+    /// `handle_rekey_ack`.
+    fn on_rekey_ack(&mut self, header: &Header, body: &[u8]) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(PeerError::WrongDestination.into());
+        }
+        let peer_id = header.src_id;
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let aad = canonical_aad(&hbuf);
+        if let HandshakeState::Established { rx, .. } = &mut peer.handshake {
+            let _ = rx.open(header.seq, PacketType::RekeyAck as u8, &aad, body)?;
+        }
+        Ok(())
+    }
+
+    /// Authenticated `Close` arrival. Port of `handle_close` (minus
+    /// the federation PeerGone emission — phase 4): verify the tag,
+    /// then drop session state — removal for auto-registered peers,
+    /// reset-to-Pending for explicit ones.
+    fn on_close(&mut self, header: &Header, body: &[u8]) -> Result<()> {
+        if header.dst_id != self.local_peer_id {
+            return Err(PeerError::WrongDestination.into());
+        }
+        let peer_id = header.src_id;
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .ok_or(PeerError::NotRegistered)?;
+        let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+
+        let mut hbuf = [0u8; HEADER_LEN];
+        header.encode(&mut hbuf);
+        let aad = canonical_aad(&hbuf);
+        // AEAD-authenticated: a Close can't be forged without the
+        // session key, so acting on it immediately is safe.
+        let _ = rx.open(header.seq, PacketType::Close as u8, &aad, body)?;
+
+        if peer.auto_registered {
+            self.peers.remove(&peer_id);
+        } else {
+            peer.handshake = HandshakeState::Pending;
+            peer.pending.clear();
+            peer.session_epoch = None;
+            peer.probing = None;
+        }
+        self.drop_cids(&peer_id);
+        self.events.push_back(Event::Closed { peer: peer_id });
+        Ok(())
+    }
+
+    /// Remove every CID-map entry pointing at this peer (both
+    /// directions). Used on close and eviction.
+    fn drop_cids(&mut self, peer_id: &PeerId) {
+        self.cid_map.retain(|_cid, pid| pid != peer_id);
+        self.peer_out_cid.remove(peer_id);
+    }
+
     /// DATA processing. Port of `handle_data`'s long-header path:
     /// AEAD open → replay → deadline → coalesce → (AwaitingData →
     /// Established transition) → deliver.
@@ -1294,7 +1682,33 @@ impl Endpoint {
         let mut hbuf = [0u8; HEADER_LEN];
         header.encode(&mut hbuf);
         let aad = canonical_aad(&hbuf);
-        let payload = rx.open(header.seq, PacketType::Data as u8, &aad, body)?;
+        // Try the current rx key; on failure fall back to the
+        // pre-rekey keys if the grace window is still open (old-key
+        // DATA already in flight at the key switch).
+        let first_try = rx.open(header.seq, PacketType::Data as u8, &aad, body);
+        let payload = match first_try {
+            Ok(pt) => pt,
+            Err(err) => {
+                let mut recovered = None;
+                if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
+                    if let Some(p) = prev {
+                        if now.saturating_duration_since(p.installed_at) <= REKEY_GRACE {
+                            if let Ok(pt) =
+                                p.rx.open(header.seq, PacketType::Data as u8, &aad, body)
+                            {
+                                recovered = Some(pt);
+                            }
+                        } else {
+                            *prev = None;
+                        }
+                    }
+                }
+                match recovered {
+                    Some(pt) => pt,
+                    None => return Err(err.into()),
+                }
+            }
+        };
 
         peer.check_and_update_replay(header.seq)?;
 

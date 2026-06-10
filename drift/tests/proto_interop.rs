@@ -358,3 +358,249 @@ async fn engine_server_challenges_transport_client() {
          flight: {events:?}"
     );
 }
+
+// ---- phase 2: rekey / close across implementations ----------------
+
+/// Transport-initiated rekey: bump the transport client's seq to the
+/// auto-rekey watermark, send — the transport emits RekeyRequest +
+/// DATA under the new key. The engine must process the request, ack
+/// under the new key, deliver the payload, and keep the session
+/// flowing in both directions.
+#[tokio::test]
+async fn transport_initiated_rekey_against_engine_server() {
+    let engine_id = Identity::from_secret_bytes([0xE1; 32]);
+    let engine_pub = engine_id.public_bytes();
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let engine_addr = socket.local_addr().unwrap();
+
+    let engine_side = tokio::task::spawn_blocking(move || {
+        let mut ep = Endpoint::new(
+            engine_id,
+            ProtoConfig {
+                accept_any_peer: true,
+                ..ProtoConfig::default()
+            },
+        );
+        let mut events = pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            got_payload(ev, b"after the rekey")
+        });
+        let peer = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Data { peer, .. } => Some(*peer),
+                _ => None,
+            })
+            .expect("no DATA event");
+        ep.send(Instant::now(), &peer, b"engine reply post-rekey", 0, 0)
+            .unwrap();
+        events.extend(pump_until(&mut ep, &socket, Duration::from_secs(2), |_| {
+            false
+        }));
+        events
+    });
+
+    let client = Transport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Identity::from_secret_bytes([0xE2; 32]),
+    )
+    .await
+    .unwrap();
+    let engine_peer = client
+        .add_peer(engine_pub, engine_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    client
+        .send_data(&engine_peer, b"before the rekey", 0, 0)
+        .await
+        .unwrap();
+    // Give the first exchange a moment to establish, then force the
+    // watermark: the next send_data transparently rekeys first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        client
+            .test_bump_peer_seq(&engine_peer, (1u32 << 31) / 4 * 3)
+            .await
+    );
+    client
+        .send_data(&engine_peer, b"after the rekey", 0, 0)
+        .await
+        .unwrap();
+
+    let got = tokio::time::timeout(Duration::from_secs(5), client.recv())
+        .await
+        .expect("transport never got the engine's post-rekey reply")
+        .expect("recv None");
+    assert_eq!(got.payload, b"engine reply post-rekey");
+
+    let events = engine_side.await.unwrap();
+    assert!(got_payload(&events, b"before the rekey"), "{events:?}");
+    assert!(got_payload(&events, b"after the rekey"), "{events:?}");
+    let m = client.metrics();
+    assert!(m.auto_rekeys >= 1, "transport should have auto-rekeyed");
+}
+
+/// Engine-initiated rekey: the engine rekeys an established session
+/// with a transport server; the transport must accept the
+/// RekeyRequest, ack, and decode the engine's new-key DATA — and its
+/// own reply must decode on the engine side.
+#[tokio::test]
+async fn engine_initiated_rekey_against_transport_server() {
+    let server_id = Identity::from_secret_bytes([0xE3; 32]);
+    let server_pub = server_id.public_bytes();
+    let cfg = TransportConfig {
+        accept_any_peer: true,
+        ..TransportConfig::default()
+    };
+    let server = Arc::new(
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), server_id, cfg)
+            .await
+            .unwrap(),
+    );
+    let server_addr = server.local_addr().unwrap();
+
+    let engine_side = tokio::task::spawn_blocking(move || {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut ep = Endpoint::new(
+            Identity::from_secret_bytes([0xE4; 32]),
+            ProtoConfig::default(),
+        );
+        let peer = ep.connect(Instant::now(), server_pub, server_addr);
+        ep.send(Instant::now(), &peer, b"pre-rekey", 0, 0).unwrap();
+        let mut events = pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            ev.iter().any(|e| matches!(e, Event::Connected { .. }))
+        });
+        // Rekey, then send under the new key.
+        ep.rekey(Instant::now(), &peer).unwrap();
+        ep.send(Instant::now(), &peer, b"post-rekey from engine", 0, 0)
+            .unwrap();
+        events.extend(pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            got_payload(ev, b"reply under new key")
+        }));
+        events
+    });
+
+    let got = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("no pre-rekey DATA")
+        .expect("recv None");
+    assert_eq!(got.payload, b"pre-rekey");
+    let got2 = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("transport never decoded the engine's post-rekey DATA")
+        .expect("recv None");
+    assert_eq!(got2.payload, b"post-rekey from engine");
+    server
+        .send_data(&got2.peer_id, b"reply under new key", 0, 0)
+        .await
+        .unwrap();
+
+    let events = engine_side.await.unwrap();
+    assert!(
+        got_payload(&events, b"reply under new key"),
+        "engine never decoded the transport's new-key reply: {events:?}"
+    );
+}
+
+/// Close in both directions: the engine's Close tears down the
+/// transport's session state (a fresh handshake succeeds after),
+/// and the transport's Close surfaces as Event::Closed on the
+/// engine.
+#[tokio::test]
+async fn close_interop_both_directions() {
+    // (a) engine client closes against a transport server.
+    let server_id = Identity::from_secret_bytes([0xE5; 32]);
+    let server_pub = server_id.public_bytes();
+    let cfg = TransportConfig {
+        accept_any_peer: true,
+        ..TransportConfig::default()
+    };
+    let server = Arc::new(
+        Transport::bind_with_config("127.0.0.1:0".parse().unwrap(), server_id, cfg)
+            .await
+            .unwrap(),
+    );
+    let server_addr = server.local_addr().unwrap();
+
+    let engine_side = tokio::task::spawn_blocking(move || {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut ep = Endpoint::new(
+            Identity::from_secret_bytes([0xE6; 32]),
+            ProtoConfig::default(),
+        );
+        let peer = ep.connect(Instant::now(), server_pub, server_addr);
+        ep.send(Instant::now(), &peer, b"session one", 0, 0)
+            .unwrap();
+        pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            ev.iter().any(|e| matches!(e, Event::Connected { .. }))
+        });
+        ep.close(&peer).unwrap();
+        pump_until(&mut ep, &socket, Duration::from_millis(300), |_| false);
+        // Dial again — proves the transport tore the old session
+        // down cleanly and accepts a new one.
+        let peer2 = ep.connect(Instant::now(), server_pub, server_addr);
+        ep.send(Instant::now(), &peer2, b"session two", 0, 0)
+            .unwrap();
+        pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            ev.iter()
+                .filter(|e| matches!(e, Event::Connected { .. }))
+                .count()
+                >= 2
+        })
+    });
+
+    let got = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("no session-one DATA")
+        .expect("recv None");
+    assert_eq!(got.payload, b"session one");
+    let got2 = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("no session-two DATA after engine Close + redial")
+        .expect("recv None");
+    assert_eq!(got2.payload, b"session two");
+    engine_side.await.unwrap();
+    assert_eq!(server.metrics().handshakes_completed, 2);
+
+    // (b) transport client closes against an engine server.
+    let engine_id = Identity::from_secret_bytes([0xE7; 32]);
+    let engine_pub = engine_id.public_bytes();
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let engine_addr = socket.local_addr().unwrap();
+
+    let engine_side = tokio::task::spawn_blocking(move || {
+        let mut ep = Endpoint::new(
+            engine_id,
+            ProtoConfig {
+                accept_any_peer: true,
+                ..ProtoConfig::default()
+            },
+        );
+        pump_until(&mut ep, &socket, Duration::from_secs(5), |ev| {
+            ev.iter().any(|e| matches!(e, Event::Closed { .. }))
+        })
+    });
+
+    let client = Transport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Identity::from_secret_bytes([0xE8; 32]),
+    )
+    .await
+    .unwrap();
+    let engine_peer = client
+        .add_peer(engine_pub, engine_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    client
+        .send_data(&engine_peer, b"about to close", 0, 0)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client.close_peer(&engine_peer).await.unwrap();
+
+    let events = engine_side.await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Closed { .. })),
+        "engine never saw the transport's Close: {events:?}"
+    );
+    assert!(got_payload(&events, b"about to close"), "{events:?}");
+}
