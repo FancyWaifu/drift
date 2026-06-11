@@ -15,10 +15,10 @@
 //! byte-identity guard, on top of the per-crate handshake/close
 //! tests.
 
-use drift_core::crypto::{PeerId, SessionKey};
-use drift_core::error::{PeerError, Result};
+use drift_core::crypto::{Direction, PeerId, SessionKey};
+use drift_core::error::{CryptoError, PeerError, Result};
 use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
-use drift_core::identity::{NONCE_LEN, STATIC_KEY_LEN};
+use drift_core::identity::{derive_session_key, Identity, NONCE_LEN, STATIC_KEY_LEN};
 use drift_core::session::{HandshakeState, Peer, PendingSend, DEFAULT_MESH_TTL};
 use drift_core::short_header::open_short;
 use drift_core::Zeroizing;
@@ -27,6 +27,149 @@ use drift_core::Zeroizing;
 use crate::time::{Duration, Instant};
 
 use crate::wire::HELLO_ACK_PAYLOAD_LEN;
+
+/// Outcome of [`process_hello_ack`] — the client-side handshake
+/// completed (`AwaitingAck → Established`).
+pub struct HelloAckOutcome {
+    /// The derived session key, for short-header CID installation.
+    pub key_bytes: Zeroizing<[u8; 32]>,
+    /// Whether the completed handshake was PQ-hybrid (caller metric).
+    pub server_pq: bool,
+    /// DATA queued during the handshake, for the caller to flush in
+    /// its own action type.
+    pub pending: Vec<PendingSend>,
+}
+
+/// What [`process_hello_ack`] decided. Crypto failures (DH, ML-KEM
+/// decapsulation, or the HELLO_ACK tag) propagate as `Err`; the two
+/// non-error early-outs are surfaced as variants so the caller can
+/// apply its own metrics / logging.
+pub enum HelloAckResult {
+    /// The peer was not in `AwaitingAck` — a stray / duplicate
+    /// HELLO_ACK. Drop it.
+    Ignored,
+    /// Client and server disagree on PQ posture (silent downgrade or
+    /// unsolicited upgrade). The caller bumps its auth-failure /
+    /// hybrid-refused metrics and rejects the handshake.
+    PostureMismatch,
+    /// Handshake complete.
+    Established(HelloAckOutcome),
+}
+
+/// Client-side HELLO_ACK processing, shared by both drivers (phase 4
+/// slice 3c). Consumes the peer's `AwaitingAck` state, verifies the
+/// PQ posture, runs the static + ephemeral DH (and ML-KEM
+/// decapsulation when hybrid), derives the session key, verifies the
+/// server's auth tag, and on success transitions the peer to
+/// `Established` and drains its pending queue.
+///
+/// Pure given its inputs — no I/O, no metrics, no routing. The caller
+/// owns the RTT-sample side effect's *metric*, the mesh-route lookup,
+/// CID installation, the `Connected`/qlog signal, and building the
+/// flushed `pending` into its own action type. The RTT sample itself
+/// (a `Peer` field update) is applied here since it's pure peer
+/// state.
+///
+/// The HELLO_ACK AAD re-encodes the header (`header.encode`) — both
+/// drivers already did this identically, so there's no raw-vs-encoded
+/// subtlety as on the DATA path.
+#[allow(clippy::too_many_arguments)]
+pub fn process_hello_ack(
+    peer: &mut Peer,
+    identity: &Identity,
+    header: &Header,
+    server_eph_pub: &[u8; STATIC_KEY_LEN],
+    server_nonce: &[u8; NONCE_LEN],
+    server_pq: bool,
+    pq_ct: Option<&[u8]>,
+    tag: &[u8],
+    now: Instant,
+) -> Result<HelloAckResult> {
+    // Consume the AwaitingAck state (the ephemeral secret is not
+    // Copy). Restore + bail if we're not mid-handshake.
+    let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
+    let (client_nonce, ephemeral, hello_sent_at, pq_dk_opt) = match old_state {
+        HandshakeState::AwaitingAck {
+            client_nonce,
+            ephemeral,
+            last_sent,
+            pq,
+            ..
+        } => (client_nonce, ephemeral, last_sent, pq.map(|(_ek, dk)| dk)),
+        other => {
+            peer.handshake = other;
+            return Ok(HelloAckResult::Ignored);
+        }
+    };
+
+    // PQ posture must match what we asked for — no silent downgrade,
+    // no unsolicited upgrade.
+    if pq_dk_opt.is_some() != server_pq {
+        return Ok(HelloAckResult::PostureMismatch);
+    }
+
+    // Passive RTT sample: HELLO→HELLO_ACK is a clean round trip.
+    peer.update_neighbor_rtt(now.saturating_duration_since(hello_sent_at));
+
+    // Checked DH — a rogue server's low-order ephemeral fails here.
+    let static_dh = identity
+        .dh(&peer.peer_static_pub)
+        .ok_or(CryptoError::KeyExchangeFailed)?;
+    let ephemeral_dh = ephemeral
+        .dh(server_eph_pub)
+        .ok_or(CryptoError::KeyExchangeFailed)?;
+    drop(ephemeral); // zeroize the client ephemeral secret
+
+    let session_key_bytes = if let (Some(dk), Some(ct)) = (pq_dk_opt, pq_ct) {
+        let mlkem_ss = dk.decapsulate(ct).ok_or(CryptoError::KeyExchangeFailed)?;
+        Zeroizing::new(drift_core::pq::derive_hybrid_key(
+            &static_dh,
+            &ephemeral_dh,
+            &mlkem_ss,
+            &client_nonce,
+            server_nonce,
+        ))
+    } else {
+        derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, server_nonce)
+    };
+
+    let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
+    let rx = SessionKey::new(&session_key_bytes, Direction::Responder);
+
+    // Verify the server's auth tag over the same AAD it sealed:
+    // canonical header ‖ server_eph ‖ server_nonce ‖ [ct].
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+    let canon = canonical_aad(&hbuf);
+    let mut aad =
+        Vec::with_capacity(HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN + pq_ct.map_or(0, |c| c.len()));
+    aad.extend_from_slice(&canon);
+    aad.extend_from_slice(server_eph_pub);
+    aad.extend_from_slice(server_nonce);
+    if let Some(ct) = pq_ct {
+        aad.extend_from_slice(ct);
+    }
+    rx.open(1, PacketType::HelloAck as u8, &aad, tag)?;
+
+    peer.reset_seq();
+    peer.coalesce_state.clear();
+    peer.coalesce_order.clear();
+    peer.mark_session_start();
+    let key_for_caller = session_key_bytes.clone();
+    peer.handshake = HandshakeState::Established {
+        tx,
+        rx,
+        key_bytes: session_key_bytes,
+        prev: None,
+    };
+    peer.last_seen = now;
+    let pending = std::mem::take(&mut peer.pending);
+    Ok(HelloAckResult::Established(HelloAckOutcome {
+        key_bytes: key_for_caller,
+        server_pq,
+        pending,
+    }))
+}
 
 /// Grace window during which the pre-rekey session keys stay live on
 /// the receive path, so old-key DATA already in flight at the key

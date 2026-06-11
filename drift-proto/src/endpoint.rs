@@ -1355,90 +1355,37 @@ impl Endpoint {
             .get_mut(&peer_id)
             .ok_or(PeerError::NotRegistered)?;
 
-        let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
-        let (client_nonce, ephemeral, hello_sent_at, pq_dk_opt) = match old_state {
-            HandshakeState::AwaitingAck {
-                client_nonce,
-                ephemeral,
-                last_sent,
-                pq,
-                ..
-            } => (client_nonce, ephemeral, last_sent, pq.map(|(_ek, dk)| dk)),
-            other => {
-                peer.handshake = other;
-                return Ok(()); // HELLO_ACK in wrong state — ignore
+        // Client-side HELLO_ACK core — shared with the transport
+        // (drift_proto::frame, phase 4 slice 3c): state extract, PQ
+        // posture, DH + decapsulation + key derivation, tag verify,
+        // AwaitingAck → Established transition.
+        let outcome = match crate::frame::process_hello_ack(
+            peer,
+            &self.identity,
+            header,
+            &server_ephemeral_pub,
+            &server_nonce,
+            server_pq,
+            pq_ct,
+            tag,
+            now,
+        )? {
+            crate::frame::HelloAckResult::Established(o) => o,
+            // A stray HELLO_ACK or a PQ-posture disagreement: the
+            // engine has no metrics, so a mismatch is just a refused
+            // handshake.
+            crate::frame::HelloAckResult::Ignored => return Ok(()),
+            crate::frame::HelloAckResult::PostureMismatch => {
+                return Err(CryptoError::KeyExchangeFailed.into())
             }
         };
 
-        // PQ posture must match what we asked for; refuse both the
-        // silent downgrade and the unsolicited upgrade.
-        if pq_dk_opt.is_some() != server_pq {
-            return Err(CryptoError::KeyExchangeFailed.into());
-        }
-
-        // Passive RTT sample for the retry-base and (later) routing.
-        peer.update_neighbor_rtt(now.saturating_duration_since(hello_sent_at));
-
-        let static_dh = self
-            .identity
-            .dh(&peer.peer_static_pub)
-            .ok_or(CryptoError::KeyExchangeFailed)?;
-        let ephemeral_dh = ephemeral
-            .dh(&server_ephemeral_pub)
-            .ok_or(CryptoError::KeyExchangeFailed)?;
-        drop(ephemeral);
-
-        let session_key_bytes = if let (Some(dk), Some(ct)) = (pq_dk_opt, pq_ct) {
-            let mlkem_ss = dk.decapsulate(ct).ok_or(CryptoError::KeyExchangeFailed)?;
-            let key = drift_core::pq::derive_hybrid_key(
-                &static_dh,
-                &ephemeral_dh,
-                &mlkem_ss,
-                &client_nonce,
-                &server_nonce,
-            );
-            Zeroizing::new(key)
-        } else {
-            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce)
-        };
-
-        let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
-        let rx = SessionKey::new(&session_key_bytes, Direction::Responder);
-
-        // AAD mirrors the server's: canonical header + eph + nonce
-        // + (when hybrid) the ML-KEM ciphertext.
-        let mut hbuf = [0u8; HEADER_LEN];
-        header.encode(&mut hbuf);
-        let canon = canonical_aad(&hbuf);
-        let mut aad = Vec::with_capacity(
-            HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN + pq_ct.map(|c| c.len()).unwrap_or(0),
-        );
-        aad.extend_from_slice(&canon);
-        aad.extend_from_slice(&server_ephemeral_pub);
-        aad.extend_from_slice(&server_nonce);
-        if let Some(ct) = pq_ct {
-            aad.extend_from_slice(ct);
-        }
-        rx.open(1, PacketType::HelloAck as u8, &aad, tag)?;
-
-        peer.reset_seq();
-        peer.coalesce_state.clear();
-        peer.coalesce_order.clear();
-        peer.mark_session_start();
         let mut cid_key = [0u8; 32];
-        cid_key.copy_from_slice(&*session_key_bytes);
-        peer.handshake = HandshakeState::Established {
-            tx,
-            rx,
-            key_bytes: session_key_bytes,
-            prev: None,
-        };
-        peer.last_seen = now;
+        cid_key.copy_from_slice(&*outcome.key_bytes);
         self.events.push_back(Event::Connected { peer: peer_id });
 
         // Flush DATA parked during the handshake.
-        let pending = std::mem::take(&mut peer.pending);
-        for ps in pending {
+        for ps in outcome.pending {
             let t = build_data_packet(
                 local_peer_id,
                 peer,

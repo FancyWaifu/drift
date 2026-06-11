@@ -31,6 +31,18 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared client HELLO_ACK handler (sans-IO phase 4, slice 3c-ack).**
+  The client-side handshake completion — consume the `AwaitingAck`
+  state, check PQ posture, run the static + ephemeral DH (and ML-KEM
+  decapsulation when hybrid), derive the session key, verify the
+  server's auth tag, and transition to `Established` — now lives once
+  in `drift_proto::frame::process_hello_ack`, called by both
+  `drift::Transport::handle_hello_ack` and the engine. It returns a
+  three-way result (`Ignored` / `PostureMismatch` / `Established`) so
+  each driver keeps its own metrics, mesh-route flag, CID install, and
+  pending flush. The AEAD ACK-tag verification makes any divergence
+  fatal, so the interop + PQ-downgrade suites are an exact guard.
+  Pure refactor — no wire-format or API change. (#63)
 - **Shared rekey-grace decrypt (sans-IO phase 4, slice 3b-decrypt).**
   The receive-path rekey-grace decrypt fallback — try the current
   session key, then the pre-rekey key within the 2 s grace window —

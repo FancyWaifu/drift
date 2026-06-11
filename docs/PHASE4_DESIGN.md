@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: slices 1–2 DONE; 3a (DATA-send) + 3b (transition) + 3b-decrypt (rekey-grace) DONE. The whole receive + send DATA path is now single-source. Slices 3c/4 pending.**
+**Status: slices 1–2 DONE; 3a/3b/3b-decrypt DONE (whole DATA path single-source); 3c-ack (client HELLO_ACK kernel) DONE. Remaining: 3c-hello (server HELLO + cookie gate), slice 4.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -174,9 +174,34 @@ it lands in increments, smallest-risk first:
   loopback test + a `frame` test pinning the raw-AAD strictness
   (a flipped reserved byte must fail the tag) + the receive-path
   attack suites.
-- **3c — handshake kernel.** Share `handle_hello` /
-  `handle_hello_ack` cores, including the cookie-secret-snapshot
-  restructure. The hardest piece; gets its own confirmation.
+- **3c-ack — client HELLO_ACK kernel (done).** Shared the
+  client-side `handle_hello_ack` core as
+  `drift_proto::frame::process_hello_ack(peer, identity, header,
+  server_eph, server_nonce, server_pq, pq_ct, tag, now) ->
+  HelloAckResult`: consume the `AwaitingAck` state, PQ posture check,
+  static + ephemeral DH (+ ML-KEM decapsulation when hybrid), key
+  derivation, RTT sample, AEAD ACK-tag verify, `AwaitingAck →
+  Established` transition + pending drain. Returns
+  `Ignored` / `PostureMismatch` / `Established { key_bytes, server_pq,
+  pending }` so each caller applies its own metrics (the transport
+  bumps auth-failure / hybrid-refused on mismatch and
+  completed / hybrid-completed on success; the engine just emits
+  `Connected`), mesh-route flag, CID install, and pending flush.
+  No AAD subtlety here — both drivers already re-encoded the HELLO_ACK
+  header. Lower-risk than the server side (client path is a single
+  `lock_for`, no cookie-send-while-locked). Guard: `proto_interop`
+  (both client roles, classical + PQ — the AEAD ACK tag makes any
+  divergence fatal), `attack_pq_downgrade` (the PostureMismatch
+  path), `dual_init`, `hybrid_pq`, `reconnect_cycle`, `resumption`,
+  `two_process`.
+- **3c-hello — server HELLO kernel + cookie gate (pending).** The
+  hardest remaining piece: `handle_hello` does a cookie send while
+  holding `lock_all`, so sharing it needs the cookie-secret-snapshot
+  restructure (snapshot the rotating secrets into a `ctx` before the
+  lock; return the challenge bytes as an action). Plus the dual-init
+  tiebreak, cached-ACK duplicate replay, auto-register cap, and the
+  shared cookie gate (`cookie_required` / `validate_cookie` /
+  challenge MAC). Its own design + confirmation.
 
 ### Perf gate
 
