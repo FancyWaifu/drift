@@ -29,7 +29,6 @@
 //! const wt = await DriftClient.connectWebTransport("https://relay:4433/", id, serverPubHex);
 //! ```
 
-mod peer_session;
 mod session;
 mod wire_http;
 mod wire_webrtc;

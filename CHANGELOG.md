@@ -14,6 +14,34 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **drift-redox now runs the real protocol on Redox OS (sans-IO
+  phase 5b).** The standalone `drift-redox` crate (outside this
+  repo) had hand-rolled a Tier-1 protocol dialect that wasn't
+  byte-compatible with native drift. It's now a ~400-line blocking-
+  TCP driver around `drift_proto::Endpoint`, using the native
+  `tcp://` 2-byte length framing — so it dials real drift nodes
+  directly, with full PQ-hybrid handshakes, replay protection,
+  rekey, resumption, and Close. **drift-proto cross-compiles for
+  `x86_64-unknown-redox`** (engine + drift-core + ML-KEM + ring all
+  build), and the engine-driven encrypted shell-server was deployed
+  to a live Redox VM and reached from a native client (`uname` →
+  `Redox`). This closes the loop the original Redox port opened:
+  the protocol layer is no longer re-derived per platform. (no repo
+  code — drift-redox lives outside the tree)
+- **drift-wasm now runs the real protocol (sans-IO phase 5a).** The
+  browser build's hand-rolled session layer (no replay protection,
+  no PQ, no retransmits, no short headers) is replaced by a thin
+  driver around `drift_proto::Endpoint` — the browser now speaks
+  the same protocol code as every native peer: PQ-hybrid
+  handshakes, replay window, JS-interval-driven HELLO retransmits,
+  short headers, rekey, and Close. JS API unchanged; all five wire
+  adapters untouched. Engine prerequisites: a wasm32 time shim
+  (`drift_proto::time`, web-time backed) and mesh hop-TTL support
+  (`Endpoint::add_mesh_peer` / `connect_mesh`, porting the
+  transport's via_mesh wiring). Verified end-to-end with the node
+  harness against a native bridge: WebSocket and HTTP/SSE
+  handshakes plus WASM → bridge → native-UDP-peer mesh delivery
+  with the bridge blind to the plaintext. (#55)
 - **drift-proto phase 3: 1-RTT resumption.** The sans-IO engine now
   issues, stores, and redeems resumption tickets with the
   transport's exact wire format and KDFs: tickets minted at
