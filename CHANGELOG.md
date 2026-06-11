@@ -31,6 +31,20 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Single source of truth for the wire format (sans-IO phase 4,
+  slice 1).** The transport's private HELLO / ResumeHello builders,
+  the DoS-cookie MAC-input construction (`cookie_input` /
+  `addr_bytes` / `ct_eq`), and the handshake/cookie size constants
+  were duplicated, byte-for-byte, between `transport/mod.rs` +
+  `cookies.rs` and the sans-IO engine. They now live once in a new
+  public `drift_proto::wire` module that both `drift::Transport` and
+  `drift_proto::Endpoint` build from, so the two implementations
+  can't drift apart on the format. `drift-proto` is now a regular
+  dependency of `drift`. A one-time byte-identity proof (deleted
+  with the swap) confirmed the transport's emitted bytes are
+  unchanged; drift-proto `wire` KATs + the `proto_interop` suite are
+  the lasting guards. Pure refactor — no wire-format or API change.
+  Net −174 lines. See `docs/PHASE4_DESIGN.md`. (#57)
 - **drift-redox now runs the real protocol on Redox OS (sans-IO
   phase 5b).** The standalone `drift-redox` crate (outside this
   repo) had hand-rolled a Tier-1 protocol dialect that wasn't

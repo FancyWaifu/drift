@@ -13,7 +13,14 @@ use crate::resumption::{
     RESUME_HELLO_BODY_LEN, TICKET_DEFAULT_TTL, TICKET_ID_LEN, TICKET_PLAINTEXT_LEN,
 };
 use crate::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use drift_core::crypto::{cookie_mac, Direction, PeerId, SessionKey, COOKIE_MAC_LEN};
+// Pure wire-format layer — single source of truth shared with the
+// transport (phase 4 slice 1). Builders, cookie helpers, sizes.
+use crate::wire::{
+    build_hello_wire, build_resume_hello_wire, cookie_input, ct_eq, COOKIE_BLOB_LEN, COOKIE_TS_LEN,
+    HELLO_ACK_PAYLOAD_LEN, HELLO_ACK_PQ_TAIL_LEN, HELLO_PAYLOAD_LEN, HELLO_PQ_TAIL_LEN,
+    HELLO_WITH_COOKIE_LEN,
+};
+use drift_core::crypto::{cookie_mac, Direction, PeerId, SessionKey};
 use drift_core::error::{CodecError, CryptoError, DriftError, PeerError, SessionError};
 use drift_core::header::{
     canonical_aad, Header, PacketType, AUTH_TAG_LEN, FLAG_PQ_HYBRID, HEADER_LEN,
@@ -31,16 +38,6 @@ use drift_core::{derive_peer_id, Identity, Zeroizing};
 use rand::RngCore;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-
-// Wire-size constants, identical to drift/src/transport/mod.rs and
-// cookies.rs.
-const HELLO_PAYLOAD_LEN: usize = STATIC_KEY_LEN + STATIC_KEY_LEN + NONCE_LEN; // 80
-const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN; // 64
-const HELLO_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_EK_LEN; // 1184
-const HELLO_ACK_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_CT_LEN; // 1088
-const COOKIE_TS_LEN: usize = 8;
-const COOKIE_BLOB_LEN: usize = COOKIE_TS_LEN + COOKIE_MAC_LEN; // 24
-const HELLO_WITH_COOKIE_LEN: usize = HELLO_PAYLOAD_LEN + COOKIE_BLOB_LEN; // 104
 
 /// Grace window during which the pre-rekey session keys stay live
 /// on the receive path, so old-key DATA already in flight at the
@@ -183,39 +180,6 @@ impl CookieSecrets {
     }
 }
 
-/// Canonical address bytes inside the cookie MAC input.
-/// v4: [0x04][addr][port BE], v6: [0x06][addr][port BE].
-fn addr_bytes(addr: &SocketAddr) -> Vec<u8> {
-    match addr {
-        SocketAddr::V4(v4) => {
-            let mut out = Vec::with_capacity(1 + 4 + 2);
-            out.push(0x04);
-            out.extend_from_slice(&v4.ip().octets());
-            out.extend_from_slice(&v4.port().to_be_bytes());
-            out
-        }
-        SocketAddr::V6(v6) => {
-            let mut out = Vec::with_capacity(1 + 16 + 2);
-            out.push(0x06);
-            out.extend_from_slice(&v6.ip().octets());
-            out.extend_from_slice(&v6.port().to_be_bytes());
-            out
-        }
-    }
-}
-
-/// Constant-time MAC comparison.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
-}
-
 /// The engine's one wall-clock read, used only for cookie
 /// timestamps (60 s tolerance) — same as the transport.
 fn now_unix_secs() -> u64 {
@@ -223,23 +187,6 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn cookie_input(
-    src: &SocketAddr,
-    client_static_pub: &[u8; STATIC_KEY_LEN],
-    client_ephemeral_pub: &[u8; STATIC_KEY_LEN],
-    client_nonce: &[u8; NONCE_LEN],
-    timestamp: u64,
-) -> Vec<u8> {
-    let a = addr_bytes(src);
-    let mut out = Vec::with_capacity(a.len() + 64 + NONCE_LEN + COOKIE_TS_LEN);
-    out.extend_from_slice(&a);
-    out.extend_from_slice(client_static_pub);
-    out.extend_from_slice(client_ephemeral_pub);
-    out.extend_from_slice(client_nonce);
-    out.extend_from_slice(&timestamp.to_be_bytes());
-    out
 }
 
 /// Exponential backoff: `base * 2^attempts` ms, shift-capped.
@@ -250,58 +197,11 @@ fn handshake_backoff_ms(base: u64, attempts: u8) -> u64 {
 }
 
 /// Build a HELLO wire packet. Port of the transport's
-/// `build_hello_wire`. `mesh` stamps the hop-TTL budget (and
-/// FLAG_ROUTED) so bridges forward the handshake toward a peer
-/// we can't reach directly — the engine has no route tables
-/// (phase 4); callers signal mesh per-peer via `add_mesh_peer`.
-#[allow(clippy::too_many_arguments)]
-fn build_hello_wire(
-    local_peer_id: PeerId,
-    dst_id: PeerId,
-    identity: &Identity,
-    ephemeral_pub: [u8; STATIC_KEY_LEN],
-    client_nonce: [u8; NONCE_LEN],
-    mesh: bool,
-    cookie: Option<&[u8; COOKIE_BLOB_LEN]>,
-    pq_ek: Option<&[u8]>,
-) -> Vec<u8> {
-    let mut header = Header::new(PacketType::Hello, 0, local_peer_id, dst_id);
-    if mesh {
-        header = header.with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
-    }
-    if pq_ek.is_some() {
-        header.flags |= FLAG_PQ_HYBRID;
-    }
-    let base_len = if cookie.is_some() {
-        HELLO_WITH_COOKIE_LEN
-    } else {
-        HELLO_PAYLOAD_LEN
-    };
-    let payload_len = base_len + pq_ek.map(|ek| ek.len()).unwrap_or(0);
-    header.payload_len = payload_len as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + payload_len);
-    wire.extend_from_slice(&hbuf);
-    wire.extend_from_slice(&identity.public_bytes());
-    wire.extend_from_slice(&ephemeral_pub);
-    wire.extend_from_slice(&client_nonce);
-    if let Some(c) = cookie {
-        wire.extend_from_slice(c);
-    }
-    if let Some(ek) = pq_ek {
-        wire.extend_from_slice(ek);
-    }
-    wire
-}
-
-/// Rebuild a `ResumeHello` wire packet for the retransmit path.
-/// Port of the transport's `build_resume_hello_wire` (mesh=false);
-/// note the transport quirk that retransmits carry seq 0 while the
-/// initial send allocates a real seq — neither is AEAD-relevant
-/// (ResumeHello is unsealed) and the server ignores it.
-fn build_resume_hello_wire(
+/// `build_hello_wire`. The pure builders now live in
+/// [`crate::wire`] — see that module and `docs/PHASE4_DESIGN.md`.
+/// A thin local `resume_hello` adapter pins the `RESUME_HELLO_BODY_LEN`
+/// argument so call sites stay terse.
+fn resume_hello_wire(
     local_peer_id: PeerId,
     dst_id: PeerId,
     client_eph_pub: [u8; STATIC_KEY_LEN],
@@ -309,20 +209,15 @@ fn build_resume_hello_wire(
     ticket_id: [u8; TICKET_ID_LEN],
     mesh: bool,
 ) -> Vec<u8> {
-    let mut header = Header::new(PacketType::ResumeHello, 0, local_peer_id, dst_id);
-    if mesh {
-        header = header.with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
-    }
-    header.payload_len = RESUME_HELLO_BODY_LEN as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_HELLO_BODY_LEN);
-    wire.extend_from_slice(&hbuf);
-    wire.extend_from_slice(&ticket_id);
-    wire.extend_from_slice(&client_eph_pub);
-    wire.extend_from_slice(&client_nonce);
-    wire
+    build_resume_hello_wire(
+        local_peer_id,
+        dst_id,
+        client_eph_pub,
+        client_nonce,
+        &ticket_id,
+        RESUME_HELLO_BODY_LEN,
+        mesh,
+    )
 }
 
 /// Server-side session derivation + HELLO_ACK construction. Port of
@@ -981,7 +876,7 @@ impl Endpoint {
                 *last_sent = now;
 
                 let wire = if let Some(res) = &resumption_ctx {
-                    build_resume_hello_wire(
+                    resume_hello_wire(
                         local_peer_id,
                         peer_id,
                         ephemeral.public_bytes(),

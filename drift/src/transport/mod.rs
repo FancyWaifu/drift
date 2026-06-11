@@ -37,17 +37,18 @@ pub const MAX_PACKET: usize = 1400;
 /// not the packet layer.
 pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER_LEN - AUTH_TAG_LEN;
 
-// HELLO payload: client_static_pub(32) + client_ephemeral_pub(32) + client_nonce(16) = 80
-const HELLO_PAYLOAD_LEN: usize = STATIC_KEY_LEN + STATIC_KEY_LEN + NONCE_LEN;
-// HELLO_ACK payload: server_ephemeral_pub(32) + server_nonce(16) + auth_tag(16) = 64
-const HELLO_ACK_PAYLOAD_LEN: usize = STATIC_KEY_LEN + NONCE_LEN + AUTH_TAG_LEN;
-// Phase PQ: when `FLAG_PQ_HYBRID` is set on the header, an
-// ML-KEM-768 extension appends after the standard payload (and
-// after any cookie tail on HELLO). The reader chains these
-// fields from the header flags: base → optional cookie → optional
-// PQ. See `drift::header::FLAG_PQ_HYBRID` for the wire contract.
-pub(crate) const HELLO_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_EK_LEN; // 1184
-pub(crate) const HELLO_ACK_PQ_TAIL_LEN: usize = drift_core::pq::ML_KEM_CT_LEN; // 1088
+// Handshake payload sizes now live in `drift_proto::wire` — the
+// single source of truth shared with the sans-IO engine (phase 4
+// slice 1, see docs/PHASE4_DESIGN.md). Re-exported here so the
+// existing `super::*` references across the transport module keep
+// working unchanged. HELLO = static(32)+eph(32)+nonce(16)=80;
+// HELLO_ACK = eph(32)+nonce(16)+tag(16)=64; the PQ tails are the
+// ML-KEM-768 ek (1184) on HELLO and ct (1088) on HELLO_ACK, which
+// append after the base payload (and after any cookie tail on
+// HELLO). See `drift::header::FLAG_PQ_HYBRID` for the wire contract.
+pub(crate) use drift_proto::wire::{
+    HELLO_ACK_PAYLOAD_LEN, HELLO_ACK_PQ_TAIL_LEN, HELLO_PAYLOAD_LEN, HELLO_PQ_TAIL_LEN,
+};
 #[cfg(unix)]
 pub(crate) mod batch;
 mod cookies;
@@ -7700,6 +7701,12 @@ fn regenerate_session(
 /// retransmissions (where the same nonce + ephemeral key are reused so
 /// the server can recognize the duplicate and replay the cached ACK).
 #[allow(clippy::too_many_arguments)]
+// HELLO and ResumeHello byte layout now lives in
+// `drift_proto::wire` (phase 4 slice 1). These thin adapters keep
+// the transport's historical call signatures while delegating the
+// actual byte construction to the shared module — proven identical
+// by `wire_parity_proof` before the swap and locked by
+// drift-proto's wire KATs.
 fn build_hello_wire(
     local_peer_id: PeerId,
     dst_id: PeerId,
@@ -7710,35 +7717,16 @@ fn build_hello_wire(
     cookie: Option<&[u8; COOKIE_BLOB_LEN]>,
     pq_ek: Option<&[u8]>,
 ) -> Vec<u8> {
-    let mut header = Header::new(PacketType::Hello, 0, local_peer_id, dst_id);
-    if mesh {
-        header = header.with_hop_ttl(DEFAULT_MESH_TTL);
-    }
-    if pq_ek.is_some() {
-        header.flags |= drift_core::header::FLAG_PQ_HYBRID;
-    }
-    let base_len = if cookie.is_some() {
-        HELLO_WITH_COOKIE_LEN
-    } else {
-        HELLO_PAYLOAD_LEN
-    };
-    let payload_len = base_len + pq_ek.map(|ek| ek.len()).unwrap_or(0);
-    header.payload_len = payload_len as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + payload_len);
-    wire.extend_from_slice(&hbuf);
-    wire.extend_from_slice(&identity.public_bytes());
-    wire.extend_from_slice(&ephemeral_pub);
-    wire.extend_from_slice(&client_nonce);
-    if let Some(c) = cookie {
-        wire.extend_from_slice(c);
-    }
-    if let Some(ek) = pq_ek {
-        wire.extend_from_slice(ek);
-    }
-    wire
+    drift_proto::wire::build_hello_wire(
+        local_peer_id,
+        dst_id,
+        identity,
+        ephemeral_pub,
+        client_nonce,
+        mesh,
+        cookie,
+        pq_ek,
+    )
 }
 
 /// Rebuild a `ResumeHello` wire packet for the retransmit
@@ -7755,21 +7743,15 @@ fn build_resume_hello_wire(
     ticket_id: [u8; crate::transport::resumption::TICKET_ID_LEN],
     mesh: bool,
 ) -> Vec<u8> {
-    use crate::transport::resumption::RESUME_HELLO_BODY_LEN;
-    let mut header = Header::new(PacketType::ResumeHello, 0, local_peer_id, dst_id);
-    if mesh {
-        header = header.with_hop_ttl(DEFAULT_MESH_TTL);
-    }
-    header.payload_len = RESUME_HELLO_BODY_LEN as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + RESUME_HELLO_BODY_LEN);
-    wire.extend_from_slice(&hbuf);
-    wire.extend_from_slice(&ticket_id);
-    wire.extend_from_slice(&client_eph_pub);
-    wire.extend_from_slice(&client_nonce);
-    wire
+    drift_proto::wire::build_resume_hello_wire(
+        local_peer_id,
+        dst_id,
+        client_eph_pub,
+        client_nonce,
+        &ticket_id,
+        crate::transport::resumption::RESUME_HELLO_BODY_LEN,
+        mesh,
+    )
 }
 
 fn build_hello(

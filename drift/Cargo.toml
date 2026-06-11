@@ -20,6 +20,11 @@ iroh = ["dep:iroh"]
 
 [dependencies]
 drift-core = { path = "../drift-core" }
+# The sans-IO protocol engine. Phase 4 of the sans-IO arc has the
+# transport consume drift-proto so the protocol logic lives in one
+# place. Slice 1 shares the pure wire-format layer
+# (`drift_proto::wire`); see docs/PHASE4_DESIGN.md.
+drift-proto = { path = "../drift-proto" }
 # Shared inventory schema. `drift bridge` reads drift.toml to
 # learn its own listen URLs when --listen isn't passed explicitly.
 drift-config = { path = "../drift-config" }
@@ -162,9 +167,6 @@ iroh = { version = "=1.0.0-rc.1", optional = true, default-features = false, fea
 libc = "0.2"
 
 [dev-dependencies]
-# Byte-compat interop tests: the sans-IO engine driven over a plain
-# std UdpSocket against this crate's tokio Transport (tests/proto_interop.rs).
-drift-proto = { path = "../drift-proto" }
 tokio = { version = "1", features = ["full"] }
 proptest = "1"
 tempfile = "3"
