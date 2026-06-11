@@ -667,6 +667,15 @@ impl TransportConfig {
     }
 }
 
+/// Retry budget for a resumption (`ResumeHello`) attempt before it
+/// falls back to a full HELLO. Much smaller than
+/// `handshake_max_attempts`: resume is a 1-RTT optimization, and a
+/// server that forgot or consumed the ticket rejects silently, so a
+/// stranded resume is detectable in a couple of tries. Grinding the
+/// full cold-handshake budget (exponential backoff over ~10 attempts)
+/// would strand the session for many minutes.
+const RESUME_FALLBACK_ATTEMPTS: u8 = 3;
+
 /// Exponential backoff: waits `base * 2^attempts` ms between retries,
 /// capped to prevent shift overflow.
 fn handshake_backoff_ms(base: u64, attempts: u8) -> u64 {
@@ -745,6 +754,11 @@ pub(crate) struct MetricsInner {
     pub(crate) resumption_attempts: AtomicU64,
     pub(crate) resumptions_completed: AtomicU64,
     pub(crate) resumption_rejects: AtomicU64,
+    /// Resumption attempts that exhausted their retry budget with no
+    /// reply (server forgot / consumed the ticket) and fell back to
+    /// a fresh full HELLO. The stale ticket is dropped so later
+    /// sends don't re-pick the dead resume path.
+    pub(crate) resumption_fallbacks: AtomicU64,
     pub(crate) ecn_ce_received: AtomicU64,
     pub(crate) graceful_probes_initiated: AtomicU64,
     pub(crate) pings_sent: AtomicU64,
@@ -829,6 +843,7 @@ pub struct Metrics {
     pub resumption_attempts: u64,
     pub resumptions_completed: u64,
     pub resumption_rejects: u64,
+    pub resumption_fallbacks: u64,
     pub ecn_ce_received: u64,
     pub graceful_probes_initiated: u64,
     pub pings_sent: u64,
@@ -1769,6 +1784,7 @@ impl Transport {
             resumption_attempts: m.resumption_attempts.load(Ordering::Relaxed),
             resumptions_completed: m.resumptions_completed.load(Ordering::Relaxed),
             resumption_rejects: m.resumption_rejects.load(Ordering::Relaxed),
+            resumption_fallbacks: m.resumption_fallbacks.load(Ordering::Relaxed),
             ecn_ce_received: m.ecn_ce_received.load(Ordering::Relaxed),
             graceful_probes_initiated: m.graceful_probes_initiated.load(Ordering::Relaxed),
             pings_sent: m.pings_sent.load(Ordering::Relaxed),
@@ -6131,7 +6147,12 @@ impl Inner {
                     .filter_map(|(id, _metric, _cost)| routes.lookup(&id).map(|addr| (id, addr)))
                     .collect()
             };
-            let to_retransmit: Vec<(Vec<u8>, SocketAddr, usize)> = {
+            // Peers whose resumption attempt exhausted its retry
+            // budget with no reply: they fall back to a fresh full
+            // HELLO (built in the second pass below) and their stale
+            // ticket gets dropped after the lock releases.
+            let mut resume_fallback_ids: Vec<PeerId> = Vec::new();
+            let (to_retransmit, fell_back): (Vec<(Vec<u8>, SocketAddr, usize)>, Vec<PeerId>) = {
                 let mut peers = self.peers.lock_all().await;
                 let mut out = Vec::new();
                 for peer in peers.iter_mut() {
@@ -6171,7 +6192,33 @@ impl Inner {
                         if last_sent.elapsed() < std::time::Duration::from_millis(wait) {
                             continue;
                         }
-                        if *attempts >= self.config.handshake_max_attempts {
+                        // A resumption attempt gets a SHORT retry
+                        // budget: resume is a 1-RTT optimization, so
+                        // if the server doesn't answer in a couple of
+                        // tries (it forgot or consumed the ticket, and
+                        // silently rejects), fall back to a full HELLO
+                        // fast rather than grinding the full cold-
+                        // handshake budget — which, with exponential
+                        // backoff, would take many minutes to exhaust.
+                        let give_up_at = if resumption_ctx.is_some() {
+                            self.config
+                                .handshake_max_attempts
+                                .min(RESUME_FALLBACK_ATTEMPTS)
+                        } else {
+                            self.config.handshake_max_attempts
+                        };
+                        if *attempts >= give_up_at {
+                            // Give-up. A stranded RESUMPTION attempt
+                            // (ticket on file, server never replied)
+                            // must not park forever re-presenting a
+                            // dead ticket: record it for the fallback
+                            // pass below, which re-initiates a fresh
+                            // full HELLO. A plain HELLO give-up parks
+                            // as before (the peer is genuinely
+                            // unreachable; nothing to fall back to).
+                            if resumption_ctx.is_some() {
+                                resume_fallback_ids.push(peer.id);
+                            }
                             continue;
                         }
                         *attempts += 1;
@@ -6224,8 +6271,54 @@ impl Inner {
                         out.push((wire, target, peer.interface_id));
                     }
                 }
-                out
+
+                // Second pass: turn each stranded resumption peer
+                // into a fresh full handshake. `build_hello` resets
+                // the peer to a clean `AwaitingAck` (new ephemeral,
+                // new nonce, attempts = 1) and returns the HELLO
+                // wire; the DATA already queued in `peer.pending`
+                // from the original `send_data` flushes when this
+                // handshake's ACK lands. We clear `pending_resumption`
+                // first so the retry loop treats subsequent
+                // retransmits as plain HELLOs.
+                for id in &resume_fallback_ids {
+                    let mesh = route_snapshot.get(id).copied();
+                    if let Some(peer) = peers.get_mut(id) {
+                        peer.pending_resumption = None;
+                        // Queued (mesh peer with no route yet) or Data
+                        // (unreachable here): nothing to send now; a
+                        // later send_data retries.
+                        if let SendAction::Hello(wire, target, iface) = build_hello(
+                            self.local_peer_id,
+                            peer,
+                            &self.identity,
+                            mesh,
+                            self.config.hybrid_pq,
+                        ) {
+                            out.push((wire, target, iface));
+                        }
+                    }
+                }
+                (out, resume_fallback_ids)
             };
+
+            // Drop the now-dead tickets (separate async lock, taken
+            // after the peer guard released) and count the fallbacks.
+            if !fell_back.is_empty() {
+                let mut tickets = self.client_tickets.lock().await;
+                for id in &fell_back {
+                    tickets.remove(id);
+                }
+                drop(tickets);
+                self.metrics
+                    .resumption_fallbacks
+                    .fetch_add(fell_back.len() as u64, Ordering::Relaxed);
+                debug!(
+                    count = fell_back.len(),
+                    "resumption give-up: fell back to full HELLO"
+                );
+            }
+
             for (bytes, addr, iface) in to_retransmit {
                 if let Err(e) = self.ifaces.send_for(iface, &bytes, addr).await {
                     warn!(error = %e, "HELLO retransmit failed");

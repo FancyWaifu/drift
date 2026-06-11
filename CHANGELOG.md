@@ -12,6 +12,23 @@ crate. A change that touches multiple surfaces appears under each.
 
 ## [Unreleased]
 
+### Bug fixes
+
+- **Resumption now falls back to a full handshake instead of
+  hanging.** A client holding a resumption ticket the server had
+  forgotten or consumed (server restart, lost store, single-use
+  ticket already redeemed) emitted `ResumeHello`, got no reply (the
+  server rejects an unknown ticket silently), and retransmitted
+  `ResumeHello` until the cold-handshake retry budget ran out —
+  which with exponential backoff takes tens of minutes — then parked
+  forever without dropping the dead ticket, so every later send
+  re-picked the same dead resume path. Resumption attempts now get a
+  short retry budget (`RESUME_FALLBACK_ATTEMPTS = 3`); on exhaustion
+  the client drops the stale ticket and re-initiates a fresh full
+  HELLO, recovering the session. New `resumption_fallbacks` metric
+  counts this. Surfaced while building the sans-IO engine, whose
+  port made the missing fallback explicit. (#56)
+
 ### Protocol / Portability
 
 - **drift-redox now runs the real protocol on Redox OS (sans-IO
