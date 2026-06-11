@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: slices 1–2 DONE. Slices 3–4 pending.**
+**Status: slices 1–2 DONE; slice 3a (DATA-send core) DONE. Slices 3b/3c/4 pending.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -60,8 +60,104 @@ lives* does.
 | **4** | Delete the transport's now-dead private protocol code; `transport/mod.rs` keeps only the sharded driver (locks, recv loops, peer table, federation, mesh). Re-run the full bench matrix to confirm no perf regression. | Med | Bench matrix (`bench/bench-matrix.sh` + criterion) per the wire-agnostic methodology; K=17 soak. |
 
 Slices 1–2 are mechanical and byte-provable. Slice 3 is the
-genuinely hard one and will be re-scoped (and re-confirmed) once 1–2
-land. Slice 4 is cleanup gated on the bench matrix.
+genuinely hard one — see the dedicated design below. Slice 4 is
+cleanup gated on the bench matrix.
+
+## Slice 3 design — sharing the handlers
+
+A recon pass over the transport (`handle_hello`, `handle_hello_ack`,
+`handle_data`, `process_short_header`, `send_data`, the cookie gate)
+established two facts that make handler-sharing possible at all:
+
+1. **Both crates already use the same `drift_core::session::Peer`.**
+   The transport stores it in a sharded async-locked table; the
+   engine stores it in a plain `HashMap`. All *per-peer* protocol
+   state — seq counters, handshake state, session keys, replay
+   window, pending queue — lives inside that shared struct.
+2. **Handlers mutate only `&mut Peer` and read shared context;
+   side effects are returned as actions, executed by the caller.**
+   This is *already* the engine's model (it returns
+   `Transmit`/`Event`). The transport does the same in effect — it
+   builds wire bytes under the peer lock, then sends them after
+   releasing it.
+
+So the target shape is a set of free functions:
+
+```rust
+fn handle_X(ctx: &HandlerCtx, peer: &mut Peer, pkt: …) -> Result<Actions>
+```
+
+- `ctx` is read-only shared state: `identity`, `local_peer_id`,
+  config flags, and a **snapshot** of the cookie secrets (taken
+  before the peer lock, so the handler stays synchronous and
+  lock-free w.r.t. the global cookie mutex).
+- `peer: &mut Peer` is the only mutable state — no cross-peer races,
+  so it composes with the transport's per-shard lock unchanged.
+- `Actions` is what the caller must do: bytes to send + where, CID
+  installs, metric bumps, events. The engine drains them into its
+  `transmits`/`events` queues; the transport executes them after
+  releasing the peer lock (sends, `install_cids`, atomics) — exactly
+  its current post-lock sequence.
+
+**The concurrency model does not change.** The transport keeps its
+sharded locks, its lock ordering, and its await-outside-locks
+discipline. The one wrinkle the recon found — `handle_hello` calls
+`send_challenge`/`validate_cookie` *while holding* `lock_all`, which
+touch the cookie mutex + socket — is resolved by snapshotting the
+cookie secrets into `ctx` before the lock and returning the
+challenge bytes as an action (the transport already releases the
+lock before the real send; only the secret read moves earlier).
+
+**Transport-only concerns stay in the transport wrapper**, never in
+the shared handler: addr-index maintenance (SEC.FIX.1), the
+`handshakes_inflight` gauge, federation (`PeerGone`, directory),
+path validation/migration probes, mesh route lookups. The shared
+handler emits a neutral action; the transport's wrapper layers its
+extras around it.
+
+### Increments (each its own PR)
+
+Slice 3 is too large and too close to deployed code for one PR, so
+it lands in increments, smallest-risk first:
+
+- **3a — DATA-send sealing core (done).** Shared the
+  `build_data_packet` logic (short-header CID fast path + long
+  header) as `drift_proto::frame::seal_data_wire(local, &mut Peer,
+  payload, deadline, coalesce, out_cid, mesh) -> Vec<u8>`, returning
+  just the wire bytes. Each driver wraps: the transport in
+  `SendAction::Data(bytes, target, iface)` (mesh-next-hop or peer
+  addr, on the tracked interface), the engine in `Transmit { dst:
+  peer.addr }`. The shared core uses `drift_core::pool::take_wire_buf`
+  for the long path, so the transport keeps its buffer-pool
+  optimization. The engine's two send paths (inline `encode_short` +
+  `build_data_packet`) and the transport's `build_data_packet_with_cid`
+  collapse into this one function; the transport's now-orphaned
+  `mesh::DEFAULT_MESH_TTL` is removed (the canonical constant is
+  `drift_core::session::DEFAULT_MESH_TTL`). Byte-identical,
+  allocation-identical code move (AEAD-sealed → interop + datagram +
+  stream_reliability + congestion + sharding_contention are the
+  byte-exact guard); structural KAT for the short/long/mesh decision.
+- **3b — receive kernel.** Share the `handle_data` /
+  `process_short_header` core: decrypt (with rekey-grace fallback) →
+  replay → deadline → coalesce → AwaitingData→Established transition,
+  returning a `DataOutcome { payload, transition, flush }` action.
+  Path-probe / ticket-issuance / federation stay in the transport
+  wrapper.
+- **3c — handshake kernel.** Share `handle_hello` /
+  `handle_hello_ack` cores, including the cookie-secret-snapshot
+  restructure. The hardest piece; gets its own confirmation.
+
+### Perf gate
+
+The DATA path is the hottest code. 3a is a code move that produces
+byte-identical output with the same allocation strategy, so no
+regression is expected by construction — but the **full cross-wire
+bench matrix** (`bench/bench-matrix.sh`) + a K=17 soak is the
+authoritative gate and runs at slice 4 before the dead code is
+deleted, per the project's wire-agnostic bench methodology. (The
+`cargo bench --bench throughput` criterion suite is an AEAD/header
+microbench that does not exercise `build_data_packet`, so it is not
+the relevant gate for this change.)
 
 ## Safety methodology
 

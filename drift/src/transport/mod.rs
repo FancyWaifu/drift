@@ -81,8 +81,8 @@ mod rtt;
 use cookies::{CookieSecrets, COOKIE_BLOB_LEN, HELLO_WITH_COOKIE_LEN};
 // `RouteEntry` is internal to the mesh subsystem; `RoutingTable`
 // + `MAX_ROUTES` are exposed for the attack-surface test sweep.
+use mesh::MAX_INCOMING_HOP_TTL;
 pub use mesh::{RoutingTable, MAX_ROUTES};
-use mesh::{DEFAULT_MESH_TTL, MAX_INCOMING_HOP_TTL};
 use path::{build_path_challenge_packet, PATH_CHALLENGE_LEN, PATH_PROBE_RETRY};
 use peer_shards::PeerShards;
 // `resumption::ClientTicket` is reachable inside the `transport`
@@ -7450,45 +7450,21 @@ fn build_data_packet_with_cid(
     mesh_next_hop: Option<SocketAddr>,
     out_cid: Option<u16>,
 ) -> Result<SendAction> {
-    let seq = peer.next_seq_checked()?;
-
-    // Short-header fast path: eligible when
-    //   1. We have an outgoing CID for the peer
-    //   2. No mesh forwarding (direct session)
-    //   3. No deadline or coalesce features active
-    // This gives us 7-byte header + 16-byte tag = 23 bytes
-    // vs the long header's 36 + 16 = 52 bytes.
-    if let Some(cid) = out_cid {
-        if mesh_next_hop.is_none() && deadline_ms == 0 && coalesce_group == 0 {
-            let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-            let wire = crate::short_header::encode_short(cid, seq, tx, payload)?;
-            return Ok(SendAction::Data(wire, peer.addr, peer.interface_id));
-        }
-    }
-
-    // Long header: full 36 bytes, all features available.
-    let send_time_ms = peer.send_time_ms();
-    let mut header =
-        Header::new(PacketType::Data, seq, local_peer_id, peer.id).with_deadline(deadline_ms);
-    if coalesce_group != 0 {
-        header = header.with_supersedes(coalesce_group);
-    }
-    if mesh_next_hop.is_some() {
-        header = header.with_hop_ttl(DEFAULT_MESH_TTL);
-    }
-    header.payload_len = payload.len() as u16;
-    header.send_time_ms = send_time_ms;
-
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-    let aad = canonical_aad(&hbuf);
-
-    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-
-    let mut wire = drift_core::pool::take_wire_buf(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
-    wire.extend_from_slice(&hbuf);
-    tx.seal_into(seq, PacketType::Data as u8, &aad, payload, &mut wire)?;
-
+    // The short/long decision, sealing, and pooled-buffer
+    // allocation are shared with the engine
+    // (`drift_proto::frame::seal_data_wire`, phase 4 slice 3a). The
+    // transport keeps the action wrapping: the destination is the
+    // mesh next hop when forwarding, the trusted peer addr
+    // otherwise, on the peer's tracked interface.
+    let wire = drift_proto::frame::seal_data_wire(
+        local_peer_id,
+        peer,
+        payload,
+        deadline_ms,
+        coalesce_group,
+        out_cid,
+        mesh_next_hop.is_some(),
+    )?;
     let target = mesh_next_hop.unwrap_or(peer.addr);
     Ok(SendAction::Data(wire, target, peer.interface_id))
 }

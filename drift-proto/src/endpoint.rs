@@ -32,7 +32,7 @@ use drift_core::session::{
     HandshakeState, Peer, PendingResumption, PendingSend, PrevSession, SEQ_SEND_CEILING,
 };
 use drift_core::short_header::{
-    derive_initiator_rx_cid, derive_responder_rx_cid, encode_short, is_short_header, open_short,
+    derive_initiator_rx_cid, derive_responder_rx_cid, is_short_header, open_short,
 };
 use drift_core::{derive_peer_id, Identity, Zeroizing};
 use rand::RngCore;
@@ -311,8 +311,11 @@ fn regenerate_session(
 }
 
 /// Long-header DATA construction. Port of the transport's
-/// `build_data_packet` (no CID/short-header fast path, no mesh —
-/// phase 2/4).
+/// `build_data_packet`. Long-header only (`out_cid = None`) — used
+/// for the pending-flush call sites, where the first post-handshake
+/// DATA must be long so the responder can install its CID map. The
+/// DATA sealing core is shared with the transport
+/// (`drift_proto::frame::seal_data_wire`, phase 4 slice 3a).
 fn build_data_packet(
     local_peer_id: PeerId,
     peer: &mut Peer,
@@ -320,30 +323,16 @@ fn build_data_packet(
     deadline_ms: u16,
     coalesce_group: u32,
 ) -> Result<Transmit> {
-    let seq = peer.next_seq_checked()?;
-
-    let send_time_ms = peer.send_time_ms();
-    let mut header =
-        Header::new(PacketType::Data, seq, local_peer_id, peer.id).with_deadline(deadline_ms);
-    if coalesce_group != 0 {
-        header = header.with_supersedes(coalesce_group);
-    }
-    if peer.via_mesh {
-        header = header.with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
-    }
-    header.payload_len = payload.len() as u16;
-    header.send_time_ms = send_time_ms;
-
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-    let aad = canonical_aad(&hbuf);
-
-    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
-    wire.extend_from_slice(&hbuf);
-    tx.seal_into(seq, PacketType::Data as u8, &aad, payload, &mut wire)?;
-
+    let mesh = peer.via_mesh;
+    let wire = crate::frame::seal_data_wire(
+        local_peer_id,
+        peer,
+        payload,
+        deadline_ms,
+        coalesce_group,
+        None,
+        mesh,
+    )?;
     Ok(Transmit {
         dst: peer.addr,
         contents: wire,
@@ -564,21 +553,26 @@ impl Endpoint {
             // pending packet at handshake completion; the engine
             // makes the rule explicit so a connect()-then-send flow
             // is safe too.
-            if let Some(cid) = out_cid {
-                if deadline_ms == 0 && coalesce_group == 0 && peer.next_tx_seq > 1 && !peer.via_mesh
-                {
-                    let seq = peer.next_seq_checked()?;
-                    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-                    let wire = encode_short(cid, seq, tx, payload)?;
-                    self.transmits.push_back(Transmit {
-                        dst: peer.addr,
-                        contents: wire,
-                    });
-                    return Ok(());
-                }
-            }
-            let t = build_data_packet(local_peer_id, peer, payload, deadline_ms, coalesce_group)?;
-            self.transmits.push_back(t);
+            // Withhold the CID (forcing a long header) until
+            // next_tx_seq > 1, so the responder — which installs its
+            // CID map on receiving our first DATA — can route it.
+            // The short/long decision and sealing are shared with the
+            // transport via `frame::seal_data_wire`.
+            let effective_cid = out_cid.filter(|_| peer.next_tx_seq > 1);
+            let mesh = peer.via_mesh;
+            let wire = crate::frame::seal_data_wire(
+                local_peer_id,
+                peer,
+                payload,
+                deadline_ms,
+                coalesce_group,
+                effective_cid,
+                mesh,
+            )?;
+            self.transmits.push_back(Transmit {
+                dst: peer.addr,
+                contents: wire,
+            });
             return Ok(());
         }
 

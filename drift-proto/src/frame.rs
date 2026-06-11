@@ -19,9 +19,72 @@ use drift_core::crypto::{PeerId, SessionKey};
 use drift_core::error::{PeerError, Result};
 use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use drift_core::identity::{NONCE_LEN, STATIC_KEY_LEN};
-use drift_core::session::Peer;
+use drift_core::session::{Peer, DEFAULT_MESH_TTL};
 
 use crate::wire::HELLO_ACK_PAYLOAD_LEN;
+
+/// Seal a DATA packet for `peer` and return the wire bytes. The
+/// short-header CID fast path applies when an outgoing CID is
+/// installed and no mesh / deadline / coalesce feature is in play
+/// (7-byte header vs the 36-byte long header); otherwise the long
+/// header carries the full feature set. Consumes one tx seq slot.
+///
+/// Returns only the bytes — each driver wraps them in its own action
+/// type (`drift::transport::SendAction` / `drift_proto::Transmit`)
+/// and computes its own destination, so the transport keeps its
+/// interface routing and the engine its single-pipe addressing.
+/// The long path takes a pooled buffer (`drift_core::pool`), so the
+/// transport's allocation optimization is preserved.
+///
+/// `mesh` gates the short-header eligibility and stamps the
+/// hop-TTL/`FLAG_ROUTED` budget; the caller decides whether to pass
+/// `out_cid` (e.g. the engine withholds it until `next_tx_seq > 1`
+/// so a responder can CID-route the first DATA).
+pub fn seal_data_wire(
+    local_peer_id: PeerId,
+    peer: &mut Peer,
+    payload: &[u8],
+    deadline_ms: u16,
+    coalesce_group: u32,
+    out_cid: Option<u16>,
+    mesh: bool,
+) -> Result<Vec<u8>> {
+    let seq = peer.next_seq_checked()?;
+
+    // Short-header fast path: CID installed, direct session, no
+    // deadline/coalesce. 7-byte header + 16-byte tag = 23 vs the
+    // long header's 36 + 16 = 52.
+    if let Some(cid) = out_cid {
+        if !mesh && deadline_ms == 0 && coalesce_group == 0 {
+            let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+            return drift_core::short_header::encode_short(cid, seq, tx, payload);
+        }
+    }
+
+    // Long header: full 36 bytes, all features available.
+    let send_time_ms = peer.send_time_ms();
+    let mut header =
+        Header::new(PacketType::Data, seq, local_peer_id, peer.id).with_deadline(deadline_ms);
+    if coalesce_group != 0 {
+        header = header.with_supersedes(coalesce_group);
+    }
+    if mesh {
+        header = header.with_hop_ttl(DEFAULT_MESH_TTL);
+    }
+    header.payload_len = payload.len() as u16;
+    header.send_time_ms = send_time_ms;
+
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+    let aad = canonical_aad(&hbuf);
+
+    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+
+    let mut wire = drift_core::pool::take_wire_buf(HEADER_LEN + payload.len() + AUTH_TAG_LEN);
+    wire.extend_from_slice(&hbuf);
+    tx.seal_into(seq, PacketType::Data as u8, &aad, payload, &mut wire)?;
+    Ok(wire)
+}
 
 /// Build an authenticated `Close` packet for `peer`: an AEAD-sealed
 /// empty body — the tag is the message. Consumes one tx seq slot.
@@ -122,6 +185,41 @@ mod tests {
             prev: None,
         };
         peer
+    }
+
+    #[test]
+    fn seal_data_wire_short_and_long_paths() {
+        use drift_core::short_header::{is_short_header, SHORT_HEADER_LEN};
+        let payload = b"data-path-payload";
+
+        // No CID -> long header (type=Data, 36-byte header).
+        let mut peer = established_peer();
+        peer.next_tx_seq = 5;
+        let long = seal_data_wire([1; 8], &mut peer, payload, 0, 0, None, false).unwrap();
+        assert!(!is_short_header(&long));
+        assert_eq!(long[1], PacketType::Data as u8);
+        assert_eq!(long.len(), HEADER_LEN + payload.len() + AUTH_TAG_LEN);
+
+        // CID + direct + no deadline/coalesce -> short header (0x2 nibble).
+        let mut peer = established_peer();
+        peer.next_tx_seq = 5;
+        let short = seal_data_wire([1; 8], &mut peer, payload, 0, 0, Some(0x1234), false).unwrap();
+        assert!(is_short_header(&short));
+        assert_eq!(short.len(), SHORT_HEADER_LEN + payload.len() + AUTH_TAG_LEN);
+
+        // A CID but with a deadline -> long header (feature forces it).
+        let mut peer = established_peer();
+        peer.next_tx_seq = 5;
+        let forced_long =
+            seal_data_wire([1; 8], &mut peer, payload, 500, 0, Some(0x1234), false).unwrap();
+        assert!(!is_short_header(&forced_long));
+
+        // A CID but mesh -> long header with the hop-TTL budget.
+        let mut peer = established_peer();
+        peer.next_tx_seq = 5;
+        let mesh = seal_data_wire([1; 8], &mut peer, payload, 0, 0, Some(0x1234), true).unwrap();
+        assert!(!is_short_header(&mesh));
+        assert_eq!(mesh[28], drift_core::session::DEFAULT_MESH_TTL);
     }
 
     #[test]
