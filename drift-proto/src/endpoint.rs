@@ -16,11 +16,10 @@ use crate::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // Pure wire-format layer — single source of truth shared with the
 // transport (phase 4 slice 1). Builders, cookie helpers, sizes.
 use crate::wire::{
-    build_hello_wire, build_resume_hello_wire, cookie_input, ct_eq, COOKIE_BLOB_LEN, COOKIE_TS_LEN,
-    HELLO_ACK_PAYLOAD_LEN, HELLO_ACK_PQ_TAIL_LEN, HELLO_PAYLOAD_LEN, HELLO_PQ_TAIL_LEN,
-    HELLO_WITH_COOKIE_LEN,
+    build_hello_wire, build_resume_hello_wire, COOKIE_BLOB_LEN, HELLO_ACK_PAYLOAD_LEN,
+    HELLO_ACK_PQ_TAIL_LEN, HELLO_PAYLOAD_LEN, HELLO_PQ_TAIL_LEN, HELLO_WITH_COOKIE_LEN,
 };
-use drift_core::crypto::{cookie_mac, Direction, PeerId, SessionKey};
+use drift_core::crypto::{Direction, PeerId, SessionKey};
 use drift_core::error::{CodecError, CryptoError, DriftError, PeerError, SessionError};
 use drift_core::header::{
     canonical_aad, Header, PacketType, AUTH_TAG_LEN, FLAG_PQ_HYBRID, HEADER_LEN,
@@ -1025,24 +1024,16 @@ impl Endpoint {
         client_nonce: &[u8; NONCE_LEN],
     ) {
         let timestamp = now_unix_secs();
-        let input = cookie_input(
+        let mac = crate::wire::cookie_mac_for(
+            &self.cookies.current,
             &src,
             client_static_pub,
             client_ephemeral_pub,
             client_nonce,
             timestamp,
         );
-        let mac = cookie_mac(&self.cookies.current, &input);
-
-        let mut header = Header::new(PacketType::Challenge, 0, self.local_peer_id, client_peer_id);
-        header.payload_len = COOKIE_BLOB_LEN as u16;
-        let mut hbuf = [0u8; HEADER_LEN];
-        header.encode(&mut hbuf);
-
-        let mut wire = Vec::with_capacity(HEADER_LEN + COOKIE_BLOB_LEN);
-        wire.extend_from_slice(&hbuf);
-        wire.extend_from_slice(&timestamp.to_be_bytes());
-        wire.extend_from_slice(&mac);
+        let wire =
+            crate::wire::build_challenge_wire(self.local_peer_id, client_peer_id, timestamp, &mac);
 
         self.transmits.push_back(Transmit {
             dst: src,
@@ -1058,35 +1049,17 @@ impl Endpoint {
         client_nonce: &[u8; NONCE_LEN],
         tail: &[u8],
     ) -> bool {
-        if tail.len() != COOKIE_BLOB_LEN {
-            return false;
-        }
-        let mut ts_buf = [0u8; COOKIE_TS_LEN];
-        ts_buf.copy_from_slice(&tail[..COOKIE_TS_LEN]);
-        let timestamp = u64::from_be_bytes(ts_buf);
-        let now = now_unix_secs();
-        if now.saturating_sub(timestamp) > self.config.cookie_max_age_secs {
-            return false;
-        }
-        let presented = &tail[COOKIE_TS_LEN..];
-        let input = cookie_input(
+        crate::wire::validate_cookie(
+            &self.cookies.current,
+            self.cookies.previous.as_ref(),
             src,
             client_static_pub,
             client_ephemeral_pub,
             client_nonce,
-            timestamp,
-        );
-        let expected_current = cookie_mac(&self.cookies.current, &input);
-        if ct_eq(presented, &expected_current) {
-            return true;
-        }
-        if let Some(prev) = self.cookies.previous {
-            let expected_prev = cookie_mac(&prev, &input);
-            if ct_eq(presented, &expected_prev) {
-                return true;
-            }
-        }
-        false
+            tail,
+            self.config.cookie_max_age_secs,
+            now_unix_secs(),
+        )
     }
 
     /// Server-side HELLO processing. Port of `handle_hello`,

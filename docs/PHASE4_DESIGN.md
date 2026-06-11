@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: 1–2, 3a/3b/3b-decrypt, 3c-ack, 3c-regen DONE — the DATA path and BOTH handshake crypto cores (client `process_hello_ack` + server `regenerate_session`) are single-source. Remaining: the cookie gate + dual-init/cached-ACK orchestration (3c-cookie), slice 4.**
+**Status: 1–2, 3a/3b/3b-decrypt, 3c-ack, 3c-regen, 3c-cookie DONE — the DATA path, BOTH handshake crypto cores (client `process_hello_ack` + server `regenerate_session`), and the cookie validate/challenge primitives are single-source. Remaining: slice 4 (delete dead transport code, gated on the bench matrix + K=17 soak). The in-`lock_all` HELLO orchestration (dual-init / cached-ACK / auto-register) stays driver-specific by design — it is sharding concurrency, not protocol.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -210,15 +210,28 @@ it lands in increments, smallest-risk first:
   `proto_interop` (the client AEAD ACK-tag verify makes any server
   divergence fatal) + dos_cookie / hybrid_pq / scale_handshakes /
   restart_handshake / metric_accuracy.
-- **3c-cookie — cookie gate + HELLO orchestration (pending).** What's
-  left duplicated in `handle_hello` / `on_hello`: the cookie gate
-  (`cookie_required` / `validate_cookie` / challenge MAC — pure given
-  a secret snapshot, security-critical) and the in-`lock_all`
-  orchestration (dual-init tiebreak, cached-ACK duplicate replay,
-  auto-register cap). The cookie gate is the clean shareable part; the
-  orchestration is tangled with the transport's sharding (`lock_all` +
-  cross-shard auto-register count) and may stay driver-specific. Its
-  own pass.
+- **3c-cookie — cookie gate (done).** Shared the two remaining pure,
+  security-critical cookie primitives into `drift_proto::wire`:
+  `validate_cookie(current, previous, src, static, eph, nonce, tail,
+  max_age_secs, now_unix) -> bool` (length + freshness + current/
+  previous-secret MAC check, constant-time) and
+  `build_challenge_wire(local, client, timestamp, mac) -> Vec<u8>`
+  (the CHALLENGE datagram). Both callers snapshot their secrets and
+  pass `now` in, keeping `wire` clock-free: the transport
+  (`cookies.rs::send_challenge` / `validate_cookie`) reads
+  `current`/`previous` under its async cookie lock; the engine
+  (`endpoint.rs::queue_challenge` / `validate_cookie`) reads them from
+  `self.cookies`. The cookie *gate trigger* (`cookie_required`) stays
+  driver-specific — it's a counting policy over local state (the
+  transport's atomic inflight gauge vs the engine's peer-table scan),
+  not protocol bytes. New KATs pin both functions
+  (`challenge_wire_layout`, `validate_cookie_current_previous_and_rejections`);
+  end-to-end guard is dos_cookie / cookie_rotation_boundary /
+  attack_cookie_nonce_replay / attack_slowloris / hybrid_pq_cookie_path
+  / proto_interop. The in-`lock_all` HELLO orchestration (dual-init
+  tiebreak, cached-ACK duplicate replay, cross-shard auto-register cap)
+  remains driver-specific by design — it is sharding concurrency, not
+  protocol, and has no engine analogue.
 
 ### Perf gate
 

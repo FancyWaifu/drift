@@ -8,9 +8,9 @@
 //! trigger semantics.
 
 use super::Inner;
-use crate::crypto::{cookie_mac, PeerId};
+use crate::crypto::PeerId;
 use crate::error::{CodecError, PeerError, Result};
-use crate::header::{Header, PacketType, HEADER_LEN};
+use crate::header::Header;
 use crate::identity::{NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::HandshakeState;
 use rand::RngCore;
@@ -23,7 +23,7 @@ use tracing::debug;
 // slice 1). Cookie blob = timestamp(u64 BE, 8) + MAC(16) = 24, also
 // the CHALLENGE packet body. Re-exported so existing `super::*` /
 // `cookies::*` references keep working.
-pub(crate) use drift_proto::wire::{COOKIE_BLOB_LEN, COOKIE_TS_LEN, HELLO_WITH_COOKIE_LEN};
+pub(crate) use drift_proto::wire::{COOKIE_BLOB_LEN, HELLO_WITH_COOKIE_LEN};
 
 /// Rotating server-side secret used to MAC stateless DoS cookies.
 /// Keeps the previous secret around for one rotation window so
@@ -60,7 +60,6 @@ impl CookieSecrets {
 // MAC input, shared with the sans-IO engine (phase 4 slice 1).
 // Re-exported so existing `cookies::ct_eq` references (path.rs,
 // rtt.rs) keep working; byte-identity was proven before the swap.
-use drift_proto::wire::cookie_input;
 pub(crate) use drift_proto::wire::ct_eq;
 
 fn now_unix_secs() -> u64 {
@@ -101,27 +100,21 @@ impl Inner {
         client_nonce: &[u8; NONCE_LEN],
     ) -> Result<()> {
         let timestamp = now_unix_secs();
-        let mac = {
-            let cookies = self.cookies.lock().await;
-            let input = cookie_input(
-                &src,
-                client_static_pub,
-                client_ephemeral_pub,
-                client_nonce,
-                timestamp,
-            );
-            cookie_mac(&cookies.current, &input)
-        };
-
-        let mut header = Header::new(PacketType::Challenge, 0, self.local_peer_id, client_peer_id);
-        header.payload_len = COOKIE_BLOB_LEN as u16;
-        let mut hbuf = [0u8; HEADER_LEN];
-        header.encode(&mut hbuf);
-
-        let mut wire = Vec::with_capacity(HEADER_LEN + COOKIE_BLOB_LEN);
-        wire.extend_from_slice(&hbuf);
-        wire.extend_from_slice(&timestamp.to_be_bytes());
-        wire.extend_from_slice(&mac);
+        let current = self.cookies.lock().await.current;
+        let mac = drift_proto::wire::cookie_mac_for(
+            &current,
+            &src,
+            client_static_pub,
+            client_ephemeral_pub,
+            client_nonce,
+            timestamp,
+        );
+        let wire = drift_proto::wire::build_challenge_wire(
+            self.local_peer_id,
+            client_peer_id,
+            timestamp,
+            &mac,
+        );
 
         self.ifaces.send_for(iface_idx, &wire, src).await?;
         self.metrics
@@ -151,33 +144,21 @@ impl Inner {
         if tail.len() != COOKIE_BLOB_LEN {
             return false;
         }
-        let mut ts_buf = [0u8; COOKIE_TS_LEN];
-        ts_buf.copy_from_slice(&tail[..COOKIE_TS_LEN]);
-        let timestamp = u64::from_be_bytes(ts_buf);
-        let now = now_unix_secs();
-        if now.saturating_sub(timestamp) > self.config.cookie_max_age_secs {
-            return false;
-        }
-        let presented = &tail[COOKIE_TS_LEN..];
-        let input = cookie_input(
+        let (current, previous) = {
+            let cookies = self.cookies.lock().await;
+            (cookies.current, cookies.previous)
+        };
+        drift_proto::wire::validate_cookie(
+            &current,
+            previous.as_ref(),
             src,
             client_static_pub,
             client_ephemeral_pub,
             client_nonce,
-            timestamp,
-        );
-        let cookies = self.cookies.lock().await;
-        let expected_current = cookie_mac(&cookies.current, &input);
-        if ct_eq(presented, &expected_current) {
-            return true;
-        }
-        if let Some(prev) = cookies.previous {
-            let expected_prev = cookie_mac(&prev, &input);
-            if ct_eq(presented, &expected_prev) {
-                return true;
-            }
-        }
-        false
+            tail,
+            self.config.cookie_max_age_secs,
+            now_unix_secs(),
+        )
     }
 
     /// Client-side: we issued a HELLO and the server came back

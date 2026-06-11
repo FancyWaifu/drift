@@ -31,6 +31,21 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared cookie validation + CHALLENGE builder (sans-IO phase 4,
+  slice 3c-cookie).** The two remaining DoS-cookie primitives now live
+  once in `drift_proto::wire`: `validate_cookie` (length + freshness +
+  current/previous-secret constant-time MAC check) and
+  `build_challenge_wire` (the CHALLENGE datagram). Both the tokio
+  transport (`cookies.rs`) and the sans-IO engine (`endpoint.rs`)
+  snapshot their rotation secrets and `now`, then delegate — so the
+  security-critical validation logic is single-source and the `wire`
+  layer stays clock-free. The cookie *gate trigger* (`cookie_required`)
+  stays driver-specific: it's a counting policy over local state (the
+  transport's atomic inflight gauge vs the engine's peer-table scan),
+  not protocol bytes. New KATs pin both functions; dos_cookie /
+  cookie_rotation_boundary / attack_cookie_nonce_replay /
+  attack_slowloris / hybrid_pq_cookie_path / proto_interop are the
+  end-to-end guards.
 - **Shared server handshake derivation (sans-IO phase 4, slice
   3c-regen).** `regenerate_session` — the server-side mirror of the
   client HELLO_ACK handler: server-ephemeral generation, static +
