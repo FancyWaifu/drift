@@ -82,6 +82,21 @@ impl Session {
                 // reach us through the bridge may handshake (the
                 // native equivalent of accept_any_peer).
                 accept_any_peer: true,
+                // Classical handshake in the browser, also matching
+                // the old dialect (which refused PQ). A PQ-hybrid
+                // HELLO is 1300 bytes (36 + 80 + 1184-byte ML-KEM
+                // ek); the browser WebTransport wire carries DRIFT
+                // packets as *unreliable datagrams*, whose path-MTU
+                // cap (~1200 B) is below that — so a PQ HELLO is
+                // silently dropped and the handshake never lands.
+                // The WS / HTTP stream wires would carry it fine, but
+                // a single DriftClient can't vary posture per wire,
+                // so the browser stays classical until the engine
+                // grows handshake-packet fragmentation for the
+                // datagram path (follow-up). Every other engine
+                // upgrade — replay window, retransmits, short
+                // headers, rekey, Close — is unaffected.
+                hybrid_pq: false,
                 ..Config::default()
             },
         );
