@@ -42,9 +42,13 @@ async fn high_fanin_send_data_completes_under_time_budget() {
     const BUDGET_SECS: u64 = 60;
 
     // Server accepts any peer so we don't need to call add_peer
-    // on the server for every client.
+    // on the server for every client. A generous UDP recv buffer
+    // (belt-and-suspenders with the keep-clients-alive fix below)
+    // absorbs the fan-in burst so the kernel doesn't drop datagrams
+    // if the recv loop is briefly CPU-starved on a loaded runner.
     let server_cfg = TransportConfig {
         accept_any_peer: true,
+        udp_recv_buffer_bytes: Some(8 * 1024 * 1024),
         ..TransportConfig::default()
     };
     let server_id = Identity::from_secret_bytes([0x55; 32]);
@@ -76,6 +80,22 @@ async fn high_fanin_send_data_completes_under_time_budget() {
     // Stand up the clients and fire the fan-in. Each client
     // gets a unique identity so they land on different shards
     // on the server via their derived peer_id.
+    //
+    // Every client Transport is kept alive in `clients` for the
+    // whole test — NOT dropped on a per-task timer. The earlier
+    // version dropped each client 500 ms after its sends, which
+    // was a race against handshake completion: `send_data` on a
+    // fresh peer queues the payload and kicks off the handshake,
+    // and the DATA only flushes when the HELLO_ACK lands on the
+    // client's background recv loop. Under 64-way CPU contention
+    // on a loaded runner, that ACK can arrive after 500 ms, so
+    // the client was dropped — its recv loop aborted via
+    // TaskGuard — before the pending DATA ever flushed, and those
+    // packets were lost client-side (not on the wire). Holding
+    // the clients alive until delivery is confirmed removes the
+    // race and makes the exact-count assertion deterministic
+    // without weakening it.
+    let mut clients = Vec::with_capacity(CLIENT_COUNT);
     let mut handles = Vec::with_capacity(CLIENT_COUNT);
     for i in 0..CLIENT_COUNT {
         let mut bytes = [0u8; 32];
@@ -91,29 +111,20 @@ async fn high_fanin_send_data_completes_under_time_budget() {
             .add_peer(server_pub, server_addr, Direction::Initiator)
             .await
             .unwrap();
+        let send_client = client.clone();
+        clients.push(client);
         handles.push(tokio::spawn(async move {
             for j in 0..PACKETS_PER_CLIENT {
                 let payload = [(i & 0xFF) as u8, (j & 0xFF) as u8];
-                client
+                send_client
                     .send_data(&server_peer, &payload, 0, 0)
                     .await
                     .unwrap();
             }
-            // send_data on a fresh peer enqueues the payload
-            // and kicks off the handshake — the actual DATA
-            // goes out on the wire when the HELLO_ACK arrives
-            // on the client's recv loop. Dropping the client
-            // here (end of spawn) aborts that recv loop via
-            // TaskGuard, which means payloads queued before
-            // HELLO_ACK never flush. Hold `client` alive for
-            // a short grace period so the background recv loop
-            // can process the HELLO_ACK and drain pending.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            drop(client); // explicit, to document intent
         }));
     }
 
-    // Wait for every client to finish sending.
+    // Wait for every client to finish issuing its sends.
     let join_all = async {
         for h in handles {
             h.await.unwrap();
@@ -123,11 +134,16 @@ async fn high_fanin_send_data_completes_under_time_budget() {
         .await
         .expect("clients did not finish inside the time budget — possible sharding deadlock");
 
-    // Verify every packet was delivered.
+    // Verify every packet was delivered. The clients are still
+    // alive (in `clients`), so any DATA still queued behind an
+    // in-flight handshake flushes as its ACK lands.
     let delivered = drain_handle.await.unwrap();
     assert_eq!(
         delivered, total_expected,
         "{} packets expected, {} delivered",
         total_expected, delivered
     );
+
+    // Clients are dropped here, after delivery is confirmed.
+    drop(clients);
 }
