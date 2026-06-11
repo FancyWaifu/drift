@@ -967,27 +967,15 @@ impl Endpoint {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return Ok(());
         };
-        if !matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
+        // The AwaitingData → Established swap + pending drain is shared
+        // with the transport (drift_proto::frame, phase 4 slice 3b).
+        let Some(est) = crate::frame::complete_server_transition(peer) else {
             return Ok(());
-        }
-        let old = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
+        };
         let mut cid_key = [0u8; 32];
-        if let HandshakeState::AwaitingData {
-            tx, rx, key_bytes, ..
-        } = old
-        {
-            cid_key.copy_from_slice(&*key_bytes);
-            peer.handshake = HandshakeState::Established {
-                tx,
-                rx,
-                key_bytes,
-                prev: None,
-            };
-        }
-        peer.clear_unauth_counters();
-        let pending = std::mem::take(&mut peer.pending);
-        let mut flushed = Vec::with_capacity(pending.len());
-        for ps in pending {
+        cid_key.copy_from_slice(&*est.key_bytes);
+        let mut flushed = Vec::with_capacity(est.pending.len());
+        for ps in est.pending {
             flushed.push(build_data_packet(
                 local_peer_id,
                 peer,

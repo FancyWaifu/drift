@@ -19,9 +19,68 @@ use drift_core::crypto::{PeerId, SessionKey};
 use drift_core::error::{PeerError, Result};
 use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use drift_core::identity::{NONCE_LEN, STATIC_KEY_LEN};
-use drift_core::session::{Peer, DEFAULT_MESH_TTL};
+use drift_core::session::{HandshakeState, Peer, PendingSend, DEFAULT_MESH_TTL};
+use drift_core::Zeroizing;
 
 use crate::wire::HELLO_ACK_PAYLOAD_LEN;
+
+/// What the caller needs after a responder-side `AwaitingData →
+/// Established` transition completes — see [`complete_server_transition`].
+pub struct ServerEstablished {
+    /// The session key, for short-header CID installation.
+    pub key_bytes: Zeroizing<[u8; 32]>,
+    /// Whether the handshake was PQ-hybrid (for the caller's metric).
+    pub was_hybrid_pq: bool,
+    /// DATA the app queued while the handshake was still in flight,
+    /// for the caller to build + route as flush packets (each driver
+    /// wraps these in its own action type).
+    pub pending: Vec<PendingSend>,
+}
+
+/// Promote a responder-side peer from `AwaitingData` to `Established`
+/// on the first authenticated DATA, and hand back the bits the caller
+/// needs to finish the job. Returns `None` if the peer was already
+/// `Established` (the common steady-state case).
+///
+/// This is the single source of truth for the trickiest shared
+/// receive-path state mutation: the `AwaitingData → Established`
+/// swap, clearing the amplification counters (the source address is
+/// now validated by an AEAD-authenticated round trip), and draining
+/// the pending queue. The caller layers its own side effects around
+/// it — the transport bumps metrics / qlog / installs CIDs after the
+/// peer lock releases; the engine emits `Connected`, installs CIDs,
+/// and issues a resumption ticket — and builds the flush packets in
+/// its own action type. Pure peer-state mutation; no crypto, no I/O.
+pub fn complete_server_transition(peer: &mut Peer) -> Option<ServerEstablished> {
+    if !matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
+        return None;
+    }
+    let HandshakeState::AwaitingData {
+        tx,
+        rx,
+        key_bytes,
+        was_hybrid_pq,
+        ..
+    } = std::mem::replace(&mut peer.handshake, HandshakeState::Pending)
+    else {
+        // Guarded by the matches! above.
+        unreachable!("peer was AwaitingData");
+    };
+    let key_for_caller = key_bytes.clone();
+    peer.handshake = HandshakeState::Established {
+        tx,
+        rx,
+        key_bytes,
+        prev: None,
+    };
+    peer.clear_unauth_counters();
+    let pending = std::mem::take(&mut peer.pending);
+    Some(ServerEstablished {
+        key_bytes: key_for_caller,
+        was_hybrid_pq,
+        pending,
+    })
+}
 
 /// Seal a DATA packet for `peer` and return the wire bytes. The
 /// short-header CID fast path applies when an outgoing CID is
