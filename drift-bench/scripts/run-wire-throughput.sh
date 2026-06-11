@@ -6,7 +6,10 @@
 
 set -u
 TRIALS="${1:-3}"
-BIN=/tmp/drift-bench
+# Binary path is env-overridable so a baseline-vs-current comparison
+# can point at each build in place (avoids copying, which can
+# invalidate an ad-hoc code signature on arm64 macOS).
+BIN="${BIN:-/tmp/drift-bench}"
 PAYLOAD=1024
 DUR=10
 
