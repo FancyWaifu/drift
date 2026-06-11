@@ -7,8 +7,8 @@
 //! X25519 work — see the comment on that method for the exact
 //! trigger semantics.
 
-use super::{Inner, HELLO_PAYLOAD_LEN};
-use crate::crypto::{cookie_mac, PeerId, COOKIE_MAC_LEN};
+use super::Inner;
+use crate::crypto::{cookie_mac, PeerId};
 use crate::error::{CodecError, PeerError, Result};
 use crate::header::{Header, PacketType, HEADER_LEN};
 use crate::identity::{NONCE_LEN, STATIC_KEY_LEN};
@@ -19,12 +19,11 @@ use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
-// DoS-cookie wire sizes. Cookie blob appended to an extended HELLO
-// is timestamp(u64 BE, 8 bytes) + MAC(16 bytes) = 24 bytes total.
-// The CHALLENGE packet body carries the same blob.
-pub(crate) const COOKIE_TS_LEN: usize = 8;
-pub(crate) const COOKIE_BLOB_LEN: usize = COOKIE_TS_LEN + COOKIE_MAC_LEN; // 24
-pub(crate) const HELLO_WITH_COOKIE_LEN: usize = HELLO_PAYLOAD_LEN + COOKIE_BLOB_LEN;
+// DoS-cookie wire sizes now live in `drift_proto::wire` (phase 4
+// slice 1). Cookie blob = timestamp(u64 BE, 8) + MAC(16) = 24, also
+// the CHALLENGE packet body. Re-exported so existing `super::*` /
+// `cookies::*` references keep working.
+pub(crate) use drift_proto::wire::{COOKIE_BLOB_LEN, COOKIE_TS_LEN, HELLO_WITH_COOKIE_LEN};
 
 /// Rotating server-side secret used to MAC stateless DoS cookies.
 /// Keeps the previous secret around for one rotation window so
@@ -56,72 +55,19 @@ impl CookieSecrets {
     }
 }
 
-/// Serialize a SocketAddr to canonical bytes for use inside a
-/// cookie MAC input. v4: [0x04][4 addr bytes][2 port bytes].
-/// v6: [0x06][16 addr bytes][2 port bytes].
-fn addr_bytes(addr: &SocketAddr) -> Vec<u8> {
-    match addr {
-        SocketAddr::V4(v4) => {
-            let mut out = Vec::with_capacity(1 + 4 + 2);
-            out.push(0x04);
-            out.extend_from_slice(&v4.ip().octets());
-            out.extend_from_slice(&v4.port().to_be_bytes());
-            out
-        }
-        SocketAddr::V6(v6) => {
-            let mut out = Vec::with_capacity(1 + 16 + 2);
-            out.push(0x06);
-            out.extend_from_slice(&v6.ip().octets());
-            out.extend_from_slice(&v6.port().to_be_bytes());
-            out
-        }
-    }
-}
-
-/// Constant-time equality for byte slices of the same length.
-/// Used to compare cookie MACs so an attacker can't use timing to
-/// probe for valid prefixes.
-pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
-}
+// `cookie_input`, `addr_bytes`, and `ct_eq` now live in
+// `drift_proto::wire` — the single source of truth for the cookie
+// MAC input, shared with the sans-IO engine (phase 4 slice 1).
+// Re-exported so existing `cookies::ct_eq` references (path.rs,
+// rtt.rs) keep working; byte-identity was proven before the swap.
+use drift_proto::wire::cookie_input;
+pub(crate) use drift_proto::wire::ct_eq;
 
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Build the MAC input for a DoS cookie. Binds together:
-///   - client source address
-///   - client long-term pubkey
-///   - client ephemeral pubkey
-///   - `client_nonce` (critical: without this, an attacker can
-///     reuse one valid cookie to force unlimited X25519 work by
-///     replaying HELLOs with fresh nonces)
-///   - server-side issue timestamp
-fn cookie_input(
-    src: &SocketAddr,
-    client_static_pub: &[u8; STATIC_KEY_LEN],
-    client_ephemeral_pub: &[u8; STATIC_KEY_LEN],
-    client_nonce: &[u8; NONCE_LEN],
-    timestamp: u64,
-) -> Vec<u8> {
-    let a = addr_bytes(src);
-    let mut out = Vec::with_capacity(a.len() + 64 + NONCE_LEN + COOKIE_TS_LEN);
-    out.extend_from_slice(&a);
-    out.extend_from_slice(client_static_pub);
-    out.extend_from_slice(client_ephemeral_pub);
-    out.extend_from_slice(client_nonce);
-    out.extend_from_slice(&timestamp.to_be_bytes());
-    out
 }
 
 impl Inner {

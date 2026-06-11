@@ -44,6 +44,7 @@
 mod endpoint;
 mod resumption;
 pub mod time;
+pub mod wire;
 
 pub use endpoint::{Config, Endpoint, Event, ProtoError, Transmit};
 pub use resumption::{ClientTicket, EXPORT_BLOB_LEN, TICKET_DEFAULT_TTL};
