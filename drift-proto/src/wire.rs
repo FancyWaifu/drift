@@ -195,6 +195,77 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
+/// Build a CHALLENGE datagram: header (`PacketType::Challenge`, seq 0,
+/// `payload_len = COOKIE_BLOB_LEN`) followed by the cookie blob
+/// (big-endian `timestamp` ‖ `mac`). The blob is what the client
+/// echoes back in its retried HELLO tail.
+pub fn build_challenge_wire(
+    local_peer_id: PeerId,
+    client_peer_id: PeerId,
+    timestamp: u64,
+    mac: &[u8; COOKIE_MAC_LEN],
+) -> Vec<u8> {
+    let mut header = Header::new(PacketType::Challenge, 0, local_peer_id, client_peer_id);
+    header.payload_len = COOKIE_BLOB_LEN as u16;
+    let mut hbuf = [0u8; HEADER_LEN];
+    header.encode(&mut hbuf);
+
+    let mut wire = Vec::with_capacity(HEADER_LEN + COOKIE_BLOB_LEN);
+    wire.extend_from_slice(&hbuf);
+    wire.extend_from_slice(&timestamp.to_be_bytes());
+    wire.extend_from_slice(mac);
+    wire
+}
+
+/// Verify a cookie `tail` (`timestamp` ‖ presented-MAC) from an
+/// incoming HELLO. Accepts a MAC computed with either the `current`
+/// or `previous` rotation secret (so cookies survive a rotation
+/// boundary), and requires the embedded timestamp to be within
+/// `max_age_secs` of `now_unix` (the caller's wall-clock-now in unix
+/// seconds — passed in to keep this layer free of any clock). Returns
+/// false on any length, freshness, or MAC mismatch.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_cookie(
+    current: &[u8; 32],
+    previous: Option<&[u8; 32]>,
+    src: &SocketAddr,
+    client_static_pub: &[u8; STATIC_KEY_LEN],
+    client_ephemeral_pub: &[u8; STATIC_KEY_LEN],
+    client_nonce: &[u8; NONCE_LEN],
+    tail: &[u8],
+    max_age_secs: u64,
+    now_unix: u64,
+) -> bool {
+    if tail.len() != COOKIE_BLOB_LEN {
+        return false;
+    }
+    let mut ts_buf = [0u8; COOKIE_TS_LEN];
+    ts_buf.copy_from_slice(&tail[..COOKIE_TS_LEN]);
+    let timestamp = u64::from_be_bytes(ts_buf);
+    if now_unix.saturating_sub(timestamp) > max_age_secs {
+        return false;
+    }
+    let presented = &tail[COOKIE_TS_LEN..];
+    let input = cookie_input(
+        src,
+        client_static_pub,
+        client_ephemeral_pub,
+        client_nonce,
+        timestamp,
+    );
+    let expected_current = cookie_mac(current, &input);
+    if ct_eq(presented, &expected_current) {
+        return true;
+    }
+    if let Some(prev) = previous {
+        let expected_prev = cookie_mac(prev, &input);
+        if ct_eq(presented, &expected_prev) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +404,98 @@ mod tests {
         assert!(ct_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!ct_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!ct_eq(&[1, 2, 3], &[1, 2]));
+    }
+
+    #[test]
+    fn challenge_wire_layout() {
+        let mac = [0x99u8; COOKIE_MAC_LEN];
+        let wire = build_challenge_wire([1; 8], [2; 8], 0x0102030405060708, &mac);
+        // header(36) + cookie blob(24) = 60.
+        assert_eq!(wire.len(), HEADER_LEN + COOKIE_BLOB_LEN);
+        assert_eq!(wire[1], PacketType::Challenge as u8);
+        // payload_len (BE u16 at header[30..32]) = COOKIE_BLOB_LEN.
+        assert_eq!(
+            u16::from_be_bytes([wire[30], wire[31]]),
+            COOKIE_BLOB_LEN as u16
+        );
+        // blob = timestamp(BE u64) ‖ mac.
+        assert_eq!(
+            &wire[HEADER_LEN..HEADER_LEN + COOKIE_TS_LEN],
+            &0x0102030405060708u64.to_be_bytes()
+        );
+        assert_eq!(&wire[HEADER_LEN + COOKIE_TS_LEN..], &mac);
+    }
+
+    // A cookie blob the client would echo back: build a CHALLENGE,
+    // then validate its tail under the same secret. Exercises the
+    // current-secret path, previous-secret (rotation) path, freshness
+    // expiry, and MAC/secret rejection.
+    fn cookie_tail(secret: &[u8; 32], src: &SocketAddr, ts: u64) -> Vec<u8> {
+        let mac = cookie_mac_for(secret, src, &[0xAA; 32], &[0xBB; 32], &[0xCC; 16], ts);
+        let mut tail = ts.to_be_bytes().to_vec();
+        tail.extend_from_slice(&mac);
+        tail
+    }
+
+    #[test]
+    fn validate_cookie_current_previous_and_rejections() {
+        let src: SocketAddr = "192.168.1.7:51820".parse().unwrap();
+        let current = [0x01u8; 32];
+        let previous = [0x02u8; 32];
+        let max_age = 30;
+        let now = 1000u64;
+        let s = [0xAA; 32];
+        let e = [0xBB; 32];
+        let n = [0xCC; 16];
+
+        // Fresh cookie under the current secret validates.
+        let tail = cookie_tail(&current, &src, now);
+        assert!(validate_cookie(
+            &current, None, &src, &s, &e, &n, &tail, max_age, now
+        ));
+        // Same cookie validates against the previous secret after a
+        // rotation (current now differs, previous holds the issuer).
+        assert!(validate_cookie(
+            &[0x09; 32],
+            Some(&current),
+            &src,
+            &s,
+            &e,
+            &n,
+            &tail,
+            max_age,
+            now
+        ));
+        // Stale beyond max_age is rejected even with a valid MAC.
+        assert!(!validate_cookie(
+            &current,
+            None,
+            &src,
+            &s,
+            &e,
+            &n,
+            &cookie_tail(&current, &src, now - max_age - 1),
+            max_age,
+            now
+        ));
+        // Wrong secret, wrong source, and malformed length all reject.
+        assert!(!validate_cookie(
+            &previous, None, &src, &s, &e, &n, &tail, max_age, now
+        ));
+        let other: SocketAddr = "10.0.0.1:51820".parse().unwrap();
+        assert!(!validate_cookie(
+            &current, None, &other, &s, &e, &n, &tail, max_age, now
+        ));
+        assert!(!validate_cookie(
+            &current,
+            None,
+            &src,
+            &s,
+            &e,
+            &n,
+            &tail[..tail.len() - 1],
+            max_age,
+            now
+        ));
     }
 }
