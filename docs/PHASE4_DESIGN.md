@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: slices 1–2 DONE; 3a/3b/3b-decrypt DONE (whole DATA path single-source); 3c-ack (client HELLO_ACK kernel) DONE. Remaining: 3c-hello (server HELLO + cookie gate), slice 4.**
+**Status: 1–2, 3a/3b/3b-decrypt, 3c-ack, 3c-regen DONE — the DATA path and BOTH handshake crypto cores (client `process_hello_ack` + server `regenerate_session`) are single-source. Remaining: the cookie gate + dual-init/cached-ACK orchestration (3c-cookie), slice 4.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -194,14 +194,31 @@ it lands in increments, smallest-risk first:
   divergence fatal), `attack_pq_downgrade` (the PostureMismatch
   path), `dual_init`, `hybrid_pq`, `reconnect_cycle`, `resumption`,
   `two_process`.
-- **3c-hello — server HELLO kernel + cookie gate (pending).** The
-  hardest remaining piece: `handle_hello` does a cookie send while
-  holding `lock_all`, so sharing it needs the cookie-secret-snapshot
-  restructure (snapshot the rotating secrets into a `ctx` before the
-  lock; return the challenge bytes as an action). Plus the dual-init
-  tiebreak, cached-ACK duplicate replay, auto-register cap, and the
-  shared cookie gate (`cookie_required` / `validate_cookie` /
-  challenge MAC). Its own design + confirmation.
+- **3c-regen — server `regenerate_session` (done).** Shared the
+  server key-derivation core as
+  `drift_proto::frame::regenerate_session(...) -> RegenOutcome
+  { ack_wire, was_awaiting_data }` — the mirror of
+  `process_hello_ack`: server-ephemeral gen, static + ephemeral DH,
+  ML-KEM encapsulation, key derivation, the (already-shared) HELLO_ACK
+  assembly, and the `AwaitingData` install + seq/coalesce reset +
+  addr/iface/via_mesh stamping. The transport drives its
+  `handshakes_inflight` gauge from `was_awaiting_data`; the engine
+  passes `iface_idx = 0` (the field it never reads). **Recon
+  correction:** the cookie gate runs *before* `lock_all`, not inside
+  it, so the feared cookie-secret-snapshot restructure is unnecessary
+  — the gate is already lock-free w.r.t. the peer table. Guard:
+  `proto_interop` (the client AEAD ACK-tag verify makes any server
+  divergence fatal) + dos_cookie / hybrid_pq / scale_handshakes /
+  restart_handshake / metric_accuracy.
+- **3c-cookie — cookie gate + HELLO orchestration (pending).** What's
+  left duplicated in `handle_hello` / `on_hello`: the cookie gate
+  (`cookie_required` / `validate_cookie` / challenge MAC — pure given
+  a secret snapshot, security-critical) and the in-`lock_all`
+  orchestration (dual-init tiebreak, cached-ACK duplicate replay,
+  auto-register cap). The cookie gate is the clean shareable part; the
+  orchestration is tangled with the transport's sharding (`lock_all` +
+  cross-shard auto-register count) and may stay driver-specific. Its
+  own pass.
 
 ### Perf gate
 

@@ -18,15 +18,129 @@
 use drift_core::crypto::{Direction, PeerId, SessionKey};
 use drift_core::error::{CryptoError, PeerError, Result};
 use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
-use drift_core::identity::{derive_session_key, Identity, NONCE_LEN, STATIC_KEY_LEN};
+use drift_core::identity::{derive_session_key, random_nonce, Identity, NONCE_LEN, STATIC_KEY_LEN};
 use drift_core::session::{HandshakeState, Peer, PendingSend, DEFAULT_MESH_TTL};
 use drift_core::short_header::open_short;
 use drift_core::Zeroizing;
+use std::net::SocketAddr;
 // Platform-agnostic time (web-time on wasm32) — must match the
 // `Instant` the engine threads in, or the wasm build won't compile.
 use crate::time::{Duration, Instant};
 
 use crate::wire::HELLO_ACK_PAYLOAD_LEN;
+
+/// Outcome of [`regenerate_session`] — the server-side handshake
+/// material is installed and the HELLO_ACK is built.
+pub struct RegenOutcome {
+    /// The HELLO_ACK wire bytes to send back to the client.
+    pub ack_wire: Vec<u8>,
+    /// Whether the peer was *already* in `AwaitingData` before this
+    /// call. The transport uses this to keep its `handshakes_inflight`
+    /// gauge accurate (only bump on a fresh AwaitingData entry); the
+    /// engine ignores it (it scans for the count instead).
+    pub was_awaiting_data: bool,
+}
+
+/// Server-side session derivation + HELLO_ACK assembly, shared by
+/// both drivers (phase 4 slice 3c). The mirror of
+/// [`process_hello_ack`]: generate a server ephemeral, run the
+/// static and ephemeral DH (and ML-KEM encapsulation when the client
+/// sent an ek), derive the session key, build + cache the HELLO_ACK,
+/// and install the peer's `AwaitingData` state.
+///
+/// Resets the peer's seq/coalesce state, stamps `addr = src` and
+/// `interface_id = iface_idx`, and sets `via_mesh` when the incoming
+/// HELLO was mesh-routed (`incoming_hop_ttl > 1`). Pure given its
+/// inputs otherwise — no I/O, no metrics. The transport's inflight
+/// gauge is driven by the returned `was_awaiting_data`.
+///
+/// `iface_idx` is the interface the HELLO arrived on (the transport
+/// pins the peer's outbound interface to it; the engine, single-pipe,
+/// passes 0 — the field it never reads).
+#[allow(clippy::too_many_arguments)]
+pub fn regenerate_session(
+    identity: &Identity,
+    peer: &mut Peer,
+    client_static_pub: [u8; STATIC_KEY_LEN],
+    client_ephemeral_pub: [u8; STATIC_KEY_LEN],
+    client_nonce: [u8; NONCE_LEN],
+    local_peer_id: PeerId,
+    client_peer_id: PeerId,
+    src: SocketAddr,
+    incoming_hop_ttl: u8,
+    iface_idx: usize,
+    pq_client_ek: Option<&[u8]>,
+) -> Result<RegenOutcome> {
+    let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
+    let server_nonce = random_nonce();
+    let server_ephemeral = Identity::generate();
+    let server_ephemeral_pub = server_ephemeral.public_bytes();
+
+    // Contributory-checked DH — low-order client points fail cleanly.
+    let static_dh = identity
+        .dh(&client_static_pub)
+        .ok_or(CryptoError::KeyExchangeFailed)?;
+    let ephemeral_dh = server_ephemeral
+        .dh(&client_ephemeral_pub)
+        .ok_or(CryptoError::KeyExchangeFailed)?;
+
+    let (session_key_bytes, server_mlkem_ct) = if let Some(ek) = pq_client_ek {
+        let (ct, mlkem_ss) =
+            drift_core::pq::server_encapsulate(ek).ok_or(CryptoError::KeyExchangeFailed)?;
+        let key = drift_core::pq::derive_hybrid_key(
+            &static_dh,
+            &ephemeral_dh,
+            &mlkem_ss,
+            &client_nonce,
+            &server_nonce,
+        );
+        (Zeroizing::new(key), Some(ct))
+    } else {
+        (
+            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce),
+            None,
+        )
+    };
+    drop(server_ephemeral); // zeroize the server ephemeral secret
+
+    let tx = SessionKey::new(&session_key_bytes, Direction::Responder);
+    let rx = SessionKey::new(&session_key_bytes, Direction::Initiator);
+
+    peer.reset_seq();
+    peer.coalesce_state.clear();
+    peer.coalesce_order.clear();
+    peer.mark_session_start();
+    peer.addr = src;
+    peer.interface_id = iface_idx;
+    // A HELLO arriving with hop_ttl > 1 was mesh-routed; replies (and
+    // our DATA) need the same routing budget.
+    if incoming_hop_ttl > 1 {
+        peer.via_mesh = true;
+    }
+
+    let ack_wire = build_hello_ack_wire(
+        local_peer_id,
+        client_peer_id,
+        &server_ephemeral_pub,
+        &server_nonce,
+        server_mlkem_ct.as_deref(),
+        &tx,
+    )?;
+
+    peer.handshake = HandshakeState::AwaitingData {
+        tx,
+        rx,
+        key_bytes: session_key_bytes,
+        cached_ack: ack_wire.clone(),
+        cached_client_nonce: client_nonce,
+        was_hybrid_pq: server_mlkem_ct.is_some(),
+    };
+
+    Ok(RegenOutcome {
+        ack_wire,
+        was_awaiting_data,
+    })
+}
 
 /// Outcome of [`process_hello_ack`] — the client-side handshake
 /// completed (`AwaitingAck → Established`).

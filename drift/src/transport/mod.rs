@@ -1,9 +1,7 @@
 use crate::crypto::{derive_peer_id, Direction, PeerId, SessionKey};
 use crate::error::{CodecError, CryptoError, DriftError, PeerError, Result, SessionError};
 use crate::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
-use crate::identity::{
-    derive_session_key, random_nonce, rekey_derive, Identity, NONCE_LEN, STATIC_KEY_LEN,
-};
+use crate::identity::{random_nonce, rekey_derive, Identity, NONCE_LEN, STATIC_KEY_LEN};
 use crate::session::{HandshakeState, PathProbe, Peer, PendingSend, PrevSession, SEQ_SEND_CEILING};
 use rand::RngCore;
 use std::net::SocketAddr;
@@ -7366,6 +7364,13 @@ fn build_typed_packet(
 /// was NOT already `AwaitingData`. This keeps
 /// `handshakes_inflight` an accurate gauge across fresh starts
 /// and dual-init regenerations without ever double-counting.
+//
+// Server-side session derivation + HELLO_ACK assembly is shared with
+// the engine (drift_proto::frame::regenerate_session, phase 4
+// slice 3c — the mirror of the client `process_hello_ack`). This
+// adapter keeps the transport's signature and drives the
+// `handshakes_inflight` gauge from the returned `was_awaiting_data`
+// (only a fresh AwaitingData entry bumps it).
 #[allow(clippy::too_many_arguments)]
 fn regenerate_session(
     identity: &Identity,
@@ -7381,106 +7386,23 @@ fn regenerate_session(
     iface_idx: usize,
     pq_client_ek: Option<&[u8]>,
 ) -> Result<(Vec<u8>, SocketAddr)> {
-    let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
-    let server_nonce = random_nonce();
-    let server_ephemeral = Identity::generate();
-    let server_ephemeral_pub = server_ephemeral.public_bytes();
-
-    // Use the contributory-checked DH. A non-contributory result
-    // would mean the client's pubkey is a low-order / identity
-    // point — someone trying to trick the server into deriving a
-    // predictable session key. Fail the handshake cleanly.
-    let static_dh = identity
-        .dh(&client_static_pub)
-        .ok_or(CryptoError::KeyExchangeFailed)?;
-    let ephemeral_dh = server_ephemeral
-        .dh(&client_ephemeral_pub)
-        .ok_or(CryptoError::KeyExchangeFailed)?;
-
-    // Phase PQ: if the client supplied an ML-KEM-768 encap key,
-    // encapsulate it and weave the resulting shared secret into
-    // the session-key derivation via `derive_hybrid_key`. The
-    // ciphertext ships back in HELLO_ACK so the client can
-    // decapsulate. Reject malformed ek (wrong length, decap
-    // failure) with AuthFailed — same disposition as a bad
-    // X25519 contribution.
-    let (session_key_bytes, server_mlkem_ct) = if let Some(ek) = pq_client_ek {
-        let (ct, mlkem_ss) =
-            drift_core::pq::server_encapsulate(ek).ok_or(CryptoError::KeyExchangeFailed)?;
-        let key = drift_core::pq::derive_hybrid_key(
-            &static_dh,
-            &ephemeral_dh,
-            &mlkem_ss,
-            &client_nonce,
-            &server_nonce,
-        );
-        (drift_core::Zeroizing::new(key), Some(ct))
-    } else {
-        (
-            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce),
-            None,
-        )
-    };
-    // server_ephemeral drops here; StaticSecret's Zeroize impl clears it.
-    drop(server_ephemeral);
-
-    let tx = SessionKey::new(&session_key_bytes, Direction::Responder);
-    let rx = SessionKey::new(&session_key_bytes, Direction::Initiator);
-
-    peer.reset_seq();
-    peer.coalesce_state.clear();
-    peer.coalesce_order.clear();
-    peer.mark_session_start();
-    peer.addr = src;
-    // Keep `peer.interface_id` in sync with the interface the
-    // fresh handshake actually arrived on. Without this, an
-    // existing peer who reconnects from a new adapter (client
-    // process exited, reconnected from a new TCP ephemeral port
-    // or switched medium) would leave the outbound interface_id
-    // pointing at the previous — now-dead — interface, and
-    // every reply from us would be silently dropped at
-    // send_for while the inbound path worked fine.
-    peer.interface_id = iface_idx;
-    // A HELLO arriving with `hop_ttl > 1` was issued with
-    // `with_hop_ttl(DEFAULT_MESH_TTL)` — the sender intended
-    // mesh routing. The default `hop_ttl = 1` indicates a
-    // direct HELLO. The old `> 0` check misfired on every
-    // direct handshake and caused the beacon emitter to treat
-    // direct neighbors as mesh-routed (silently skipping them
-    // in the fixed filter, dropping them at the bridge's
-    // forward gate before the filter existed).
-    if incoming_hop_ttl > 1 {
-        peer.via_mesh = true;
-    }
-
-    // HELLO_ACK byte assembly is shared with the engine
-    // (drift_proto::frame, phase 4 slice 2). The AAD covers header
-    // + server_ephemeral_pub + server_nonce + (when hybrid) the
-    // ML-KEM ciphertext, so a man-in-the-middle who edits the
-    // in-the-clear ct flips the client's derived key and its
-    // AEAD open() fails cleanly.
-    let wire = drift_proto::frame::build_hello_ack_wire(
+    let out = drift_proto::frame::regenerate_session(
+        identity,
+        peer,
+        client_static_pub,
+        client_ephemeral_pub,
+        client_nonce,
         local_peer_id,
         client_peer_id,
-        &server_ephemeral_pub,
-        &server_nonce,
-        server_mlkem_ct.as_deref(),
-        &tx,
+        src,
+        incoming_hop_ttl,
+        iface_idx,
+        pq_client_ek,
     )?;
-
-    peer.handshake = HandshakeState::AwaitingData {
-        tx: tx.clone(),
-        rx: rx.clone(),
-        key_bytes: session_key_bytes,
-        cached_ack: wire.clone(),
-        cached_client_nonce: client_nonce,
-        was_hybrid_pq: server_mlkem_ct.is_some(),
-    };
-    if !was_awaiting_data {
+    if !out.was_awaiting_data {
         inflight_gauge.fetch_add(1, Ordering::Relaxed);
     }
-
-    Ok((wire, src))
+    Ok((out.ack_wire, src))
 }
 
 /// Build a HELLO wire packet with a pre-chosen nonce and ephemeral

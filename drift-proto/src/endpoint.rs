@@ -25,14 +25,12 @@ use drift_core::error::{CodecError, CryptoError, DriftError, PeerError, SessionE
 use drift_core::header::{
     canonical_aad, Header, PacketType, AUTH_TAG_LEN, FLAG_PQ_HYBRID, HEADER_LEN,
 };
-use drift_core::identity::{
-    derive_session_key, random_nonce, rekey_derive, NONCE_LEN, STATIC_KEY_LEN,
-};
+use drift_core::identity::{random_nonce, rekey_derive, NONCE_LEN, STATIC_KEY_LEN};
 use drift_core::session::{
     HandshakeState, Peer, PendingResumption, PendingSend, PrevSession, SEQ_SEND_CEILING,
 };
 use drift_core::short_header::{derive_initiator_rx_cid, derive_responder_rx_cid, is_short_header};
-use drift_core::{derive_peer_id, Identity, Zeroizing};
+use drift_core::{derive_peer_id, Identity};
 use rand::RngCore;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -217,10 +215,11 @@ fn resume_hello_wire(
     )
 }
 
-/// Server-side session derivation + HELLO_ACK construction. Port of
-/// the transport's `regenerate_session` (minus the interface
-/// bookkeeping and the inflight atomic, which the engine derives by
-/// scanning).
+/// Server-side session derivation + HELLO_ACK construction. Thin
+/// adapter over the shared `drift_proto::frame::regenerate_session`
+/// (phase 4 slice 3c): the engine has no interfaces, so it passes
+/// `iface_idx = 0` (the field it never reads) and ignores the
+/// `was_awaiting_data` gauge signal the transport uses.
 #[allow(clippy::too_many_arguments)]
 fn regenerate_session(
     identity: &Identity,
@@ -234,77 +233,20 @@ fn regenerate_session(
     incoming_hop_ttl: u8,
     pq_client_ek: Option<&[u8]>,
 ) -> Result<(Vec<u8>, SocketAddr)> {
-    let server_nonce = random_nonce();
-    let server_ephemeral = Identity::generate();
-    let server_ephemeral_pub = server_ephemeral.public_bytes();
-
-    // Contributory-checked DH — low-order client points fail cleanly.
-    let static_dh = identity
-        .dh(&client_static_pub)
-        .ok_or(CryptoError::KeyExchangeFailed)?;
-    let ephemeral_dh = server_ephemeral
-        .dh(&client_ephemeral_pub)
-        .ok_or(CryptoError::KeyExchangeFailed)?;
-
-    let (session_key_bytes, server_mlkem_ct) = if let Some(ek) = pq_client_ek {
-        let (ct, mlkem_ss) =
-            drift_core::pq::server_encapsulate(ek).ok_or(CryptoError::KeyExchangeFailed)?;
-        let key = drift_core::pq::derive_hybrid_key(
-            &static_dh,
-            &ephemeral_dh,
-            &mlkem_ss,
-            &client_nonce,
-            &server_nonce,
-        );
-        (Zeroizing::new(key), Some(ct))
-    } else {
-        (
-            derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce),
-            None,
-        )
-    };
-    drop(server_ephemeral);
-
-    let tx = SessionKey::new(&session_key_bytes, Direction::Responder);
-    let rx = SessionKey::new(&session_key_bytes, Direction::Initiator);
-
-    peer.reset_seq();
-    peer.coalesce_state.clear();
-    peer.coalesce_order.clear();
-    peer.mark_session_start();
-    peer.addr = src;
-    // A HELLO arriving with hop_ttl > 1 was mesh-routed; replies
-    // (and our DATA) need the same routing budget. Port of the
-    // transport's incoming_hop_ttl handling.
-    if incoming_hop_ttl > 1 {
-        peer.via_mesh = true;
-    }
-
-    // `with_hop_ttl(DEFAULT_MESH_TTL)` to match the transport's ACK
-    // bytes exactly — it sets hop_ttl=8 AND the FLAG_ROUTED bit,
-    // both of which are inside the client's AAD computation (flags
-    // byte directly; hop_ttl zeroed by canonical_aad).
-    // HELLO_ACK byte assembly is shared with the transport
-    // (drift_proto::frame, phase 4 slice 2).
-    let wire = crate::frame::build_hello_ack_wire(
+    let out = crate::frame::regenerate_session(
+        identity,
+        peer,
+        client_static_pub,
+        client_ephemeral_pub,
+        client_nonce,
         local_peer_id,
         client_peer_id,
-        &server_ephemeral_pub,
-        &server_nonce,
-        server_mlkem_ct.as_deref(),
-        &tx,
+        src,
+        incoming_hop_ttl,
+        0,
+        pq_client_ek,
     )?;
-
-    peer.handshake = HandshakeState::AwaitingData {
-        tx,
-        rx,
-        key_bytes: session_key_bytes,
-        cached_ack: wire.clone(),
-        cached_client_nonce: client_nonce,
-        was_hybrid_pq: server_mlkem_ct.is_some(),
-    };
-
-    Ok((wire, src))
+    Ok((out.ack_wire, src))
 }
 
 /// Long-header DATA construction. Port of the transport's

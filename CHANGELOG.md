@@ -31,6 +31,19 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared server handshake derivation (sans-IO phase 4, slice
+  3c-regen).** `regenerate_session` — the server-side mirror of the
+  client HELLO_ACK handler: server-ephemeral generation, static +
+  ephemeral DH, ML-KEM encapsulation, key derivation, HELLO_ACK
+  assembly, and the `AwaitingData` install — now lives once in
+  `drift_proto::frame::regenerate_session`, called by both
+  `drift::Transport::handle_hello` and the engine. It returns
+  `was_awaiting_data` so the transport keeps its `handshakes_inflight`
+  gauge accurate; the engine passes `iface_idx = 0`. With the client
+  `process_hello_ack` (slice 3c-ack), **both handshake crypto cores
+  are now single-source.** The client's AEAD ACK-tag verification
+  makes any server-side divergence fatal, so the interop suite is an
+  exact guard. (#64)
 - **Shared client HELLO_ACK handler (sans-IO phase 4, slice 3c-ack).**
   The client-side handshake completion — consume the `AwaitingAck`
   state, check PQ posture, run the static + ephemeral DH (and ML-KEM
