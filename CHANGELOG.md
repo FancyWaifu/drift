@@ -31,6 +31,17 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared server-handshake transition (sans-IO phase 4, slice 3b).**
+  The `AwaitingData → Established` state transition on the responder
+  side — the trickiest shared receive-path logic (the handshake-state
+  swap, clearing the amplification counters, draining the pending
+  queue) — now lives once in
+  `drift_proto::frame::complete_server_transition`, called by both
+  `drift::Transport::handle_data` and the engine. Each driver keeps
+  its own side effects (the transport's metrics/qlog/CID install, the
+  engine's `Connected` event + ticket). Behavior-identical, exercised
+  on every server handshake. (The deadline/coalesce/replay checks were
+  already shared as `drift_core::session::Peer` methods.) (#61)
 - **Shared DATA-send sealing core (sans-IO phase 4, slice 3a).** The
   DATA packet builder — the hottest path, and the last duplicated
   protocol code on the send side — now lives once in

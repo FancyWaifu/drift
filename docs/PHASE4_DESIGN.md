@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: slices 1–2 DONE; slice 3a (DATA-send core) DONE. Slices 3b/3c/4 pending.**
+**Status: slices 1–2 DONE; slice 3a (DATA-send core) + 3b (server transition) DONE. Slices 3b-decrypt/3c/4 pending.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -137,12 +137,26 @@ it lands in increments, smallest-risk first:
   allocation-identical code move (AEAD-sealed → interop + datagram +
   stream_reliability + congestion + sharding_contention are the
   byte-exact guard); structural KAT for the short/long/mesh decision.
-- **3b — receive kernel.** Share the `handle_data` /
-  `process_short_header` core: decrypt (with rekey-grace fallback) →
-  replay → deadline → coalesce → AwaitingData→Established transition,
-  returning a `DataOutcome { payload, transition, flush }` action.
-  Path-probe / ticket-issuance / federation stay in the transport
-  wrapper.
+- **3b — receive-path state transition (done).** The
+  recon found the deadline / coalesce / replay checks are *already*
+  shared (they're `drift_core::session::Peer` methods both call), so
+  the only genuinely-duplicated receive logic is (i) the rekey-grace
+  decrypt fallback and (ii) the `AwaitingData → Established`
+  transition. 3b shares (ii) as
+  `drift_proto::frame::complete_server_transition(&mut Peer) ->
+  Option<ServerEstablished>`: the state swap, clearing the
+  amplification counters, and draining the pending queue, returning
+  the session key (for CID install), the PQ flag (for the metric),
+  and the queued DATA (for the caller to flush in its own action
+  type). The transport keeps its metrics / qlog / post-lock CID +
+  ticket; the engine keeps its `Connected` event + ticket. Behavior
+  is exercised on every server handshake, so `proto_interop` (+
+  dual_init / restart_handshake / two_process / metrics) is the
+  guard. The decrypt-grace fallback (i) is **deferred**: the
+  transport authenticates the raw on-wire header byte 29 in the AAD
+  while the engine re-encodes it (a security-relevant strictness
+  difference), so sharing it must standardize on the raw-bytes AAD —
+  its own careful step.
 - **3c — handshake kernel.** Share `handle_hello` /
   `handle_hello_ack` cores, including the cookie-secret-snapshot
   restructure. The hardest piece; gets its own confirmation.

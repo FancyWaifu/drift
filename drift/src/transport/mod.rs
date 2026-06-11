@@ -7137,67 +7137,48 @@ impl Inner {
             let mut just_established = false;
             let mut just_established_key: Option<drift_core::Zeroizing<[u8; 32]>> = None;
             let mut flushed: Vec<(Vec<u8>, SocketAddr, usize)> = Vec::new();
-            if matches!(peer.handshake, HandshakeState::AwaitingData { .. }) {
-                if let HandshakeState::AwaitingData {
-                    tx,
-                    rx,
-                    key_bytes,
-                    was_hybrid_pq,
-                    ..
-                } = std::mem::replace(&mut peer.handshake, HandshakeState::Pending)
-                {
-                    peer.handshake = HandshakeState::Established {
-                        tx,
-                        rx,
-                        key_bytes: key_bytes.clone(),
-                        prev: None,
-                    };
+            // The AwaitingData → Established swap + pending drain is
+            // shared with the engine (drift_proto::frame, phase 4
+            // slice 3b). The transport keeps its own side effects:
+            // metrics, qlog, and — after the lock releases — CID
+            // install + resumption-ticket issuance.
+            if let Some(est) = drift_proto::frame::complete_server_transition(peer) {
+                self.metrics
+                    .handshakes_completed
+                    .fetch_add(1, Ordering::Relaxed);
+                if est.was_hybrid_pq {
                     self.metrics
-                        .handshakes_completed
+                        .hybrid_pq_handshakes_completed
                         .fetch_add(1, Ordering::Relaxed);
-                    if was_hybrid_pq {
-                        self.metrics
-                            .hybrid_pq_handshakes_completed
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                    self.metrics
-                        .handshakes_inflight
-                        .fetch_sub(1, Ordering::Relaxed);
-                    just_established = true;
-                    just_established_key = Some(key_bytes);
-                    if let Some(q) = &self.qlog {
-                        q.log_handshake_complete(&format!("{:?}", peer_id), false);
-                    }
-                    // Amplification counters are no longer
-                    // needed — the source address has been
-                    // validated by a successful AEAD-auth'd
-                    // DATA round trip, so we can send freely
-                    // from here on.
-                    peer.clear_unauth_counters();
+                }
+                self.metrics
+                    .handshakes_inflight
+                    .fetch_sub(1, Ordering::Relaxed);
+                just_established = true;
+                just_established_key = Some(est.key_bytes);
+                if let Some(q) = &self.qlog {
+                    q.log_handshake_complete(&format!("{:?}", peer_id), false);
+                }
 
-                    // Flush any DATA the app queued while the
-                    // responder-side handshake was still in
-                    // flight. Without this, a server that
-                    // calls `send_data` before receiving the
-                    // client's first DATA would silently drop
-                    // those packets — they'd sit in
-                    // `pending` forever because nothing else
-                    // triggers the flush on the responder
-                    // side. Mirrors the initiator-side flush
-                    // in `handle_hello_ack`.
-                    let pending = std::mem::take(&mut peer.pending);
-                    let flush_mesh = if peer.via_mesh { Some(peer.addr) } else { None };
-                    for ps in pending {
-                        if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
-                            self.local_peer_id,
-                            peer,
-                            &ps.payload,
-                            ps.deadline_ms,
-                            ps.coalesce_group,
-                            flush_mesh,
-                        ) {
-                            flushed.push((bytes, target, iface));
-                        }
+                // Flush any DATA the app queued while the
+                // responder-side handshake was still in flight.
+                // Without this, a server that calls `send_data`
+                // before receiving the client's first DATA would
+                // silently drop those packets — they'd sit in
+                // `pending` forever because nothing else triggers
+                // the flush on the responder side. Mirrors the
+                // initiator-side flush in `handle_hello_ack`.
+                let flush_mesh = if peer.via_mesh { Some(peer.addr) } else { None };
+                for ps in est.pending {
+                    if let Ok(SendAction::Data(bytes, target, iface)) = build_data_packet(
+                        self.local_peer_id,
+                        peer,
+                        &ps.payload,
+                        ps.deadline_ms,
+                        ps.coalesce_group,
+                        flush_mesh,
+                    ) {
+                        flushed.push((bytes, target, iface));
                     }
                 }
             }
