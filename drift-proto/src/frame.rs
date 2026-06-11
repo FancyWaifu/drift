@@ -22,7 +22,9 @@ use drift_core::identity::{NONCE_LEN, STATIC_KEY_LEN};
 use drift_core::session::{HandshakeState, Peer, PendingSend, DEFAULT_MESH_TTL};
 use drift_core::short_header::open_short;
 use drift_core::Zeroizing;
-use std::time::{Duration, Instant};
+// Platform-agnostic time (web-time on wasm32) — must match the
+// `Instant` the engine threads in, or the wasm build won't compile.
+use crate::time::{Duration, Instant};
 
 use crate::wire::HELLO_ACK_PAYLOAD_LEN;
 
