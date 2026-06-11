@@ -2851,10 +2851,9 @@ impl Transport {
     }
 }
 
-/// How long the previous session keys stay alive after a rekey,
-/// so in-flight DATA sealed under the old key can still decrypt.
-/// Kept generous — two full RTTs on a typical WAN link.
-const REKEY_GRACE: Duration = Duration::from_secs(2);
+// The rekey grace window lives in `drift_proto::frame::REKEY_GRACE`
+// now (phase 4 slice 3b-decrypt) — the shared receive-path decrypt
+// helpers apply it; the transport no longer needs its own copy.
 
 /// Auto-rekey trigger: once a peer's `next_tx_seq` crosses this
 /// value, `send_data` will transparently rekey before sending so
@@ -5829,7 +5828,9 @@ impl Inner {
         received_at: Instant,
         ecn_ce: bool,
     ) -> Result<Option<Received>> {
-        let (cid, seq, body) = crate::short_header::decode_short(data)?;
+        // `open_short_data_with_grace` re-decodes the body itself; we
+        // only need the cid (for the peer lookup) and seq (for replay).
+        let (cid, seq, _body) = crate::short_header::decode_short(data)?;
 
         let peer_id = {
             let map = self.cid_map.lock().unwrap();
@@ -5839,26 +5840,12 @@ impl Inner {
         let (payload, probe) = {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
-            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-            let aad = &data[..crate::short_header::SHORT_HEADER_LEN];
-            let plaintext = match rx.open(seq, PacketType::Data as u8, aad, body) {
-                Ok(pt) => pt,
-                Err(err) => {
-                    // Rekey grace: try the prev rx if current fails.
-                    let mut recovered = None;
-                    if let HandshakeState::Established { prev: Some(p), .. } = &mut peer.handshake {
-                        if p.installed_at.elapsed() <= REKEY_GRACE {
-                            if let Ok(pt) = p.rx.open(seq, PacketType::Data as u8, aad, body) {
-                                recovered = Some(pt);
-                            }
-                        }
-                    }
-                    match recovered {
-                        Some(pt) => pt,
-                        None => return Err(err),
-                    }
-                }
-            };
+            // Decrypt with the rekey grace-window fallback — shared
+            // with the engine (drift_proto::frame, phase 4
+            // slice 3b-decrypt). Returns (cid, seq, payload); we
+            // already have cid/seq from decode_short.
+            let (_cid, _seq, plaintext) =
+                drift_proto::frame::open_short_data_with_grace(peer, data, received_at)?;
             peer.check_and_update_replay(seq)?;
 
             // Path validation: same logic as the long-header
@@ -7076,41 +7063,18 @@ impl Inner {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
 
-            let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-
-            let mut hbuf = [0u8; HEADER_LEN];
-            hbuf.copy_from_slice(&full_packet[..HEADER_LEN]);
-            let aad = canonical_aad(&hbuf);
-
-            // Try the current rx first. If it fails AND a
-            // rekey grace-window prev is still alive, try the
-            // old rx before giving up — catches DATA that was
-            // already in flight under the old key when we
-            // switched.
-            let payload = match rx.open(header.seq, PacketType::Data as u8, &aad, body) {
-                Ok(pt) => pt,
-                Err(err) => {
-                    let mut recovered = None;
-                    if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
-                        if let Some(p) = prev {
-                            if p.installed_at.elapsed() <= REKEY_GRACE {
-                                if let Ok(pt) =
-                                    p.rx.open(header.seq, PacketType::Data as u8, &aad, body)
-                                {
-                                    recovered = Some(pt);
-                                }
-                            } else {
-                                // Expired — drop the prev slot.
-                                *prev = None;
-                            }
-                        }
-                    }
-                    match recovered {
-                        Some(pt) => pt,
-                        None => return Err(err),
-                    }
-                }
-            };
+            // Decrypt with the rekey grace-window fallback — shared
+            // with the engine (drift_proto::frame, phase 4
+            // slice 3b-decrypt). `full_packet[..HEADER_LEN]` is the
+            // raw on-wire header, so the AAD authenticates every byte.
+            let hbuf: &[u8; HEADER_LEN] = full_packet[..HEADER_LEN].try_into().unwrap();
+            let payload = drift_proto::frame::open_data_with_grace(
+                peer,
+                hbuf,
+                header.seq,
+                body,
+                received_at,
+            )?;
 
             peer.check_and_update_replay(header.seq)?;
 
