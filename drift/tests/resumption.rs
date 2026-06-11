@@ -10,8 +10,10 @@
 //! * `import_with_corrupted_blob_rejected` — flipped bytes are
 //!   detected.
 //! * `server_forgot_ticket_falls_back_to_full_handshake` —
-//!   simulate a server-side restart by clearing the resumption
-//!   store; client retries with a full HELLO.
+//!   liveness regression: a server restart (fresh transport, same
+//!   identity, empty resumption store) makes the client's stored
+//!   ticket stale; the client must give up the resume quickly and
+//!   fall back to a full HELLO instead of parking forever.
 
 use drift::error::DriftError;
 use drift::identity::Identity;
@@ -272,4 +274,137 @@ async fn import_with_corrupted_blob_rejected() {
         err,
         DriftError::Codec(drift::error::CodecError::Malformed)
     ));
+}
+
+/// Liveness regression: a client holding a resumption ticket the
+/// server has FORGOTTEN (restart / lost store / consumed it) must
+/// still be able to connect. Before the fix, the client emitted
+/// `ResumeHello`, got no reply (the server rejects an unknown
+/// ticket silently), retransmitted `ResumeHello` until the
+/// handshake-retry budget ran out, and then parked forever WITHOUT
+/// dropping the dead ticket — so every later send re-picked
+/// resumption and hit the same dead end. The session never
+/// recovered. The fix makes a give-up on a resumption attempt fall
+/// back to a fresh full HELLO (and burn the stale ticket).
+#[tokio::test]
+async fn server_forgot_ticket_falls_back_to_full_handshake() {
+    let alice_id_bytes = [0x91u8; 32];
+    let bob_id_bytes = [0x92u8; 32];
+    let alice_pub = Identity::from_secret_bytes(alice_id_bytes).public_bytes();
+    let bob_pub = Identity::from_secret_bytes(bob_id_bytes).public_bytes();
+
+    // ---- session 1: full handshake so Alice earns a ticket ----
+    let bob = Arc::new(
+        Transport::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Identity::from_secret_bytes(bob_id_bytes),
+        )
+        .await
+        .unwrap(),
+    );
+    bob.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
+    let bob_addr = bob.local_addr().unwrap();
+
+    let alice = Arc::new(
+        Transport::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Identity::from_secret_bytes(alice_id_bytes),
+        )
+        .await
+        .unwrap(),
+    );
+    let bob_peer = alice
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    alice
+        .send_data(&bob_peer, b"session-1", 0, 0)
+        .await
+        .unwrap();
+    let p = tokio::time::timeout(Duration::from_secs(2), bob.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.payload, b"session-1");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ticket_blob = alice.export_resumption_ticket(&bob_peer).await.unwrap();
+
+    // ---- the server "restarts": fresh Bob, same identity + addr,
+    //      empty resumption store. Bind to Bob's old port so the
+    //      ticket's stored route still points at a live server. ----
+    drop(bob);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let bob2 = Arc::new(
+        Transport::bind(bob_addr, Identity::from_secret_bytes(bob_id_bytes))
+            .await
+            .unwrap(),
+    );
+    bob2.add_peer(
+        alice_pub,
+        "0.0.0.0:0".parse().unwrap(),
+        Direction::Responder,
+    )
+    .await
+    .unwrap();
+
+    // ---- fresh Alice, same identity, imports the now-stale ticket.
+    //      Fast handshake retry base so the resume give-up + fallback
+    //      completes quickly and deterministically (default backoff
+    //      would take ~14s before the fallback fires). ----
+    drop(alice);
+    let fast_retry = drift::TransportConfig {
+        handshake_retry_base_ms: 150,
+        ..Default::default()
+    };
+    let alice2 = Arc::new(
+        Transport::bind_with_config(
+            "127.0.0.1:0".parse().unwrap(),
+            Identity::from_secret_bytes(alice_id_bytes),
+            fast_retry,
+        )
+        .await
+        .unwrap(),
+    );
+    let bob_peer2 = alice2
+        .add_peer(bob_pub, bob_addr, Direction::Initiator)
+        .await
+        .unwrap();
+    let unval = Transport::parse_resumption_ticket(&ticket_blob).unwrap();
+    let val = unval.validate(&bob_peer2, &alice2).await.unwrap();
+    alice2.import_resumption_ticket(val).await;
+
+    // This send picks the resumption path (ticket on file). Bob2
+    // has no record of the ticket → silent reject. The client must
+    // recover by falling back to a full HELLO and deliver the
+    // payload. Generous timeout: the fallback only fires after the
+    // resume-retry budget is exhausted.
+    alice2
+        .send_data(&bob_peer2, b"after-fallback", 0, 0)
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(20), bob2.recv())
+        .await
+        .expect("client never recovered — resumption fallback to full HELLO is broken")
+        .unwrap();
+    assert_eq!(got.payload, b"after-fallback");
+
+    // Bob2 completed a real handshake (the fallback), not a resume.
+    let bm = bob2.metrics();
+    assert_eq!(
+        bm.handshakes_completed, 1,
+        "fallback should be a full handshake"
+    );
+    assert_eq!(
+        bm.resumptions_completed, 0,
+        "no resume could have succeeded"
+    );
+    // Alice2 recorded exactly one resume→full-HELLO fallback.
+    let am = alice2.metrics();
+    assert_eq!(am.resumption_fallbacks, 1, "exactly one fallback expected");
 }
