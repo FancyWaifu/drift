@@ -42,6 +42,7 @@
 //! transport in both roles.
 
 mod endpoint;
+pub mod frame;
 mod resumption;
 pub mod time;
 pub mod wire;
