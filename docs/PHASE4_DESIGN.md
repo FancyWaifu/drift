@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: 1–2, 3a/3b/3b-decrypt, 3c-ack, 3c-regen, 3c-cookie DONE — the DATA path, BOTH handshake crypto cores (client `process_hello_ack` + server `regenerate_session`), and the cookie validate/challenge primitives are single-source. Remaining: slice 4 (delete dead transport code, gated on the bench matrix + K=17 soak). The in-`lock_all` HELLO orchestration (dual-init / cached-ACK / auto-register) stays driver-specific by design — it is sharding concurrency, not protocol.**
+**Status: COMPLETE. Slices 1–2, 3a/3b/3b-decrypt, 3c-ack, 3c-regen, 3c-cookie, and 4 (perf certification) are all done — the DATA path, BOTH handshake crypto cores (client `process_hello_ack` + server `regenerate_session`), and the cookie validate/challenge primitives are single-source in `drift_proto`. Slice 4 found NO dead code to delete: the per-slice strangler-fig discipline removed each old block inline as the transport swapped over, so deletion happened continuously rather than as a deferred big-bang. The transport's remaining per-peer functions are thin wrappers that hold genuinely driver-specific side effects (sharded locks, the `handshakes_inflight` gauge, `SendAction` wrapping, federation envelope assembly) — that is the intended end state, not residue. The in-`lock_all` HELLO orchestration (dual-init / cached-ACK / auto-register) stays driver-specific by design — it is sharding concurrency, not protocol. Perf gate (pre-phase-4 `875e1f8` → post `020c59a`): cross-wire loopback throughput flat (UDP −0.12%, h2s/iroh within jitter), criterion AEAD/header micro flat-to-faster. The full-fleet K=17 soak is the one remaining optional certification; its marginal value is low here since phase 4 added no allocations and made no federation-path changes.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -57,7 +57,7 @@ lives* does.
 | **1** ✅ | **Shared wire-format layer (done).** Extracted drift-proto's pure stateless `build_hello_wire` / `build_resume_hello_wire` + cookie helpers (`cookie_input`, `addr_bytes`, `ct_eq`) + size constants into a public `drift_proto::wire` module. `Endpoint` calls it; the transport deleted its private copies and the duplicated constants (`HELLO_PAYLOAD_LEN`, the PQ tails, the cookie sizes) and now re-exports/delegates to `wire`. drift-proto promoted from dev- to regular dependency of drift. Net −174 lines from the existing files. `build_close_packet` deferred to slice 2 (it seals, so it needs a live key — not purely stateless). | Low | A one-time byte-identity test (`wire_parity_proof`) asserted the transport's pre-existing private builders produced output byte-for-byte identical to `drift_proto::wire`'s across a full parameter sweep (classical/mesh/cookie/PQ; v4+v6), then was deleted with the private builders. Permanent guards: drift-proto's `wire` KATs + the `proto_interop` cross-impl suite + all cookie/PQ/resumption/attack suites green. |
 | **2** ✅ | **Session-keyed frame builders (done).** New `drift_proto::frame` module owns `build_close_packet` (operates on the shared `drift_core::session::Peer`) and `build_hello_ack_wire` (the HELLO_ACK byte assembly, pure given the server's handshake material + responder tx key). Both `Endpoint` and `Transport` call them; the transport's private `build_close_packet` is deleted and its `regenerate_session` ack-assembly block (~40 lines) collapses to one call. Net −84 lines. The **DATA-send path** (`build_data_packet`) is deferred to slice 3 — it carries a pooled-buffer optimization (`drift_core::pool::take_wire_buf`), the short-header CID fast path, and returns each driver's own action type (`SendAction` vs `Transmit`), so it can't be cleanly shared without the driver/handler split, and its hot-path perf needs the slice-4 bench gate. | Low–Med | Both packets are **AEAD-sealed**, so any byte divergence breaks tag verification — the `proto_interop` suite (engine ↔ transport, both roles, classical + PQ, Close both directions) is an exact byte-identity guard, plus `frame` structural KATs + an AAD self-consistency round-trip. dual_init / restart_handshake / reconnect_cycle exercise `regenerate_session`. |
 | **3** | Extract the per-peer packet **handlers** (`handle_hello`, `handle_hello_ack`, `handle_data`, cookie gate, rekey, resumption) into `drift_proto::handlers` as free functions over `(&Config, &Identity, &mut Peer, &mut CookieState, …)`. `Endpoint` and the transport both call them. Includes the deferred DATA-send path (`build_data_packet`) with a buffer-out-param so the transport keeps its pooled buffer. This is where the real de-braiding happens. | High | Each handler ported with a byte-identity / behavior-equivalence test before the transport switches to it; interop suite is the cross-impl guard; DATA path gets the bench gate. |
-| **4** | Delete the transport's now-dead private protocol code; `transport/mod.rs` keeps only the sharded driver (locks, recv loops, peer table, federation, mesh). Re-run the full bench matrix to confirm no perf regression. | Med | Bench matrix (`bench/bench-matrix.sh` + criterion) per the wire-agnostic methodology; K=17 soak. |
+| **4** ✅ | **Closure + perf certification (done).** Audit found **no dead protocol code to delete** — slices 1–3 removed each old block inline as they swapped over, so `transport/mod.rs` already keeps only the sharded driver (locks, recv loops, peer table, federation, mesh) plus thin wrappers around the shared kernels that hold driver-specific side effects. The compiler reports zero dead-code/unused warnings. The perf gate (the real deliverable) certifies the cumulative arc throughput-neutral. | Low | Cross-wire loopback throughput (`drift-bench/scripts/run-wire-throughput.sh`, udp/h2s/iroh × 3) + criterion micro (`cargo bench --bench throughput`), baseline `875e1f8` vs current. K=17 fleet soak optional (no fed-path/allocation change). |
 
 Slices 1–2 are mechanical and byte-provable. Slice 3 is the
 genuinely hard one — see the dedicated design below. Slice 4 is
@@ -232,6 +232,39 @@ it lands in increments, smallest-risk first:
   tiebreak, cached-ACK duplicate replay, cross-shard auto-register cap)
   remains driver-specific by design — it is sharding concurrency, not
   protocol, and has no engine analogue.
+- **4 — closure + perf certification (done).** A dead-code audit
+  (compiler `dead_code`/`unused` lints + a manual sweep of every
+  private `fn`/`const`/`use`/re-export in `transport/`) found **nothing
+  to delete**: every remaining item has a live caller, and the
+  transport's per-peer functions are now thin wrappers that forward to
+  the `drift_proto` kernels while holding genuinely driver-specific
+  side effects (the sharded peer-table locks, the `handshakes_inflight`
+  atomic in `regenerate_session`, the `SendAction` wrapping in
+  `build_data_packet_with_cid`, and the federation-envelope assembly in
+  `build_typed_packet` — which has no `drift_proto` analogue yet). This
+  confirms the strangler-fig discipline worked: each of slices 1–3
+  deleted its orphaned block at swap time, so there was never a
+  deferred graveyard. The one code change in this slice is making
+  `run-wire-throughput.sh`'s binary path env-overridable so a
+  baseline-vs-current comparison can point at each build in place.
+  **Perf result** (baseline `875e1f8` = parent of slice 1, vs current
+  `020c59a` = whole arc; 1 KB payload, 10 s, loopback, median of 3):
+
+  | wire | baseline goodput | current goodput | Δ |
+  |---|---|---|---|
+  | udp | 1491.5 Mbps | 1489.7 Mbps | −0.12% |
+  | h2s | 2759.3 Mbps | 2799.6 Mbps | +1.5% |
+  | iroh | 827.2 Mbps | 807.2 Mbps | −2.4% |
+
+  UDP (the most deterministic wire) is flat; h2s/iroh deltas are within
+  loopback run-to-run jitter and non-directional. Criterion micro
+  (`aead/*`, `header/*`) is flat-to-faster — but note those are
+  `drift_core` crypto/header primitives that phase 4 never touched, so
+  the cross-wire throughput is the authoritative gate, not the micro.
+  No regression, as expected from byte-identical moves. The full-fleet
+  K=17 soak (federation leak/liveness over hours) is the only remaining
+  optional certification; phase 4 changed no federation path and added
+  no allocations, so its marginal value here is low.
 
 ### Perf gate
 

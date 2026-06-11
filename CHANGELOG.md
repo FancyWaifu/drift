@@ -31,6 +31,23 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Sans-IO phase 4 complete (slice 4 — closure + perf
+  certification).** With the cookie primitives shared, the per-peer
+  protocol logic that used to be duplicated between `drift::Transport`
+  and the `drift_proto` engine is now single-source: the DATA send/
+  receive path, both handshake crypto cores, the Close/rekey/resumption
+  builders, and the cookie validate/challenge primitives all live once
+  in `drift_proto::{wire,frame}`. A dead-code audit found nothing left
+  to delete — the strangler-fig slices removed each old block inline as
+  they swapped over, so `transport/mod.rs` already holds only the
+  sharded driver plus thin wrappers carrying driver-specific side
+  effects (locks, the `handshakes_inflight` gauge, federation-envelope
+  assembly). A cross-wire loopback throughput comparison (baseline at
+  the parent of slice 1 vs the full arc; udp/h2s/iroh) shows no
+  regression — UDP goodput flat at −0.12%, the rest within jitter — and
+  the criterion AEAD/header micro is flat-to-faster. Tooling:
+  `drift-bench/scripts/run-wire-throughput.sh` now honors a `BIN` env
+  override so baseline-vs-current runs can point at each build in place.
 - **Shared cookie validation + CHALLENGE builder (sans-IO phase 4,
   slice 3c-cookie).** The two remaining DoS-cookie primitives now live
   once in `drift_proto::wire`: `validate_cookie` (length + freshness +
