@@ -31,6 +31,18 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared session-keyed frame builders (sans-IO phase 4, slice
+  2).** The `Close` packet builder and the `HELLO_ACK` byte assembly
+  — previously duplicated between `transport/mod.rs` and the engine —
+  now live once in a new `drift_proto::frame` module that operates on
+  the shared `drift_core::session::Peer` and seals with the session
+  key. `drift::Transport` and `drift_proto::Endpoint` build both
+  packets from it. Because both are AEAD-sealed, any byte divergence
+  would break tag verification, so the `proto_interop` cross-impl
+  suite is an exact byte-identity guard. Pure refactor — no
+  wire-format or API change; net −84 lines. The DATA-send path is
+  deferred to slice 3 (it carries the pooled-buffer + CID fast-path
+  optimizations and needs the perf gate). (#58)
 - **Single source of truth for the wire format (sans-IO phase 4,
   slice 1).** The transport's private HELLO / ResumeHello builders,
   the DoS-cookie MAC-input construction (`cookie_input` /

@@ -287,40 +287,16 @@ fn regenerate_session(
     // bytes exactly — it sets hop_ttl=8 AND the FLAG_ROUTED bit,
     // both of which are inside the client's AAD computation (flags
     // byte directly; hop_ttl zeroed by canonical_aad).
-    let mut ack_header = Header::new(PacketType::HelloAck, 1, local_peer_id, client_peer_id)
-        .with_hop_ttl(drift_core::session::DEFAULT_MESH_TTL);
-    if server_mlkem_ct.is_some() {
-        ack_header.flags |= FLAG_PQ_HYBRID;
-    }
-    let ack_payload_len =
-        HELLO_ACK_PAYLOAD_LEN + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0);
-    ack_header.payload_len = ack_payload_len as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    ack_header.encode(&mut hbuf);
-
-    let canon = canonical_aad(&hbuf);
-    let mut aad = Vec::with_capacity(
-        HEADER_LEN
-            + STATIC_KEY_LEN
-            + NONCE_LEN
-            + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0),
-    );
-    aad.extend_from_slice(&canon);
-    aad.extend_from_slice(&server_ephemeral_pub);
-    aad.extend_from_slice(&server_nonce);
-    if let Some(ct) = &server_mlkem_ct {
-        aad.extend_from_slice(ct);
-    }
-    let tag = tx.seal(1, PacketType::HelloAck as u8, &aad, b"")?;
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + ack_payload_len);
-    wire.extend_from_slice(&hbuf);
-    wire.extend_from_slice(&server_ephemeral_pub);
-    wire.extend_from_slice(&server_nonce);
-    wire.extend_from_slice(&tag);
-    if let Some(ct) = &server_mlkem_ct {
-        wire.extend_from_slice(ct);
-    }
+    // HELLO_ACK byte assembly is shared with the transport
+    // (drift_proto::frame, phase 4 slice 2).
+    let wire = crate::frame::build_hello_ack_wire(
+        local_peer_id,
+        client_peer_id,
+        &server_ephemeral_pub,
+        &server_nonce,
+        server_mlkem_ct.as_deref(),
+        &tx,
+    )?;
 
     peer.handshake = HandshakeState::AwaitingData {
         tx,
@@ -332,23 +308,6 @@ fn regenerate_session(
     };
 
     Ok((wire, src))
-}
-
-/// Authenticated session-close packet: an AEAD-sealed empty body —
-/// the tag is the message. Port of the transport's
-/// `build_close_packet`.
-fn build_close_packet(local_peer_id: PeerId, peer: &mut Peer) -> Result<Vec<u8>> {
-    let seq = peer.next_seq_checked()?;
-    let mut header = peer.make_header(PacketType::Close, seq, local_peer_id);
-    header.payload_len = AUTH_TAG_LEN as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-    let aad = canonical_aad(&hbuf);
-    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-    let mut wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
-    wire.extend_from_slice(&hbuf);
-    tx.seal_into(seq, PacketType::Close as u8, &aad, b"", &mut wire)?;
-    Ok(wire)
 }
 
 /// Long-header DATA construction. Port of the transport's
@@ -724,7 +683,7 @@ impl Endpoint {
         if !peer.handshake.is_ready_for_data() {
             return Err(PeerError::SessionNotReady.into());
         }
-        let wire = build_close_packet(local_peer_id, peer)?;
+        let wire = crate::frame::build_close_packet(local_peer_id, peer)?;
         let dst = peer.addr;
 
         if peer.auto_registered {

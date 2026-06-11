@@ -3078,7 +3078,7 @@ impl Inner {
                 return Err(PeerError::SessionNotReady.into());
             }
             let was_awaiting_data = matches!(peer.handshake, HandshakeState::AwaitingData { .. });
-            let wire = build_close_packet(self.local_peer_id, peer)?;
+            let wire = drift_proto::frame::build_close_packet(self.local_peer_id, peer)?;
             let addr = peer.addr;
 
             // Drop local state immediately — we won't accept any
@@ -7422,22 +7422,6 @@ impl Inner {
     }
 }
 
-/// Build a `Close` wire packet: AEAD-sealed empty body, consuming
-/// one tx seq slot.
-fn build_close_packet(local_peer_id: PeerId, peer: &mut Peer) -> Result<Vec<u8>> {
-    let seq = peer.next_seq_checked()?;
-    let mut header = peer.make_header(PacketType::Close, seq, local_peer_id);
-    header.payload_len = AUTH_TAG_LEN as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    header.encode(&mut hbuf);
-    let aad = canonical_aad(&hbuf);
-    let (tx, _) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-    let mut wire = Vec::with_capacity(HEADER_LEN + AUTH_TAG_LEN);
-    wire.extend_from_slice(&hbuf);
-    tx.seal_into(seq, PacketType::Close as u8, &aad, b"", &mut wire)?;
-    Ok(wire)
-}
-
 fn build_data_packet(
     local_peer_id: PeerId,
     peer: &mut Peer,
@@ -7638,48 +7622,20 @@ fn regenerate_session(
         peer.via_mesh = true;
     }
 
-    let mut ack_header = Header::new(PacketType::HelloAck, 1, local_peer_id, client_peer_id)
-        .with_hop_ttl(DEFAULT_MESH_TTL);
-    if server_mlkem_ct.is_some() {
-        ack_header.flags |= drift_core::header::FLAG_PQ_HYBRID;
-    }
-    let ack_payload_len =
-        HELLO_ACK_PAYLOAD_LEN + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0);
-    ack_header.payload_len = ack_payload_len as u16;
-    let mut hbuf = [0u8; HEADER_LEN];
-    ack_header.encode(&mut hbuf);
-
-    let canon = canonical_aad(&hbuf);
-    // AAD covers header + server_ephemeral_pub + server_nonce +
-    // (when hybrid) server_mlkem_ct so that tampering with any
-    // of them fails the tag. The ML-KEM ciphertext is plaintext
-    // on the wire — it has to be, the client needs to
-    // decapsulate it — but its integrity is bound by the tag
-    // derived from the hybrid key, so a man-in-the-middle who
-    // edits the ct flips the client's derived key and the AEAD
-    // open() fails cleanly.
-    let mut aad = Vec::with_capacity(
-        HEADER_LEN
-            + STATIC_KEY_LEN
-            + NONCE_LEN
-            + server_mlkem_ct.as_ref().map(|ct| ct.len()).unwrap_or(0),
-    );
-    aad.extend_from_slice(&canon);
-    aad.extend_from_slice(&server_ephemeral_pub);
-    aad.extend_from_slice(&server_nonce);
-    if let Some(ct) = &server_mlkem_ct {
-        aad.extend_from_slice(ct);
-    }
-    let tag = tx.seal(1, PacketType::HelloAck as u8, &aad, b"")?;
-
-    let mut wire = Vec::with_capacity(HEADER_LEN + ack_payload_len);
-    wire.extend_from_slice(&hbuf);
-    wire.extend_from_slice(&server_ephemeral_pub);
-    wire.extend_from_slice(&server_nonce);
-    wire.extend_from_slice(&tag);
-    if let Some(ct) = &server_mlkem_ct {
-        wire.extend_from_slice(ct);
-    }
+    // HELLO_ACK byte assembly is shared with the engine
+    // (drift_proto::frame, phase 4 slice 2). The AAD covers header
+    // + server_ephemeral_pub + server_nonce + (when hybrid) the
+    // ML-KEM ciphertext, so a man-in-the-middle who edits the
+    // in-the-clear ct flips the client's derived key and its
+    // AEAD open() fails cleanly.
+    let wire = drift_proto::frame::build_hello_ack_wire(
+        local_peer_id,
+        client_peer_id,
+        &server_ephemeral_pub,
+        &server_nonce,
+        server_mlkem_ct.as_deref(),
+        &tx,
+    )?;
 
     peer.handshake = HandshakeState::AwaitingData {
         tx: tx.clone(),
