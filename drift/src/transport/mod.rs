@@ -6746,133 +6746,46 @@ impl Inner {
             let mut peers = self.peers.lock_for(&peer_id).await;
             let peer = peers.get_mut(&peer_id).ok_or(PeerError::NotRegistered)?;
 
-            // Pattern match by value via std::mem::replace to consume the
-            // ephemeral secret (it's not Copy).
-            let old_state = std::mem::replace(&mut peer.handshake, HandshakeState::Pending);
-            let (client_nonce, ephemeral, hello_sent_at, pq_dk_opt) = match old_state {
-                HandshakeState::AwaitingAck {
-                    client_nonce,
-                    ephemeral,
-                    last_sent,
-                    pq,
-                    ..
-                    // `cookie` is discarded — once HELLO_ACK lands, the
-                    // handshake is done and the token is no longer useful.
-                } => (
-                    client_nonce,
-                    ephemeral,
-                    last_sent,
-                    pq.map(|(_ek, dk)| dk),
-                ),
-                other => {
-                    // Restore and bail.
-                    peer.handshake = other;
+            // Client-side HELLO_ACK core — shared with the engine
+            // (drift_proto::frame, phase 4 slice 3c): state extract,
+            // PQ posture, DH + ML-KEM decapsulation + key derivation,
+            // tag verify, AwaitingAck → Established transition + RTT
+            // sample. The transport keeps its own metrics / qlog,
+            // mesh-route flagging, and (after the lock) the flush +
+            // CID install.
+            let outcome = match drift_proto::frame::process_hello_ack(
+                peer,
+                &self.identity,
+                header,
+                &server_ephemeral_pub,
+                &server_nonce,
+                server_pq,
+                pq_ct,
+                tag,
+                Instant::now(),
+            )? {
+                drift_proto::frame::HelloAckResult::Established(o) => o,
+                drift_proto::frame::HelloAckResult::Ignored => {
                     debug!("HELLO_ACK in wrong state, ignoring");
                     return Ok(());
                 }
+                drift_proto::frame::HelloAckResult::PostureMismatch => {
+                    tracing::warn!("PQ posture mismatch in HELLO_ACK — refusing handshake");
+                    self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .hybrid_pq_handshakes_refused
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Err(CryptoError::KeyExchangeFailed.into());
+                }
             };
 
-            // Phase PQ: the client and server must agree on
-            // PQ vs classical. Mismatch is a protocol error.
-            //   - We asked for PQ (pq_dk_opt.is_some()) but
-            //     server replied without the flag → silent
-            //     downgrade attempt; refuse.
-            //   - We did NOT ask for PQ but server replied with
-            //     the flag → server-side state corruption or
-            //     a forged ACK; refuse.
-            if pq_dk_opt.is_some() != server_pq {
-                tracing::warn!(
-                    client_pq = pq_dk_opt.is_some(),
-                    server_pq,
-                    "PQ posture mismatch in HELLO_ACK — refusing handshake"
-                );
-                self.metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
-                self.metrics
-                    .hybrid_pq_handshakes_refused
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(CryptoError::KeyExchangeFailed.into());
-            }
-
-            // Passive RTT sample: the time from when we sent
-            // the last HELLO to receiving this HELLO_ACK is
-            // a clean round-trip measurement. Feed it into
-            // the neighbor estimator so the routing table
-            // has a valid RTT for this peer immediately,
-            // before any active Ping round has even fired.
-            peer.update_neighbor_rtt(Instant::now().duration_since(hello_sent_at));
-
-            // Checked DH: a rogue server replying with an all-zero
-            // or other low-order ephemeral pubkey would otherwise
-            // let it force the client into a predictable session
-            // key.
-            let static_dh = self
-                .identity
-                .dh(&peer.peer_static_pub)
-                .ok_or(CryptoError::KeyExchangeFailed)?;
-            let ephemeral_dh = ephemeral
-                .dh(&server_ephemeral_pub)
-                .ok_or(CryptoError::KeyExchangeFailed)?;
-            drop(ephemeral); // zeroize client ephemeral secret
-
-            // Phase PQ: decapsulate the server's ML-KEM
-            // ciphertext (if any) with the stashed dk and
-            // derive the hybrid session key. A bogus ct (wrong
-            // length, decap failure) returns None → reject
-            // the whole handshake. The dk drops after this
-            // block, zeroing itself.
-            let session_key_bytes = if let (Some(dk), Some(ct)) = (pq_dk_opt, pq_ct) {
-                let mlkem_ss = dk.decapsulate(ct).ok_or(CryptoError::KeyExchangeFailed)?;
-                let key = drift_core::pq::derive_hybrid_key(
-                    &static_dh,
-                    &ephemeral_dh,
-                    &mlkem_ss,
-                    &client_nonce,
-                    &server_nonce,
-                );
-                drift_core::Zeroizing::new(key)
-            } else {
-                derive_session_key(&static_dh, &ephemeral_dh, &client_nonce, &server_nonce)
-            };
-
-            let tx = SessionKey::new(&session_key_bytes, Direction::Initiator);
-            let rx = SessionKey::new(&session_key_bytes, Direction::Responder);
-
-            let mut hbuf = [0u8; HEADER_LEN];
-            header.encode(&mut hbuf);
-            let canon = canonical_aad(&hbuf);
-            // Phase PQ: when hybrid, the AAD must mirror the
-            // server's — header + server_eph_pub + server_nonce
-            // + server_mlkem_ct. If anyone tampered with the ct
-            // we got a different mlkem_ss → different session
-            // key → AEAD open() below fails.
-            let mut aad = Vec::with_capacity(
-                HEADER_LEN + STATIC_KEY_LEN + NONCE_LEN + pq_ct.map(|c| c.len()).unwrap_or(0),
-            );
-            aad.extend_from_slice(&canon);
-            aad.extend_from_slice(&server_ephemeral_pub);
-            aad.extend_from_slice(&server_nonce);
-            if let Some(ct) = pq_ct {
-                aad.extend_from_slice(ct);
-            }
-            rx.open(1, PacketType::HelloAck as u8, &aad, tag)?;
-
-            peer.reset_seq();
-            peer.coalesce_state.clear();
-            peer.coalesce_order.clear();
-            peer.mark_session_start();
-            peer.handshake = HandshakeState::Established {
-                tx,
-                rx,
-                key_bytes: session_key_bytes.clone(),
-                prev: None,
-            };
             if mesh_next_hop.is_some() {
                 peer.via_mesh = true;
             }
             self.metrics
                 .handshakes_completed
                 .fetch_add(1, Ordering::Relaxed);
-            if server_pq {
+            if outcome.server_pq {
                 self.metrics
                     .hybrid_pq_handshakes_completed
                     .fetch_add(1, Ordering::Relaxed);
@@ -6881,7 +6794,7 @@ impl Inner {
             if let Some(q) = &self.qlog {
                 q.log_handshake_complete(&format!("{:?}", peer_id), false);
             }
-            cid_key_for_install = Some(session_key_bytes);
+            cid_key_for_install = Some(outcome.key_bytes);
 
             // Build the to-send list (Data wire bytes + iface +
             // target) WHILE STILL HOLDING the peer lock. This
@@ -6890,11 +6803,8 @@ impl Inner {
             // doing the sendmsg syscalls because (a) parking_lot
             // guards are !Send and can't cross await, (b) the
             // ordering guarantee (DATAs hit the wire before
-            // any app-issued Close) is preserved: app code
-            // doesn't see handle_helloack complete until this
-            // function returns, and we send before returning.
-            let pending = std::mem::take(&mut peer.pending);
-            for ps in pending {
+            // any app-issued Close) is preserved.
+            for ps in outcome.pending {
                 if let SendAction::Data(bytes, target, iface) = build_data_packet(
                     self.local_peer_id,
                     peer,
