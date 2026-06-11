@@ -31,6 +31,21 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared rekey-grace decrypt (sans-IO phase 4, slice 3b-decrypt).**
+  The receive-path rekey-grace decrypt fallback — try the current
+  session key, then the pre-rekey key within the 2 s grace window —
+  was duplicated four ways (transport + engine × long + short
+  header). It now lives once in `drift_proto::frame`
+  (`open_data_with_grace` / `open_short_data_with_grace`), with
+  `REKEY_GRACE` a single shared constant. Two latent divergences are
+  fixed in the process: the engine now authenticates the **raw
+  on-wire header** in the AAD like the transport (it formerly
+  re-encoded, silently dropping the reserved byte from
+  authentication), and the transport's short-header path now clears
+  the expired grace-window key like its long-header path. With the
+  send-side `seal_data_wire`, the entire DATA path — encrypt and
+  decrypt — is now single-source. Guarded by the rekey + interop +
+  receive-path attack suites. (#62)
 - **Shared server-handshake transition (sans-IO phase 4, slice 3b).**
   The `AwaitingData → Established` state transition on the responder
   side — the trickiest shared receive-path logic (the handshake-state

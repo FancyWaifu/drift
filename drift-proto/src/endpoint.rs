@@ -31,18 +31,15 @@ use drift_core::identity::{
 use drift_core::session::{
     HandshakeState, Peer, PendingResumption, PendingSend, PrevSession, SEQ_SEND_CEILING,
 };
-use drift_core::short_header::{
-    derive_initiator_rx_cid, derive_responder_rx_cid, is_short_header, open_short,
-};
+use drift_core::short_header::{derive_initiator_rx_cid, derive_responder_rx_cid, is_short_header};
 use drift_core::{derive_peer_id, Identity, Zeroizing};
 use rand::RngCore;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 
-/// Grace window during which the pre-rekey session keys stay live
-/// on the receive path, so old-key DATA already in flight at the
-/// key switch still decrypts. Identical to the transport's.
-const REKEY_GRACE: Duration = Duration::from_secs(2);
+// The rekey grace window lives in `crate::frame::REKEY_GRACE` now,
+// shared with the transport and used by the shared receive-path
+// decrypt helpers.
 
 /// Auto-rekey watermark: once a session's tx seq crosses 3/4 of
 /// `SEQ_SEND_CEILING`, the next send triggers a transparent rekey
@@ -740,7 +737,7 @@ impl Endpoint {
             PacketType::Hello => self.on_hello(now, &header, body, src),
             PacketType::HelloAck => self.on_hello_ack(now, &header, body),
             PacketType::Challenge => self.on_challenge(now, &header, body),
-            PacketType::Data => self.on_data(now, &header, body),
+            PacketType::Data => self.on_data(now, &header, &datagram[..HEADER_LEN], body),
             PacketType::RekeyRequest => self.on_rekey_request(now, &header, body),
             PacketType::RekeyAck => self.on_rekey_ack(&header, body),
             PacketType::Close => self.on_close(&header, body),
@@ -1003,33 +1000,12 @@ impl Endpoint {
             .peers
             .get_mut(&peer_id)
             .ok_or(PeerError::NotRegistered)?;
-        let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-        let first_try = open_short(datagram, rx);
-        let (_cid, seq, payload) = match first_try {
-            Ok(out) => out,
-            Err(err) => {
-                // Rekey grace fallback, same as the long-header
-                // path. The pre-rekey CID entries are still in the
-                // map — that's how an old-key packet found this
-                // peer in the first place.
-                let mut recovered = None;
-                if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
-                    if let Some(p) = prev {
-                        if now.saturating_duration_since(p.installed_at) <= REKEY_GRACE {
-                            if let Ok(out) = open_short(datagram, &p.rx) {
-                                recovered = Some(out);
-                            }
-                        } else {
-                            *prev = None;
-                        }
-                    }
-                }
-                match recovered {
-                    Some(out) => out,
-                    None => return Err(err.into()),
-                }
-            }
-        };
+        // Decrypt with rekey-grace fallback — shared with the
+        // transport (drift_proto::frame, phase 4 slice 3b-decrypt).
+        // The pre-rekey CID entries are still in the map (that's how
+        // an old-key packet found this peer), so the grace fallback
+        // can decrypt them.
+        let (_cid, seq, payload) = crate::frame::open_short_data_with_grace(peer, datagram, now)?;
         peer.check_and_update_replay(seq)?;
         peer.last_seen = now;
         self.complete_server_handshake(peer_id)?;
@@ -2111,7 +2087,13 @@ impl Endpoint {
     /// DATA processing. Port of `handle_data`'s long-header path:
     /// AEAD open → replay → deadline → coalesce → (AwaitingData →
     /// Established transition) → deliver.
-    fn on_data(&mut self, now: Instant, header: &Header, body: &[u8]) -> Result<()> {
+    fn on_data(
+        &mut self,
+        now: Instant,
+        header: &Header,
+        raw_header: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
         if header.dst_id != self.local_peer_id {
             // Mesh forwarding is phase 4; the engine drops
             // other-destination packets.
@@ -2123,38 +2105,12 @@ impl Endpoint {
             .get_mut(&peer_id)
             .ok_or(PeerError::NotRegistered)?;
 
-        let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
-
-        let mut hbuf = [0u8; HEADER_LEN];
-        header.encode(&mut hbuf);
-        let aad = canonical_aad(&hbuf);
-        // Try the current rx key; on failure fall back to the
-        // pre-rekey keys if the grace window is still open (old-key
-        // DATA already in flight at the key switch).
-        let first_try = rx.open(header.seq, PacketType::Data as u8, &aad, body);
-        let payload = match first_try {
-            Ok(pt) => pt,
-            Err(err) => {
-                let mut recovered = None;
-                if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
-                    if let Some(p) = prev {
-                        if now.saturating_duration_since(p.installed_at) <= REKEY_GRACE {
-                            if let Ok(pt) =
-                                p.rx.open(header.seq, PacketType::Data as u8, &aad, body)
-                            {
-                                recovered = Some(pt);
-                            }
-                        } else {
-                            *prev = None;
-                        }
-                    }
-                }
-                match recovered {
-                    Some(pt) => pt,
-                    None => return Err(err.into()),
-                }
-            }
-        };
+        // Decrypt with rekey-grace fallback — shared with the
+        // transport (drift_proto::frame, phase 4 slice 3b-decrypt).
+        // `raw_header` is the on-wire header so the AAD authenticates
+        // every byte (matching the transport's strict behavior).
+        let raw_header: &[u8; HEADER_LEN] = raw_header.try_into().unwrap();
+        let payload = crate::frame::open_data_with_grace(peer, raw_header, header.seq, body, now)?;
 
         peer.check_and_update_replay(header.seq)?;
 

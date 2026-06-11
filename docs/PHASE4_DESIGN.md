@@ -1,6 +1,6 @@
 # Phase 4: `drift::Transport` consumes `drift-proto`
 
-**Status: slices 1–2 DONE; slice 3a (DATA-send core) + 3b (server transition) DONE. Slices 3b-decrypt/3c/4 pending.**
+**Status: slices 1–2 DONE; 3a (DATA-send) + 3b (transition) + 3b-decrypt (rekey-grace) DONE. The whole receive + send DATA path is now single-source. Slices 3c/4 pending.**
 
 Phase 4 is the last and highest-risk phase of the sans-IO arc
 (`SANSIO_DESIGN.md`). Phases 1–3 + 5 already delivered the
@@ -157,6 +157,23 @@ it lands in increments, smallest-risk first:
   while the engine re-encodes it (a security-relevant strictness
   difference), so sharing it must standardize on the raw-bytes AAD —
   its own careful step.
+- **3b-decrypt — rekey-grace decrypt (done).** Shared the
+  duplicated-4-ways rekey-grace decrypt fallback as
+  `drift_proto::frame::open_data_with_grace` (long header) +
+  `open_short_data_with_grace` (short header): try the current rx,
+  then the pre-rekey `prev.rx` if the grace window is open, clearing
+  `prev` on expiry. `REKEY_GRACE` is now one constant in `frame`. Two
+  divergences were standardized: (1) the AAD now uses the **raw
+  on-wire header** (the transport's strict behavior — the engine
+  formerly re-encoded, silently un-authenticating the reserved byte;
+  threaded the raw header into the engine's `on_data`); (2) the
+  transport's short path now **clears expired `prev`** like the long
+  path (it previously leaked the stale slot until the next eviction).
+  Guard: `proto_interop` (rekey both directions) + `rekey_under_load`
+  (256k packets across a rekey) + the engine's grace accept/expiry
+  loopback test + a `frame` test pinning the raw-AAD strictness
+  (a flipped reserved byte must fail the tag) + the receive-path
+  attack suites.
 - **3c — handshake kernel.** Share `handle_hello` /
   `handle_hello_ack` cores, including the cookie-secret-snapshot
   restructure. The hardest piece; gets its own confirmation.

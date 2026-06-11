@@ -20,9 +20,92 @@ use drift_core::error::{PeerError, Result};
 use drift_core::header::{canonical_aad, Header, PacketType, AUTH_TAG_LEN, HEADER_LEN};
 use drift_core::identity::{NONCE_LEN, STATIC_KEY_LEN};
 use drift_core::session::{HandshakeState, Peer, PendingSend, DEFAULT_MESH_TTL};
+use drift_core::short_header::open_short;
 use drift_core::Zeroizing;
+// Platform-agnostic time (web-time on wasm32) — must match the
+// `Instant` the engine threads in, or the wasm build won't compile.
+use crate::time::{Duration, Instant};
 
 use crate::wire::HELLO_ACK_PAYLOAD_LEN;
+
+/// Grace window during which the pre-rekey session keys stay live on
+/// the receive path, so old-key DATA already in flight at the key
+/// switch still decrypts. Both `drift_proto::Endpoint` and
+/// `drift::Transport` use this single definition.
+pub const REKEY_GRACE: Duration = Duration::from_secs(2);
+
+/// Decrypt a long-header DATA body for `peer`, falling back to the
+/// pre-rekey `prev` keys within the grace window. `hbuf` is the RAW
+/// on-wire header bytes — its `canonical_aad` is the AEAD AAD, so a
+/// flipped header byte (even the reserved one) fails the tag. This is
+/// the transport's strict behavior; the engine adopts it (it formerly
+/// re-encoded the header, which silently zeroed the reserved byte and
+/// dropped it from authentication).
+///
+/// On grace-window expiry the `prev` slot is cleared. Shared
+/// rekey-grace logic — see [`open_short_data_with_grace`] for the
+/// short-header variant.
+pub fn open_data_with_grace(
+    peer: &mut Peer,
+    hbuf: &[u8; HEADER_LEN],
+    seq: u32,
+    body: &[u8],
+    now: Instant,
+) -> Result<Vec<u8>> {
+    let aad = canonical_aad(hbuf);
+    // Current rx first (immutable borrow ends with this block).
+    let first = {
+        let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+        rx.open(seq, PacketType::Data as u8, &aad, body)
+    };
+    match first {
+        Ok(pt) => Ok(pt),
+        Err(err) => open_with_prev_grace(peer, now, |rx| {
+            rx.open(seq, PacketType::Data as u8, &aad, body).ok()
+        })
+        .ok_or(err),
+    }
+}
+
+/// Decrypt a short-header DATA datagram for `peer`, with the same
+/// rekey-grace fallback as [`open_data_with_grace`]. Returns
+/// `(cid, seq, payload)`. The short header is self-authenticating via
+/// `open_short` (the 7-byte header is the AAD), so there's no
+/// raw-vs-re-encoded subtlety here.
+pub fn open_short_data_with_grace(
+    peer: &mut Peer,
+    datagram: &[u8],
+    now: Instant,
+) -> Result<(u16, u32, Vec<u8>)> {
+    let first = {
+        let (_, rx) = peer.handshake.session().ok_or(PeerError::SessionNotReady)?;
+        open_short(datagram, rx)
+    };
+    match first {
+        Ok(out) => Ok(out),
+        Err(err) => open_with_prev_grace(peer, now, |rx| open_short(datagram, rx).ok()).ok_or(err),
+    }
+}
+
+/// Run `try_open` against the peer's pre-rekey `prev.rx` if the grace
+/// window is still open; clear `prev` if it has expired. Returns the
+/// recovered plaintext (or whatever `try_open` yields) on success.
+fn open_with_prev_grace<T>(
+    peer: &mut Peer,
+    now: Instant,
+    try_open: impl FnOnce(&SessionKey) -> Option<T>,
+) -> Option<T> {
+    if let HandshakeState::Established { prev, .. } = &mut peer.handshake {
+        if let Some(p) = prev {
+            if now.saturating_duration_since(p.installed_at) <= REKEY_GRACE {
+                return try_open(&p.rx);
+            }
+            // Expired — drop the stale keys.
+            *prev = None;
+        }
+    }
+    None
+}
 
 /// What the caller needs after a responder-side `AwaitingData →
 /// Established` transition completes — see [`complete_server_transition`].
@@ -244,6 +327,65 @@ mod tests {
             prev: None,
         };
         peer
+    }
+
+    /// A receiver peer whose `rx` opens packets sealed by
+    /// [`established_peer`]'s `tx` (Responder direction). The AEAD
+    /// nonce embeds the direction, so the opener's key direction must
+    /// match the sealer's.
+    fn receiver_for_established_peer() -> Peer {
+        let key = Zeroizing::new([0x42u8; 32]);
+        let mut peer = Peer::new(
+            [9; 8],
+            "127.0.0.1:9000".parse::<SocketAddr>().unwrap(),
+            [7; 32],
+            Direction::Initiator,
+        );
+        peer.handshake = HandshakeState::Established {
+            tx: SessionKey::new(&key, Direction::Initiator),
+            rx: SessionKey::new(&key, Direction::Responder),
+            key_bytes: key,
+            prev: None,
+        };
+        peer
+    }
+
+    #[test]
+    fn open_data_with_grace_authenticates_raw_header_byte() {
+        use drift_core::header::{Header, HEADER_LEN};
+        use std::time::Instant;
+        // Seal a DATA packet, then flip the reserved header byte (29)
+        // on the wire. open_data_with_grace uses the RAW header for
+        // the AAD, so the tampered byte must fail the tag — proving
+        // the shared helper kept the transport's strict behavior
+        // (the engine formerly re-encoded, which silently zeroed and
+        // un-authenticated that byte).
+        let mut peer = established_peer();
+        peer.next_tx_seq = 5;
+        let payload = b"authenticated";
+        let wire = seal_data_wire([9; 8], &mut peer, payload, 0, 0, None, false).unwrap();
+        let header = Header::decode(&wire[..HEADER_LEN]).unwrap();
+        let seq = header.seq;
+
+        // Untampered raw header decrypts.
+        let mut rx_peer = receiver_for_established_peer();
+        let raw: &[u8; HEADER_LEN] = wire[..HEADER_LEN].try_into().unwrap();
+        let body = &wire[HEADER_LEN..];
+        assert!(
+            open_data_with_grace(&mut rx_peer, raw, seq, body, Instant::now()).is_ok(),
+            "legit packet must decrypt"
+        );
+
+        // Flip reserved byte 29 -> tag fails (it's inside the AAD).
+        let mut tampered = wire.clone();
+        tampered[29] ^= 0xFF;
+        let raw_t: &[u8; HEADER_LEN] = tampered[..HEADER_LEN].try_into().unwrap();
+        let body_t = &tampered[HEADER_LEN..];
+        let mut rx_peer2 = receiver_for_established_peer();
+        assert!(
+            open_data_with_grace(&mut rx_peer2, raw_t, seq, body_t, Instant::now()).is_err(),
+            "a flipped reserved header byte must fail authentication"
+        );
     }
 
     #[test]
