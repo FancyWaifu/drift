@@ -31,6 +31,19 @@ crate. A change that touches multiple surfaces appears under each.
 
 ### Protocol / Portability
 
+- **Shared DATA-send sealing core (sans-IO phase 4, slice 3a).** The
+  DATA packet builder — the hottest path, and the last duplicated
+  protocol code on the send side — now lives once in
+  `drift_proto::frame::seal_data_wire`: the short-header CID fast
+  path, the long header, the mesh hop-TTL, and the pooled-buffer
+  allocation, shared by both `drift::Transport` and
+  `drift_proto::Endpoint`. Each driver wraps the returned bytes in
+  its own action type and computes its own destination, so the
+  transport keeps its interface routing and buffer pool. The
+  transport's orphaned `mesh::DEFAULT_MESH_TTL` is removed (the
+  canonical constant is `drift_core::session::DEFAULT_MESH_TTL`).
+  Byte-identical, allocation-identical code move — the AEAD seal
+  makes the interop/datagram/stream suites an exact guard. (#59)
 - **Shared session-keyed frame builders (sans-IO phase 4, slice
   2).** The `Close` packet builder and the `HELLO_ACK` byte assembly
   — previously duplicated between `transport/mod.rs` and the engine —

@@ -23,17 +23,17 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use tracing::{debug, warn};
 
-/// Default hop budget for a packet we originate that needs mesh
-/// forwarding. Generous enough for any realistic small mesh; the
-/// receiver-side cap (`MAX_INCOMING_HOP_TTL`) is what protects
-/// against amplification.
-pub(crate) const DEFAULT_MESH_TTL: u8 = 8;
+// The default hop budget for originated mesh packets is
+// `drift_core::session::DEFAULT_MESH_TTL` (= 8), used by the shared
+// wire/frame builders in `drift_proto`. The transport no longer
+// keeps its own copy (phase 4 slices 1–3a moved every emitter to
+// the shared builders).
 
 /// Hard cap on the hop_ttl value we are willing to honor on any
 /// incoming packet that we would otherwise forward. DRIFT itself
-/// never emits a hop_ttl above `DEFAULT_MESH_TTL`, so anything past
-/// this cap is an attacker trying to force us to amplify a single
-/// packet into many network hops.
+/// never emits a hop_ttl above `DEFAULT_MESH_TTL` (= 8), so anything
+/// past this cap is an attacker trying to force us to amplify a
+/// single packet into many network hops.
 pub(crate) const MAX_INCOMING_HOP_TTL: u8 = 16;
 
 /// Maximum number of (peer_id, metric) entries packed into a
