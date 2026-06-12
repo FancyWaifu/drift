@@ -26,10 +26,17 @@
 //! future DRIFT tool at `~/.config/drift/identity.key` —
 //! one pubkey is your handle for every DRIFT-based thing.
 
-mod identity;
 mod protocol;
+
+#[cfg(feature = "native")]
+mod identity;
+#[cfg(feature = "native")]
 mod recv;
+#[cfg(feature = "native")]
 mod send;
+
+#[cfg(feature = "portable")]
+mod portable;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -96,6 +103,8 @@ pub(crate) struct RecvArgs {
     pub identity_file: Option<PathBuf>,
 }
 
+/// Native (async, tokio) entry point — the default build, all wires.
+#[cfg(feature = "native")]
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     init_logging();
@@ -112,6 +121,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Portable (sync, no-tokio) entry point — `drift-proto-std`, tcp-only.
+/// Selected by `--no-default-features --features portable`.
+#[cfg(all(feature = "portable", not(feature = "native")))]
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let result = match cli.cmd {
+        Cmd::Send(a) => portable::run_send(a),
+        Cmd::Recv(a) => portable::run_recv(a),
+    };
+    if let Err(e) = result {
+        eprintln!("drift-wormhole: {:#}", e);
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "native")]
 fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -122,6 +148,7 @@ fn init_logging() {
         .init();
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn load_identity(path: Option<PathBuf>) -> Result<drift::identity::Identity> {
     let p = match path {
         Some(p) => p,
