@@ -182,6 +182,8 @@ Concrete pieces that back the positioning sentence above, grouped by what they d
 
 **Browser-native** — `drift-wasm` compiles the full DRIFT protocol to WebAssembly. Same `drift-core` code as the native stack; interoperates with native peers through a bridge. Supports all three browser wire transports (WebSocket, WebRTC data channel, WebTransport) behind one `DriftClient` API.
 
+**Portable / runtime-free** — the protocol is a sans-IO state machine (`drift-proto`), so it isn't tied to tokio. `drift-proto-std` is a blocking `std::net` driver (no async runtime) that runs the *same* protocol over `tcp://`/`udp://` anywhere `std` builds — including the **Redox** microkernel (`drift-redox`: an encrypted shell + file transfer, byte-compatible with native peers). Pick your tier: `drift` (tokio, all wires) · `drift-proto-std` (blocking, tcp+udp) · `drift-proto` (bring your own I/O). All three interoperate on the wire. Tools opt into portability with a `--features portable` build (see drift-wormhole / drift-git).
+
 **Observability** — 30+ runtime metrics. Structured NDJSON qlog. XOR-based FEC for lossy links.
 
 ## Tools built on DRIFT
@@ -193,16 +195,17 @@ End-user binaries shipped from this repo. Each has its own README with install +
 | **[drift-vpn](drift-vpn/README.md)** | Identity-routed multi-transport VPN. WireGuard-shaped config, but with cross-scheme runtime failover (UDP→TCP/TLS/WS), hub-and-spoke mesh routing, **bridge-fallback peers (two NAT'd peers find each other through a shared federation bridge, no port forwarding either side)**, `drift-vpn doctor` preflight, **one-command service install (`drift-vpn install --start` writes systemd unit / launchd plist, enables for boot)**, **owner-driven identity rotation (`drift-vpn rotate` / `rotate-verify`)**, and built-in Prometheus metrics. Linux + macOS daemon. See [QUICKSTART.md](drift-vpn/QUICKSTART.md) and [ROTATION.md](drift-vpn/ROTATION.md). | `cargo install --path drift-vpn --bin drift-vpn` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-mosh](drift-mosh/README.md)** | Mobile-shell replacement (mosh-style) — survives wifi-to-cellular, laptop suspend, client crash. UDP / TCP / WebSocket. | `cargo install --path drift-mosh --bin drift-mosh` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
 | **[drift-http](drift-http/README.md)** | Apache-style file server + Jellyfin-style proxy + system-wide `drift://` URL handler. Pubkey-addressed; no DDNS, no reverse proxy, no TLS cert. | `cargo install --path drift-http --bin drift-http` or [release tarballs](https://github.com/FancyWaifu/drift/releases) |
-| **[drift-git](drift-git/README.md)** | `git push drift://<peerhex>@<host>:<port>/<repo>` over DRIFT — git remote helper + serving daemon. No SSH keys, no GitHub. UDP / TCP / TLS / WS. | `cargo install --path drift-git --bins` |
+| **[drift-git](drift-git/README.md)** | `git push drift://<peerhex>@<host>:<port>/<repo>` over DRIFT — git remote helper + serving daemon. No SSH keys, no GitHub. UDP / TCP / TLS / WS. (`drift-git-server` also has a no-tokio `--features portable` build on `drift-proto-std`.) | `cargo install --path drift-git --bins` |
 | **[drift](drift/src/main.rs)** | Core CLI — `keygen`, `info`, `listen`, `send`, `relay`, `bridge`. | `cargo install --path drift` |
 | **[drift-config](drift-config/README.md)** | Identity + inventory manager — one declarative `drift.toml` per host that every DRIFT tool reads. Eliminates manual pubkey cross-filling. | `cargo install --path drift-config` |
-| **[drift-wormhole](drift-wormhole/README.md)** | Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, no rendezvous server. | `cargo install --path drift-wormhole --bin drift-wormhole` |
+| **[drift-wormhole](drift-wormhole/README.md)** | Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, no rendezvous server. (Also a no-tokio `--features portable` build on `drift-proto-std`.) | `cargo install --path drift-wormhole --bin drift-wormhole` |
 | **[drift-ffi](drift-ffi/README.md)** | C ABI — call DRIFT from C, C++, Python, Go, Swift, anything. | `cargo build --release -p drift-ffi` |
 
 ## Workspace layout
 
 ```
-drift-core/      sans-io protocol engine (WASM-safe, no tokio, no I/O)
+drift-core/      protocol primitives — crypto, wire format, session state
+                   (WASM-safe, no tokio, no I/O)
   crypto.rs          X25519 DH, ChaCha20-Poly1305, SipHash cookies
   identity.rs        Keypairs, session key derivation, rekey KDF
   header.rs          36-byte long header, 18 packet types
@@ -217,7 +220,18 @@ drift-core/      sans-io protocol engine (WASM-safe, no tokio, no I/O)
                        (168 bytes) asserting OLD pubkey → NEW pubkey,
                        authenticated by XEdDSA from the OLD secret
 
-drift/           native tokio-based stack built on drift-core
+drift-proto/     sans-IO protocol engine (quinn-proto style): the per-peer
+                   state machine — handshake, DATA, cookies, rekey, Close,
+                   resumption — as bytes-in/bytes-out + explicit time, no
+                   sockets, no runtime. The single source of truth the tokio
+                   transport, the WASM build, and the Redox port all consume,
+                   so they stay byte-compatible by construction.
+drift-proto-std/ synchronous blocking driver for drift-proto over std::net —
+                   no tokio. `Connection` (request/response) + `Session`
+                   (full-duplex), tcp:// and udp://. Runs where tokio can't
+                   (Redox, no-async std targets). See its README.
+
+drift/           native tokio-based stack built on drift-core + drift-proto
   src/
     lib.rs           Transport re-exports
     main.rs          `drift` CLI (keygen, info, send, listen, relay, bridge)

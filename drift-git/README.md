@@ -111,6 +111,17 @@ DRIFT_GIT_BRIDGE_PUB=<hex>        Bridge's pubkey. Required when DRIFT_GIT_BRIDG
 - **Multi-transport.** The same `git push` URL works through any DRIFT wire — `drift+tls://` for HTTPS-only proxies, `drift+h2s://` for federation-grade HTTPS, `drift+webtransport://` for QUIC, `drift+onion://` for Tor. Pick the wire that survives the network you're on.
 - **Mobility.** Server's IP changes (laptop → coffee shop → home) and the URL stays the same identity — only the `@host:port` part needs updating.
 
+## Portable (no-tokio) build
+
+The default build is both binaries over the tokio transport (all wires, mesh/bridge routing). `drift-git-server` *also* has a no-tokio build on [`drift-proto-std`](../drift-proto-std), so the serving daemon runs where tokio can't (Redox, other no-async std targets):
+
+```bash
+cargo build -p drift-git                                          # native (default) — both binaries, all wires
+cargo build -p drift-git --no-default-features --features portable # portable drift-git-server only
+```
+
+The portable daemon drives the same handshake + `FRAME_DATA`/`FRAME_EOD` half-close tunnel over `drift-proto-std::Session` (sender + pump), spawning the same `git-upload-pack` / `git-receive-pack` subprocesses, ACL'd by peer id. Scope: **tcp-only**, and **not** wire-interoperable with the native StreamManager helper (raw DATA vs streams) — a portable helper would pair with it. The `git-remote-drift` helper stays native (`required-features`). The default build is unchanged.
+
 ## Limitations
 
 - ACL is a global allow-list, not per-repo. Per-repo + per-action (read vs write) ACL via TOML config is on the roadmap.

@@ -137,6 +137,17 @@ cd drift-wormhole/tests
 - **Short codeword UX.** A public DRIFT relay running a `code → pubkey` directory could give Magic-Wormhole-style "drift-wormhole recv 7-crossover-clockwork" UX without giving up the pubkey trust model. Out of scope for v1.
 - **Native compression.** zstd over the stream for typically-compressible payloads.
 
+## Portable (no-tokio) build
+
+The default build is the full async tool over the tokio transport — every wire (udp/tcp/ws/iroh), progress bars, contacts. A second build drops tokio entirely and runs on [`drift-proto-std`](../drift-proto-std), so it compiles where tokio can't (Redox, other no-async std targets):
+
+```bash
+cargo build -p drift-wormhole                                          # native (default) — all wires
+cargo build -p drift-wormhole --no-default-features --features portable # no tokio, tcp-only
+```
+
+Same `Header → bytes → Ack` protocol with SHA-256 verification, carried over `drift-proto-std::Connection`. Scope: **tcp-only**, and **not** wire-interoperable with the native build (native runs over DRIFT streams, portable over raw DATA) — portable talks to portable. The default build is unchanged.
+
 ## License
 
 MIT. See [`LICENSE`](../LICENSE).
