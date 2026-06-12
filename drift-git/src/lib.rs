@@ -17,6 +17,16 @@
 
 use anyhow::{anyhow, Result};
 
+// The serving daemon, in two flavors. `server.rs` (the bin) is a thin
+// dispatcher into one of these.
+#[cfg(feature = "native")]
+pub mod native_server;
+
+// Portable (no-tokio) serving daemon on drift_proto_std::Session.
+// Only compiled for the portable build; the helper stays native.
+#[cfg(all(feature = "portable", not(feature = "native")))]
+pub mod portable_server;
+
 // ─── URL parsing ──────────────────────────────────────────────────
 //
 // The user-facing URL we register with git is:

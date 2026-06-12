@@ -516,6 +516,13 @@ impl SessionSender {
         self.inner.close_when_idle();
     }
 
+    /// The remote peer id, once the session has established (set just
+    /// before the first DATA — so it is available inside a
+    /// [`Session::pump`] callback for, e.g., an ACL check).
+    pub fn peer(&self) -> Option<PeerId> {
+        *self.inner.peer.lock().unwrap()
+    }
+
     /// Whether the session has ended.
     pub fn is_done(&self) -> bool {
         self.inner.done.load(Ordering::SeqCst)
