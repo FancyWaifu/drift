@@ -4,26 +4,56 @@ version = "0.1.0"
 edition = "2021"
 description = "Git remote helper + serving daemon over DRIFT — git push drift://<peerhex>/repo"
 
+# Two builds from one source:
+#   default ("native") — both binaries (git-remote-drift helper +
+#     drift-git-server) over the tokio drift transport: every wire,
+#     mesh/bridge routing, ACL/config. What people install.
+#   "portable" — a synchronous drift-git-server on `drift-proto-std`
+#     (no tokio), so the serving daemon compiles and runs where tokio
+#     can't (Redox, other no-async std targets). tcp-only. The helper
+#     (git-remote-drift) is native-only for now (required-features).
+#     Build it: --no-default-features --features portable
+[features]
+default = ["native"]
+native = [
+    "dep:drift",
+    "dep:drift-core",
+    "dep:tokio",
+    "dep:toml",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+portable = ["dep:drift-proto-std"]
+
 [dependencies]
-drift = { path = "../drift" }
-drift-core = { path = "../drift-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "net", "sync", "fs", "signal"] }
+# Shared by both builds (lib.rs protocol layer + CLI).
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 hex = "0.4"
-toml = "0.8"
 serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
+
+# Native (async, tokio) path.
+drift = { path = "../drift", optional = true }
+drift-core = { path = "../drift-core", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "net", "sync", "fs", "signal"], optional = true }
+toml = { version = "0.8", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# Portable (sync, no tokio) path.
+drift-proto-std = { path = "../drift-proto-std", optional = true }
 
 [[bin]]
 name = "drift-git-server"
 path = "src/server.rs"
 
+# The remote helper stays native-only for now — it's not built in the
+# portable configuration.
 [[bin]]
 name = "git-remote-drift"
 path = "src/helper.rs"
+required-features = ["native"]
 
 [lib]
 path = "src/lib.rs"
