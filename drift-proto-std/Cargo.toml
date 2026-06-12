@@ -1,0 +1,8 @@
+[package]
+name = "drift-proto-std"
+version = "0.1.0"
+edition = "2021"
+description = "Synchronous, runtime-free std driver for the sans-IO DRIFT engine — blocking std::net I/O, native tcp:// framing. No tokio; compiles wherever std + drift-proto do (incl. Redox)."
+
+[dependencies]
+drift-proto = { path = "../drift-proto" }
