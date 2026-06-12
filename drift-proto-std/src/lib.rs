@@ -2,11 +2,22 @@
 //! sans-IO DRIFT engine ([`drift_proto::Endpoint`]).
 //!
 //! The engine is bytes-in/bytes-out with no sockets and no executor.
-//! This crate is the thin, **blocking** I/O shell that turns it into
-//! a usable client/server over `std::net::TcpStream`, using the same
-//! native `tcp://` 2-byte big-endian length framing as the tokio
-//! transport's TCP adapter — so a `drift-proto-std` peer talks to any
-//! native drift node directly.
+//! This crate is the thin, **blocking** I/O shell that turns it into a
+//! usable client/server over `std::net`, on two wires:
+//!
+//! - **`tcp://`** (default) — engine packets carried with the native
+//!   2-byte big-endian length framing, so a `drift-proto-std` peer
+//!   talks to any native drift `tcp://` node directly. Reliable.
+//! - **`udp://`** — one UDP datagram per engine packet. The handshake
+//!   is retransmitted, but DATA is **best-effort** (no reliability
+//!   layer here — that's the tokio transport's `StreamManager`). Use
+//!   it for the handshake + small/idempotent exchanges; use `tcp://`
+//!   for bulk/reliable transfer.
+//!
+//! Pass either scheme to [`Connection::connect`] / [`Session::connect`]
+//! (bare `host:port` = tcp); server-side, [`Connection::accept`] /
+//! [`Session::accept`] take a `TcpStream` and `*_udp` take a
+//! `UdpSocket`.
 //!
 //! It exists so portable tools (Redox, embedded-ish std targets, any
 //! place tokio won't build) don't each hand-roll the same framing +
@@ -51,7 +62,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -180,6 +191,168 @@ pub fn bind_retry(bind: &str, attempts: u32, gap: Duration) -> io::Result<std::n
     Err(last.unwrap_or_else(|| io::Error::other("bind_retry: no attempts")))
 }
 
+// ── wire: TCP (length-framed) or UDP (datagram) ──────────────────
+
+/// UDP receive buffer — larger than any engine packet (a PQ HELLO is
+/// ~1.3 KB).
+const UDP_BUF: usize = 4096;
+
+/// One synchronous end of an engine datagram channel.
+///
+/// - **TCP** carries engine packets with the native `tcp://` 2-byte
+///   length prefix; one connection = one peer.
+/// - **UDP** maps one datagram to one engine packet (no framing); the
+///   socket is *connected* to the peer, so it behaves like a pipe.
+///
+/// Reliability: the engine retransmits the *handshake* but not DATA,
+/// so over UDP, DATA is **best-effort** — fine for the handshake and
+/// small/idempotent exchanges, but use TCP for bulk/reliable transfer
+/// (there is no StreamManager-style reliability layer here).
+enum Wire {
+    Tcp {
+        stream: TcpStream,
+        reader: FrameReader,
+    },
+    Udp {
+        sock: UdpSocket,
+        /// First datagram already read while accepting a UDP peer (the
+        /// client's HELLO), replayed on the first `recv`.
+        pending: Option<Vec<u8>>,
+    },
+}
+
+/// Outcome of one [`Wire::recv`].
+enum WireEvent {
+    Datagram(Vec<u8>),
+    /// No complete datagram available right now (timeout / would-block).
+    Idle,
+    /// Stream EOF (TCP close). UDP has no clean EOF.
+    Closed,
+}
+
+impl Wire {
+    fn set_read_timeout(&self, d: Duration) -> io::Result<()> {
+        match self {
+            Wire::Tcp { stream, .. } => stream.set_read_timeout(Some(d)),
+            Wire::Udp { sock, .. } => sock.set_read_timeout(Some(d)),
+        }
+    }
+
+    /// A second handle to the same connection with fresh receive state
+    /// — used to split a [`Session`] into read/write halves.
+    fn try_clone(&self) -> io::Result<Wire> {
+        Ok(match self {
+            Wire::Tcp { stream, .. } => Wire::Tcp {
+                stream: stream.try_clone()?,
+                reader: FrameReader::new(),
+            },
+            Wire::Udp { sock, .. } => Wire::Udp {
+                sock: sock.try_clone()?,
+                pending: None,
+            },
+        })
+    }
+
+    fn recv(&mut self) -> io::Result<WireEvent> {
+        match self {
+            Wire::Tcp { stream, reader } => {
+                if let Some(f) = reader.next_frame() {
+                    return Ok(WireEvent::Datagram(f));
+                }
+                match reader.fill(stream)? {
+                    false => Ok(WireEvent::Closed),
+                    true => match reader.next_frame() {
+                        Some(f) => Ok(WireEvent::Datagram(f)),
+                        None => Ok(WireEvent::Idle),
+                    },
+                }
+            }
+            Wire::Udp { sock, pending } => {
+                if let Some(p) = pending.take() {
+                    return Ok(WireEvent::Datagram(p));
+                }
+                let mut buf = [0u8; UDP_BUF];
+                match sock.recv(&mut buf) {
+                    Ok(n) => Ok(WireEvent::Datagram(buf[..n].to_vec())),
+                    Err(e)
+                        if e.kind() == ErrorKind::WouldBlock
+                            || e.kind() == ErrorKind::TimedOut
+                            // a connected UDP socket can surface the
+                            // peer's ICMP port-unreachable as a reset;
+                            // treat it as benign idle, not a hard error.
+                            || e.kind() == ErrorKind::ConnectionReset =>
+                    {
+                        Ok(WireEvent::Idle)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+
+    fn send(&mut self, datagram: &[u8]) -> io::Result<()> {
+        match self {
+            Wire::Tcp { stream, .. } => write_packet(stream, datagram),
+            Wire::Udp { sock, .. } => sock.send(datagram).map(|_| ()),
+        }
+    }
+}
+
+/// Parse an optional `tcp://` / `udp://` scheme. Bare `host:port`
+/// defaults to TCP. Returns `(is_udp, host:port)`.
+fn split_wire_scheme(addr: &str) -> io::Result<(bool, &str)> {
+    if let Some(rest) = addr.strip_prefix("udp://") {
+        Ok((true, rest))
+    } else if let Some(rest) = addr.strip_prefix("tcp://") {
+        Ok((false, rest))
+    } else if addr.contains("://") {
+        Err(io::Error::other(format!(
+            "unsupported wire scheme in {addr:?} (drift-proto-std speaks tcp:// and udp://)"
+        )))
+    } else {
+        Ok((false, addr))
+    }
+}
+
+/// Dial `addr` (`tcp://`, `udp://`, or bare = tcp) into a connected wire.
+fn dial_wire(addr: &str) -> io::Result<Wire> {
+    let (udp, hostport) = split_wire_scheme(addr)?;
+    if udp {
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        sock.connect(hostport)?;
+        Ok(Wire::Udp {
+            sock,
+            pending: None,
+        })
+    } else {
+        Ok(Wire::Tcp {
+            stream: TcpStream::connect(hostport)?,
+            reader: FrameReader::new(),
+        })
+    }
+}
+
+/// Turn a bound `UdpSocket` into a server-side wire: block for the
+/// first client datagram, pin the socket to that peer, and stash the
+/// datagram for replay. UDP serves **one** peer per socket.
+fn udp_accept_wire(sock: UdpSocket) -> io::Result<Wire> {
+    let mut buf = [0u8; UDP_BUF];
+    let (n, src) = loop {
+        match sock.recv_from(&mut buf) {
+            Ok(x) => break x,
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                continue
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    sock.connect(src)?;
+    Ok(Wire::Udp {
+        sock,
+        pending: Some(buf[..n].to_vec()),
+    })
+}
+
 // ── Connection ───────────────────────────────────────────────────
 
 /// A single established (or establishing) DRIFT session over one TCP
@@ -193,8 +366,7 @@ pub fn bind_retry(bind: &str, attempts: u32, gap: Duration) -> io::Result<std::n
 /// drives the handshake and learns the peer id, so you can reply.
 pub struct Connection {
     ep: Endpoint,
-    stream: TcpStream,
-    reader: FrameReader,
+    wire: Wire,
     /// Known immediately on the client (from `connect`); learned on
     /// the server when the session establishes (first DATA).
     peer: Option<PeerId>,
@@ -206,12 +378,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn wrap(ep: Endpoint, stream: TcpStream, peer: Option<PeerId>) -> io::Result<Self> {
-        stream.set_read_timeout(Some(POLL_INTERVAL))?;
+    fn wrap(ep: Endpoint, wire: Wire, peer: Option<PeerId>) -> io::Result<Self> {
+        wire.set_read_timeout(POLL_INTERVAL)?;
         Ok(Self {
             ep,
-            stream,
-            reader: FrameReader::new(),
+            wire,
             peer,
             established: false,
             closed: false,
@@ -222,9 +393,11 @@ impl Connection {
     }
 
     /// Dial `addr` and start a session to the server identified by
-    /// `server_pub` (its 32-byte static public key). Returns as soon
-    /// as the HELLO is on the wire; the handshake finishes lazily on
-    /// the first [`send`](Self::send)/[`recv`](Self::recv). Use
+    /// `server_pub` (its 32-byte static public key). `addr` may carry
+    /// a `tcp://` or `udp://` scheme; bare `host:port` defaults to TCP.
+    /// Returns as soon as the HELLO is on the wire; the handshake
+    /// finishes lazily on the first [`send`](Self::send) /
+    /// [`recv`](Self::recv). Use
     /// [`wait_established`](Self::wait_established) to block for it.
     pub fn connect(
         addr: &str,
@@ -232,21 +405,37 @@ impl Connection {
         identity: Identity,
         config: Config,
     ) -> io::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
+        let wire = dial_wire(addr)?;
         let mut ep = Endpoint::new(identity, config);
         let peer = ep.connect(Instant::now(), server_pub, wire_addr());
-        let mut conn = Self::wrap(ep, stream, Some(peer))?;
+        let mut conn = Self::wrap(ep, wire, Some(peer))?;
         conn.flush()?; // emit the initial HELLO
         Ok(conn)
     }
 
-    /// Wrap an already-accepted inbound `stream` (from a
+    /// Wrap an already-accepted inbound TCP `stream` (from a
     /// [`std::net::TcpListener`]) as the responder. The peer id is
     /// unknown until the first [`recv`](Self::recv) completes the
     /// handshake.
     pub fn accept(stream: TcpStream, identity: Identity, config: Config) -> io::Result<Self> {
         let ep = Endpoint::new(identity, config);
-        Self::wrap(ep, stream, None)
+        Self::wrap(
+            ep,
+            Wire::Tcp {
+                stream,
+                reader: FrameReader::new(),
+            },
+            None,
+        )
+    }
+
+    /// Serve one peer over a bound `UdpSocket`: block for the first
+    /// client datagram, pin the socket to that peer, and respond. UDP
+    /// serves one peer per socket (the socket is `connect`ed to the
+    /// client), so bind a fresh one per peer.
+    pub fn accept_udp(sock: UdpSocket, identity: Identity, config: Config) -> io::Result<Self> {
+        let ep = Endpoint::new(identity, config);
+        Self::wrap(ep, udp_accept_wire(sock)?, None)
     }
 
     /// The remote peer id, once known (immediately on the client,
@@ -358,15 +547,22 @@ impl Connection {
     /// Returns `Ok(false)` on socket EOF.
     fn pump(&mut self) -> io::Result<bool> {
         self.flush()?;
-        if !self.reader.fill(&mut self.stream)? {
-            self.closed = true;
-            return Ok(false);
-        }
         let now = Instant::now();
-        while let Some(frame) = self.reader.next_frame() {
-            // A malformed/foreign datagram is dropped by the engine,
-            // not fatal to the session.
-            let _ = self.ep.handle_datagram(now, wire_addr(), &frame);
+        let mut eof = false;
+        // Drain every datagram available right now.
+        loop {
+            match self.wire.recv()? {
+                // A malformed/foreign datagram is dropped by the
+                // engine, not fatal to the session.
+                WireEvent::Datagram(dg) => {
+                    let _ = self.ep.handle_datagram(now, wire_addr(), &dg);
+                }
+                WireEvent::Idle => break,
+                WireEvent::Closed => {
+                    eof = true;
+                    break;
+                }
+            }
         }
         self.ep.handle_timeout(now);
         while let Some(ev) = self.ep.poll_event() {
@@ -381,12 +577,16 @@ impl Connection {
             }
         }
         self.flush()?; // push out HELLO_ACK / DATA / Close generated above
+        if eof {
+            self.closed = true;
+            return Ok(false);
+        }
         Ok(true)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         while let Some(t) = self.ep.poll_transmit() {
-            write_packet(&mut self.stream, &t.contents)?;
+            self.wire.send(&t.contents)?;
         }
         Ok(())
     }
@@ -425,14 +625,14 @@ impl Connection {
 /// ```
 pub struct Session {
     inner: Arc<SessionInner>,
-    /// Read half of the socket (a `try_clone`), owned by whoever runs
+    /// Read half of the wire (a `try_clone`), owned by whoever runs
     /// the receive [`pump`](Session::pump).
-    reader: TcpStream,
+    recv_wire: Wire,
 }
 
 struct SessionInner {
     ep: Mutex<Endpoint>,
-    sock: Mutex<TcpStream>, // write half
+    send: Mutex<Wire>, // write half
     peer: Mutex<Option<PeerId>>,
     established: AtomicBool,
     done: AtomicBool,
@@ -448,7 +648,7 @@ pub struct SessionSender {
 impl SessionInner {
     fn flush(&self) -> io::Result<()> {
         // Collect transmits under the engine lock, then write them
-        // under the socket lock — never hold both at once.
+        // under the wire lock — never hold both at once.
         let mut out = Vec::new();
         {
             let mut ep = self.ep.lock().unwrap();
@@ -456,9 +656,9 @@ impl SessionInner {
                 out.push(t.contents);
             }
         }
-        let mut sock = self.sock.lock().unwrap();
+        let mut wire = self.send.lock().unwrap();
         for c in out {
-            write_packet(&mut sock, &c)?;
+            wire.send(&c)?;
         }
         Ok(())
     }
@@ -530,40 +730,57 @@ impl SessionSender {
 }
 
 impl Session {
-    fn wrap(ep: Endpoint, stream: TcpStream, peer: Option<PeerId>) -> io::Result<Self> {
-        stream.set_read_timeout(Some(POLL_INTERVAL))?;
-        let reader = stream.try_clone()?;
+    fn wrap(ep: Endpoint, wire: Wire, peer: Option<PeerId>) -> io::Result<Self> {
+        wire.set_read_timeout(POLL_INTERVAL)?;
+        // The send half is a second handle to the same connection; the
+        // recv half (with any buffered/pending datagram) drives `pump`.
+        let send_half = wire.try_clone()?;
         Ok(Self {
             inner: Arc::new(SessionInner {
                 ep: Mutex::new(ep),
-                sock: Mutex::new(stream),
+                send: Mutex::new(send_half),
                 peer: Mutex::new(peer),
                 established: AtomicBool::new(false),
                 done: AtomicBool::new(false),
             }),
-            reader,
+            recv_wire: wire,
         })
     }
 
-    /// Dial `addr` and start a full-duplex session to `server_pub`.
+    /// Dial `addr` (`tcp://`, `udp://`, or bare = tcp) and start a
+    /// full-duplex session to `server_pub`.
     pub fn connect(
         addr: &str,
         server_pub: [u8; 32],
         identity: Identity,
         config: Config,
     ) -> io::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
+        let wire = dial_wire(addr)?;
         let mut ep = Endpoint::new(identity, config);
         let peer = ep.connect(Instant::now(), server_pub, wire_addr());
-        let s = Self::wrap(ep, stream, Some(peer))?;
+        let s = Self::wrap(ep, wire, Some(peer))?;
         s.inner.flush()?; // emit the initial HELLO
         Ok(s)
     }
 
-    /// Wrap an accepted inbound `stream` as the responder.
+    /// Wrap an accepted inbound TCP `stream` as the responder.
     pub fn accept(stream: TcpStream, identity: Identity, config: Config) -> io::Result<Self> {
         let ep = Endpoint::new(identity, config);
-        Self::wrap(ep, stream, None)
+        Self::wrap(
+            ep,
+            Wire::Tcp {
+                stream,
+                reader: FrameReader::new(),
+            },
+            None,
+        )
+    }
+
+    /// Serve one peer over a bound `UdpSocket` (one peer per socket;
+    /// see [`Connection::accept_udp`]).
+    pub fn accept_udp(sock: UdpSocket, identity: Identity, config: Config) -> io::Result<Self> {
+        let ep = Endpoint::new(identity, config);
+        Self::wrap(ep, udp_accept_wire(sock)?, None)
     }
 
     /// A cloneable transmit handle. Obtain it before
@@ -591,20 +808,31 @@ impl Session {
     /// socket ends, or a [`SessionSender::close`] marks it done.
     /// Transmit concurrently via a [`sender`](Self::sender).
     pub fn pump<F: FnMut(&[u8]) -> io::Result<()>>(self, mut on_data: F) -> io::Result<()> {
-        let Session { inner, mut reader } = self;
-        let mut fr = FrameReader::new();
+        let Session {
+            inner,
+            mut recv_wire,
+        } = self;
         while !inner.done.load(Ordering::SeqCst) {
             inner.flush()?;
-            match fr.fill(&mut reader) {
-                Ok(true) => {}
-                _ => break, // socket EOF
+            // Drain every datagram available right now into the engine.
+            let mut datagrams = Vec::new();
+            let mut eof = false;
+            loop {
+                match recv_wire.recv()? {
+                    WireEvent::Datagram(dg) => datagrams.push(dg),
+                    WireEvent::Idle => break,
+                    WireEvent::Closed => {
+                        eof = true;
+                        break;
+                    }
+                }
             }
             let now = Instant::now();
             let mut events = Vec::new();
             {
                 let mut ep = inner.ep.lock().unwrap();
-                while let Some(frame) = fr.next_frame() {
-                    let _ = ep.handle_datagram(now, wire_addr(), &frame);
+                for dg in &datagrams {
+                    let _ = ep.handle_datagram(now, wire_addr(), dg);
                 }
                 ep.handle_timeout(now);
                 while let Some(ev) = ep.poll_event() {
@@ -623,6 +851,9 @@ impl Session {
                         inner.done.store(true, Ordering::SeqCst);
                     }
                 }
+            }
+            if eof {
+                break;
             }
         }
         inner.done.store(true, Ordering::SeqCst);
@@ -792,5 +1023,36 @@ mod tests {
         sender.join().unwrap();
         srv.join().unwrap();
         assert_eq!(&*got.lock().unwrap(), b"pingpong");
+    }
+
+    /// The same PQ handshake + request/response, but over **UDP**
+    /// (`udp://` dial + `accept_udp`). Exercises the datagram wire and
+    /// the connected-socket server path.
+    #[test]
+    fn udp_loopback_request_response() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        let srv = thread::spawn(move || {
+            let mut conn = Connection::accept_udp(sock, server_id(), server_config()).unwrap();
+            let req = conn.recv().unwrap().expect("request datagram");
+            assert_eq!(&req, b"ping");
+            assert!(conn.peer().is_some());
+            conn.send(b"pong").unwrap();
+            // Flush is synchronous; the reply is on the wire before we
+            // return. Linger briefly so it isn't dropped on teardown.
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let mut conn = Connection::connect(
+            &format!("udp://{addr}"),
+            server_id().public_bytes(),
+            client_id(),
+            Config::default(),
+        )
+        .unwrap();
+        conn.send(b"ping").unwrap();
+        assert_eq!(conn.recv().unwrap().as_deref(), Some(&b"pong"[..]));
+        conn.close().unwrap();
+        srv.join().unwrap();
     }
 }
