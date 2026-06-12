@@ -4,33 +4,50 @@ version = "0.1.0"
 edition = "2021"
 description = "Magic-Wormhole-shaped file transfer over DRIFT — pubkey-addressed, end-to-end encrypted, no rendezvous server"
 
+# Two builds from one source:
+#   default ("native") — the full async tool over the tokio drift
+#     transport: every wire (udp/tcp/ws/iroh/…), progress bars,
+#     contacts. This is the binary people install.
+#   "portable" — a synchronous build on `drift-proto-std` (no tokio),
+#     so the tool compiles and runs where tokio can't (Redox, other
+#     no-async std targets). tcp-only. Same Header→bytes→Ack protocol,
+#     but carried over raw DRIFT DATA rather than streams, so it is
+#     NOT wire-interoperable with the native build (portable ↔ portable).
+#   Build it with: --no-default-features --features portable
+[features]
+default = ["native"]
+native = [
+    "dep:drift",
+    "dep:tokio",
+    "dep:indicatif",
+    "dep:humansize",
+    "dep:dirs",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+portable = ["dep:drift-proto-std"]
+
 [dependencies]
-drift = { path = "../drift" }
-tokio = { version = "1", features = ["full"] }
+# Shared by both builds.
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 hex = "0.4"
-
-# Protocol-message framing
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
-
-# Identity file: same shared location as drift-mosh / drift-http
-# (~/.config/drift/identity.key). dirs handles the per-OS path
-# resolution.
-dirs = "5"
+sha2 = "0.10"
 rand = "0.8"
 
-# Progress bars + readable byte sizes — the UX flair that
-# Magic Wormhole gets right.
-indicatif = "0.17"
-humansize = "2"
+# Native (async, tokio) path.
+drift = { path = "../drift", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+indicatif = { version = "0.17", optional = true }
+humansize = { version = "2", optional = true }
+dirs = { version = "5", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
-# SHA-256 for byte-fidelity verification on receive.
-sha2 = "0.10"
-
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Portable (sync, no tokio) path.
+drift-proto-std = { path = "../drift-proto-std", optional = true }
 
 [[bin]]
 name = "drift-wormhole"
