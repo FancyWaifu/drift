@@ -35,7 +35,10 @@ mod recv;
 #[cfg(feature = "native")]
 mod send;
 
-#[cfg(feature = "portable")]
+// Only when portable is the *selected* build (native off) — otherwise
+// `--all-features` would compile this module dead, since the native
+// `main` wins. Mirrors the gate on the portable `main` below.
+#[cfg(all(feature = "portable", not(feature = "native")))]
 mod portable;
 
 use anyhow::Result;
