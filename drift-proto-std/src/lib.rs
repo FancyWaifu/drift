@@ -52,6 +52,8 @@
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -390,6 +392,273 @@ impl Connection {
     }
 }
 
+// ── Session (full-duplex) ────────────────────────────────────────
+
+/// A full-duplex DRIFT session: data flows both directions at once,
+/// driven by two threads sharing one engine. Use this for interactive
+/// or streaming tools — a remote shell, a tunnel / port-forward, a
+/// chat — where you can't predict whose turn it is to talk. For
+/// request/response tools, [`Connection`] is simpler.
+///
+/// The engine is a single `&mut self` state machine, so it lives
+/// behind a mutex. [`SessionSender`] (from [`sender`](Session::sender))
+/// is a cloneable, `Send` handle any thread can transmit on, while
+/// [`pump`](Session::pump) runs the receive side on the current
+/// thread. [`pipe`](Session::pipe) wires both to ordinary
+/// [`Read`]/[`Write`] handles in one call.
+///
+/// # Example (the remote-shell shape)
+/// ```no_run
+/// use drift_proto_std::{Session, Config, Identity, server_config};
+/// use std::net::TcpListener;
+/// use std::process::{Command, Stdio};
+///
+/// // Server: pipe an engine session <-> /bin/sh.
+/// let listener = TcpListener::bind("127.0.0.1:9200").unwrap();
+/// let (stream, _) = listener.accept().unwrap();
+/// let mut sh = Command::new("/bin/sh")
+///     .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+/// let (sh_in, sh_out) = (sh.stdin.take().unwrap(), sh.stdout.take().unwrap());
+/// let session = Session::accept(stream, Identity::from_secret_bytes([0x5d; 32]), server_config()).unwrap();
+/// session.pipe(sh_out, sh_in).unwrap(); // sh stdout -> peer, peer -> sh stdin
+/// let _ = sh.kill();                     // release the detached reader thread
+/// ```
+pub struct Session {
+    inner: Arc<SessionInner>,
+    /// Read half of the socket (a `try_clone`), owned by whoever runs
+    /// the receive [`pump`](Session::pump).
+    reader: TcpStream,
+}
+
+struct SessionInner {
+    ep: Mutex<Endpoint>,
+    sock: Mutex<TcpStream>, // write half
+    peer: Mutex<Option<PeerId>>,
+    established: AtomicBool,
+    done: AtomicBool,
+}
+
+/// A cloneable, `Send` transmit handle for a [`Session`]. Any number
+/// of threads may hold one and [`send`](SessionSender::send) on it.
+#[derive(Clone)]
+pub struct SessionSender {
+    inner: Arc<SessionInner>,
+}
+
+impl SessionInner {
+    fn flush(&self) -> io::Result<()> {
+        // Collect transmits under the engine lock, then write them
+        // under the socket lock — never hold both at once.
+        let mut out = Vec::new();
+        {
+            let mut ep = self.ep.lock().unwrap();
+            while let Some(t) = ep.poll_transmit() {
+                out.push(t.contents);
+            }
+        }
+        let mut sock = self.sock.lock().unwrap();
+        for c in out {
+            write_packet(&mut sock, &c)?;
+        }
+        Ok(())
+    }
+
+    /// Send an authenticated Close once established, then mark done.
+    /// Tolerates a fast input EOF racing the handshake (`close` fails
+    /// until established) by retrying briefly.
+    fn close_when_idle(&self) {
+        for _ in 0..400 {
+            // ~10 s budget for the handshake to complete.
+            let peer = *self.peer.lock().unwrap();
+            if let Some(p) = peer {
+                if self.ep.lock().unwrap().close(&p).is_ok() {
+                    let _ = self.flush();
+                    break;
+                }
+            }
+            if self.done.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        self.done.store(true, Ordering::SeqCst);
+    }
+}
+
+impl SessionSender {
+    /// Transmit `data` (split across DATA datagrams if larger than
+    /// [`MAX_PAYLOAD`]). Blocks until the handshake establishes if it
+    /// hasn't yet — the input source may produce bytes first. Errors
+    /// once the session is closed.
+    pub fn send(&self, data: &[u8]) -> io::Result<()> {
+        let peer = loop {
+            if let Some(p) = *self.inner.peer.lock().unwrap() {
+                break p;
+            }
+            if self.inner.done.load(Ordering::SeqCst) {
+                return Err(io::Error::other("session closed before established"));
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        {
+            let mut ep = self.inner.ep.lock().unwrap();
+            for chunk in data.chunks(MAX_PAYLOAD) {
+                ep.send(Instant::now(), &peer, chunk, 0, 0)
+                    .map_err(|e| io::Error::other(format!("drift send: {e}")))?;
+            }
+        }
+        self.inner.flush()
+    }
+
+    /// Send an authenticated Close; ends the peer's
+    /// [`pump`](Session::pump).
+    pub fn close(&self) {
+        self.inner.close_when_idle();
+    }
+
+    /// Whether the session has ended.
+    pub fn is_done(&self) -> bool {
+        self.inner.done.load(Ordering::SeqCst)
+    }
+}
+
+impl Session {
+    fn wrap(ep: Endpoint, stream: TcpStream, peer: Option<PeerId>) -> io::Result<Self> {
+        stream.set_read_timeout(Some(POLL_INTERVAL))?;
+        let reader = stream.try_clone()?;
+        Ok(Self {
+            inner: Arc::new(SessionInner {
+                ep: Mutex::new(ep),
+                sock: Mutex::new(stream),
+                peer: Mutex::new(peer),
+                established: AtomicBool::new(false),
+                done: AtomicBool::new(false),
+            }),
+            reader,
+        })
+    }
+
+    /// Dial `addr` and start a full-duplex session to `server_pub`.
+    pub fn connect(
+        addr: &str,
+        server_pub: [u8; 32],
+        identity: Identity,
+        config: Config,
+    ) -> io::Result<Self> {
+        let stream = TcpStream::connect(addr)?;
+        let mut ep = Endpoint::new(identity, config);
+        let peer = ep.connect(Instant::now(), server_pub, wire_addr());
+        let s = Self::wrap(ep, stream, Some(peer))?;
+        s.inner.flush()?; // emit the initial HELLO
+        Ok(s)
+    }
+
+    /// Wrap an accepted inbound `stream` as the responder.
+    pub fn accept(stream: TcpStream, identity: Identity, config: Config) -> io::Result<Self> {
+        let ep = Endpoint::new(identity, config);
+        Self::wrap(ep, stream, None)
+    }
+
+    /// A cloneable transmit handle. Obtain it before
+    /// [`pump`](Self::pump) / [`pipe`](Self::pipe) consumes the
+    /// session.
+    pub fn sender(&self) -> SessionSender {
+        SessionSender {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// The remote peer id, once known.
+    pub fn peer(&self) -> Option<PeerId> {
+        *self.inner.peer.lock().unwrap()
+    }
+
+    /// Whether the session has reached `Established`.
+    pub fn is_established(&self) -> bool {
+        self.inner.established.load(Ordering::SeqCst)
+    }
+
+    /// Run the receive side on the current thread: read the socket,
+    /// drive the engine, and call `on_data` for each authenticated
+    /// DATA payload. Returns when the peer closes the session, the
+    /// socket ends, or a [`SessionSender::close`] marks it done.
+    /// Transmit concurrently via a [`sender`](Self::sender).
+    pub fn pump<F: FnMut(&[u8]) -> io::Result<()>>(self, mut on_data: F) -> io::Result<()> {
+        let Session { inner, mut reader } = self;
+        let mut fr = FrameReader::new();
+        while !inner.done.load(Ordering::SeqCst) {
+            inner.flush()?;
+            match fr.fill(&mut reader) {
+                Ok(true) => {}
+                _ => break, // socket EOF
+            }
+            let now = Instant::now();
+            let mut events = Vec::new();
+            {
+                let mut ep = inner.ep.lock().unwrap();
+                while let Some(frame) = fr.next_frame() {
+                    let _ = ep.handle_datagram(now, wire_addr(), &frame);
+                }
+                ep.handle_timeout(now);
+                while let Some(ev) = ep.poll_event() {
+                    events.push(ev);
+                }
+            }
+            inner.flush()?;
+            for ev in events {
+                match ev {
+                    Event::Connected { peer } => {
+                        *inner.peer.lock().unwrap() = Some(peer);
+                        inner.established.store(true, Ordering::SeqCst);
+                    }
+                    Event::Data { payload, .. } => on_data(&payload)?,
+                    Event::Closed { .. } | Event::HandshakeTimedOut { .. } => {
+                        inner.done.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        inner.done.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Full-duplex convenience: pipe `src` → the session and the
+    /// session → `dst`, each on its own thread, until the remote
+    /// closes (the receive side). The `src` reader thread is
+    /// **detached** — it ends when `src` hits EOF (which closes the
+    /// session) or the process exits. A server should drop/kill its
+    /// `src` (e.g. the child's stdout) after this returns to release
+    /// that thread.
+    pub fn pipe<R, W>(self, src: R, mut dst: W) -> io::Result<()>
+    where
+        R: Read + Send + 'static,
+        W: Write,
+    {
+        let tx = self.sender();
+        thread::spawn(move || {
+            let mut src = src;
+            let mut buf = [0u8; MAX_PAYLOAD];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        tx.close();
+                        return;
+                    }
+                    Ok(n) => {
+                        if tx.send(&buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        self.pump(move |data| {
+            dst.write_all(data)?;
+            dst.flush()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +739,51 @@ mod tests {
         conn.close().unwrap();
         let got = srv.join().unwrap();
         assert_eq!(got, payload);
+    }
+
+    /// Full-duplex: the server echoes (receive `pump` feeding its own
+    /// `sender`), the client transmits on a `sender` from one thread
+    /// while collecting echoes on `pump` in another — data crossing
+    /// both directions concurrently over one session.
+    #[test]
+    fn duplex_session_echo() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let session = Session::accept(stream, server_id(), server_config()).unwrap();
+            let echo = session.sender();
+            // Echo every received payload straight back.
+            session.pump(move |data| echo.send(data)).unwrap();
+        });
+
+        let session = Session::connect(
+            &addr.to_string(),
+            server_id().public_bytes(),
+            client_id(),
+            Config::default(),
+        )
+        .unwrap();
+        let tx = session.sender();
+        let sender = thread::spawn(move || {
+            tx.send(b"ping").unwrap();
+            thread::sleep(Duration::from_millis(150));
+            tx.send(b"pong").unwrap();
+            thread::sleep(Duration::from_millis(250));
+            tx.close();
+        });
+
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let collected = got.clone();
+        session
+            .pump(move |data| {
+                collected.lock().unwrap().extend_from_slice(data);
+                Ok(())
+            })
+            .unwrap();
+
+        sender.join().unwrap();
+        srv.join().unwrap();
+        assert_eq!(&*got.lock().unwrap(), b"pingpong");
     }
 }
