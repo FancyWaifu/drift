@@ -269,9 +269,12 @@ impl Connection {
     /// separate [`recv`](Self::recv). No message framing is added —
     /// layer your own if you need boundaries. Empty `data` is a no-op.
     pub fn send(&mut self, data: &[u8]) -> io::Result<()> {
-        let peer = self
-            .peer
-            .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "no peer yet (server must recv a request first)"))?;
+        let peer = self.peer.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotConnected,
+                "no peer yet (server must recv a request first)",
+            )
+        })?;
         let now = Instant::now();
         for chunk in data.chunks(MAX_PAYLOAD) {
             self.ep
@@ -291,7 +294,10 @@ impl Connection {
                 return Ok(Some(p));
             }
             if self.handshake_failed {
-                return Err(io::Error::new(ErrorKind::TimedOut, "drift handshake timed out"));
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "drift handshake timed out",
+                ));
             }
             if self.closed {
                 return Ok(None);
@@ -313,13 +319,22 @@ impl Connection {
         let deadline = Instant::now() + self.recv_timeout;
         while !self.established {
             if self.handshake_failed {
-                return Err(io::Error::new(ErrorKind::TimedOut, "drift handshake timed out"));
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "drift handshake timed out",
+                ));
             }
             if self.closed || !self.pump()? {
-                return Err(io::Error::new(ErrorKind::NotConnected, "closed before established"));
+                return Err(io::Error::new(
+                    ErrorKind::NotConnected,
+                    "closed before established",
+                ));
             }
             if Instant::now() > deadline {
-                return Err(io::Error::new(ErrorKind::TimedOut, "drift handshake timed out"));
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "drift handshake timed out",
+                ));
             }
         }
         Ok(())
